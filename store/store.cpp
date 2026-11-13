@@ -1,5 +1,7 @@
 #include "store/store.hpp"
 
+#include "crypto/ed25519.hpp"
+
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -113,6 +115,7 @@ Status parse_index(const std::string& text, const Source& src, Index* out) {
     const std::string* sh = str_of(p, "sha256");
     if (!sh || !is_hex64(*sh)) return bad(at + "sha256 must be 64 lowercase hex characters");
     k.sha256 = *sh;
+    if (const std::string* sg = str_of(p, "signature")) { if (sg->size() != 128 || sg->find_first_not_of("0123456789abcdef") != std::string::npos) return bad(at + "signature must be 128 lowercase hex characters"); k.signature = *sg; }
     const psn::Json* sz = p.get("size");
     if (!sz || !sz->is(psn::Json::T::Num) || sz->n < 1 || sz->n > 68719476736.0 || sz->n != static_cast<double>(static_cast<long long>(sz->n))) return bad(at + "size must be a whole number of bytes, 1 to 64 GiB");
     k.size = static_cast<long long>(sz->n);
@@ -151,8 +154,33 @@ Status Registry::load() {
     std::string sc, host;
     if (!id || !u || !r || !valid_source_id(*id) || !psn::url_host(*u, &sc, &host) || sc != "https") return Status::Fail(kErrIo, "store", "sources.json has an invalid entry; remove it to start over");
     for (auto& c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    sources_.push_back({*id, *u, *r, host});
+    const std::string* pk = str_of(o, "pubkey");
+    if (pk && (pk->size() != 64 || pk->find_first_not_of("0123456789abcdef") != std::string::npos)) return Status::Fail(kErrIo, "store", "sources.json has an invalid pubkey; remove it to start over");
+    sources_.push_back({*id, *u, *r, host, pk ? *pk : std::string()});
   }
+  return Status::Ok();
+}
+
+Status Registry::set_pubkey(const std::string& id, const std::string& hex) {
+  for (auto& s : sources_) if (s.id == id) {
+    if (!hex.empty() && (hex.size() != 64 || hex.find_first_not_of("0123456789abcdef") != std::string::npos)) return Status::Fail(kErrBadSource, "store", "public key must be 64 lowercase hex characters (32 bytes)");
+    s.pubkey = hex; return save();
+  }
+  return Status::Fail(kErrNoSource, "store", "no such source");
+}
+
+std::string signed_message(const std::string& source_id, const Package& p) {
+  return "pnr-store-v1\n" + source_id + "\n" + p.id + "\n" + p.version + "\n" + p.sha256 + "\n" + std::to_string(p.size) + "\n";
+}
+
+Status check_signature(const Source& s, const Package& p, std::string* mode) {
+  if (s.pubkey.empty()) { *mode = "unsigned (hash only)"; return Status::Ok(); }
+  if (p.signature.empty()) return Status::Fail(kErrSignature, "store", "source has a pinned key but this package carries no signature: refused");
+  std::string pk, sg;
+  if (!crypto::hex_decode(s.pubkey, &pk) || !crypto::hex_decode(p.signature, &sg) || pk.size() != 32 || sg.size() != 64) return Status::Fail(kErrSignature, "store", "malformed key or signature: refused");
+  const std::string m = signed_message(s.id, p);
+  if (!crypto::ed25519_verify(reinterpret_cast<const uint8_t*>(pk.data()), reinterpret_cast<const uint8_t*>(m.data()), m.size(), reinterpret_cast<const uint8_t*>(sg.data()))) return Status::Fail(kErrSignature, "store", "signature does not verify under the pinned key (package or index modified?): refused");
+  *mode = "signature verified (pinned key)";
   return Status::Ok();
 }
 
@@ -164,7 +192,7 @@ const Source* Registry::find(const std::string& id) const {
 Status Registry::save() {
   std::string o = "{\"sources\":[";
   for (size_t i = 0; i < sources_.size(); ++i)
-    o += std::string(i ? "," : "") + "{\"id\":\"" + esc(sources_[i].id) + "\",\"index_url\":\"" + esc(sources_[i].index_url) + "\",\"rights\":\"" + esc(sources_[i].rights) + "\"}";
+    o += std::string(i ? "," : "") + "{\"id\":\"" + esc(sources_[i].id) + "\",\"index_url\":\"" + esc(sources_[i].index_url) + "\",\"rights\":\"" + esc(sources_[i].rights) + "\"" + (sources_[i].pubkey.empty() ? std::string() : ",\"pubkey\":\"" + sources_[i].pubkey + "\"") + "}";
   o += "]}\n";
   return write_atomic(dir_ + "/sources.json", o);
 }
@@ -176,7 +204,7 @@ Status Registry::add(const std::string& id, const std::string& url, const std::s
   if (!clean_text(rights, 2000, false) || rights.find_first_not_of(" ") == std::string::npos) return Status::Fail(kErrBadSource, "store", "a rights statement is required (what you know about the source's right to distribute its content)");
   if (find(id)) return Status::Fail(kErrDuplicate, "store", "a source with that id already exists");
   for (auto& c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  sources_.push_back({id, url, rights, host});
+  sources_.push_back({id, url, rights, host, std::string()});
   Status s = save();
   if (!s) sources_.pop_back();
   return s;
