@@ -5,6 +5,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -18,6 +19,7 @@
 #include <filesystem>
 
 #include "psn/json.hpp"
+#include "sandbox/sandbox.hpp"
 
 namespace fs = std::filesystem;
 namespace pnr::ask {
@@ -154,13 +156,27 @@ Status run_needle(const std::string& needle_path, const std::string& prompt, con
   if (!printable(prompt, 500)) return fail("the question must be 1-500 printable characters");
   std::error_code ec;
   if (!fs::is_regular_file(needle_path, ec) || ::access(needle_path.c_str(), X_OK) != 0) return fail("PNR_NEEDLE does not point to an executable file");
-  char tmpl[] = "/tmp/pnr-ask-XXXXXX";
-  int tfd = ::mkstemp(tmpl);
-  if (tfd < 0) return fail("cannot create a temporary tools file");
-  const std::string tj = tools_json();
-  bool wrote = ::write(tfd, tj.data(), tj.size()) == static_cast<ssize_t>(tj.size()); ::close(tfd);
-  struct Rm { std::string p; ~Rm() { ::unlink(p.c_str()); } } rm{tmpl};
-  if (!wrote) return fail("cannot write the tools file");
+  char tmpl[] = "/tmp/pnr-ask-XXXXXX";   // a private directory holding the tools file (and, in sandbox mode, a copy of the executable)
+  if (!::mkdtemp(tmpl)) return fail("cannot create a temporary directory");
+  ::chmod(tmpl, 0700);
+  struct Rm { std::string p; ~Rm() { std::error_code e; fs::remove_all(p, e); } } rm{tmpl};
+  const std::string dir = tmpl, tools_path = dir + "/tools.json";
+  {
+    const std::string tj = tools_json();
+    int tfd = ::open(tools_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    bool wrote = tfd >= 0 && ::write(tfd, tj.data(), tj.size()) == static_cast<ssize_t>(tj.size());
+    if (tfd >= 0) ::close(tfd);
+    if (!wrote) return fail("cannot write the tools file");
+  }
+  std::string exe = needle_path;
+  if (opt.sandbox) {
+    auto sp = pnr::sandbox::probe();
+    if (!sp.usable()) return fail("the sandbox for the model program is not usable here (" + sp.notes + "); the model was NOT run");
+    exe = dir + "/needle";
+    std::error_code cec; fs::copy_file(needle_path, exe, fs::copy_options::overwrite_existing, cec);
+    if (cec) return fail("cannot copy the model program into its private directory");
+    ::chmod(exe.c_str(), 0500);
+  }
   int pipefd[2]; if (::pipe(pipefd) != 0) return fail("pipe failed");
   pid_t pid = ::fork();
   if (pid < 0) { ::close(pipefd[0]); ::close(pipefd[1]); return fail("fork failed"); }
@@ -170,9 +186,14 @@ Status run_needle(const std::string& needle_path, const std::string& prompt, con
     struct rlimit cpu{static_cast<rlim_t>(opt.timeout_seconds), static_cast<rlim_t>(opt.timeout_seconds)}; ::setrlimit(RLIMIT_CPU, &cpu);
     struct rlimit as{1ull << 30, 1ull << 30}; ::setrlimit(RLIMIT_AS, &as);
     ::setsid();
+    if (opt.sandbox) {
+      pnr::sandbox::Policy pol; pol.game_dir = dir;
+      std::string se;
+      if (!pnr::sandbox::enter(pol, &se)) _exit(126);
+    }
     char* envp[] = {const_cast<char*>("PATH=/usr/bin:/bin"), const_cast<char*>("LANG=C"), nullptr};
-    char* av[] = {const_cast<char*>(needle_path.c_str()), const_cast<char*>("--tools"), tmpl, const_cast<char*>("--prompt"), const_cast<char*>(prompt.c_str()), nullptr};
-    ::execve(needle_path.c_str(), av, envp);
+    char* av[] = {const_cast<char*>(exe.c_str()), const_cast<char*>("--tools"), const_cast<char*>(tools_path.c_str()), const_cast<char*>("--prompt"), const_cast<char*>(prompt.c_str()), nullptr};
+    ::execve(exe.c_str(), av, envp);
     _exit(127);
   }
   ::close(pipefd[1]);
@@ -190,6 +211,17 @@ Status run_needle(const std::string& needle_path, const std::string& prompt, con
   ::close(pipefd[0]);
   if (timed_out || too_big) ::kill(-pid, SIGKILL);
   int st = 0; while (::waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+  if ((timed_out || too_big) && opt.sandbox) {  // the killed sandbox parent could not remove its empty mountpoint dir: remove ours (empty, ours, created during this run), best effort
+    const auto cutoff = std::chrono::system_clock::now() - std::chrono::seconds(static_cast<long>(opt.timeout_seconds) + 60);
+    std::error_code lec;
+    for (fs::directory_iterator it("/tmp", lec), end; !lec && it != end; it.increment(lec)) {
+      const std::string nm = it->path().filename().string();
+      if (nm.rfind("pnr-sb-", 0) != 0) continue;
+      struct stat sb; if (::lstat(it->path().c_str(), &sb) != 0 || sb.st_uid != ::getuid() || !S_ISDIR(sb.st_mode)) continue;
+      if (std::chrono::system_clock::from_time_t(sb.st_mtime) < cutoff) continue;
+      ::rmdir(it->path().c_str());   // fails harmlessly if it is not empty
+    }
+  }
   if (timed_out) return fail("the model did not answer within " + std::to_string(opt.timeout_seconds) + " s and was stopped");
   if (too_big) return fail("the model produced too much output and was stopped");
   if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) return fail("the model program failed to run (exit " + std::to_string(WIFEXITED(st) ? WEXITSTATUS(st) : -1) + ")");
@@ -204,11 +236,11 @@ int cmd_ask(const std::string& prompt, const std::string& needle_path, double th
     return 2;
   }
   if (!(thr >= 0 && thr <= 1)) { *out += "ask: --threshold must be between 0 and 1\n"; return 1; }
-  std::string raw; Status ms = io.model ? io.model(prompt, &raw) : run_needle(needle_path, prompt, NeedleRun{}, &raw);
+  std::string raw; Status ms = io.model ? io.model(prompt, &raw) : run_needle(needle_path, prompt, NeedleRun{30, io.sandbox_model}, &raw);
   if (!ms) { *out += "NOT RUN: " + ms.error.message + "\n"; return 1; }
   Parsed p = interpret(raw, thr, lk);
   char cb[16]; std::snprintf(cb, sizeof cb, "%.2f", p.confidence);
-  *out += "model (experimental, uncalibrated): " + (p.tool.empty() ? std::string("no command") : p.tool) + ", confidence " + cb + ", threshold " + tb + "\n";
+  *out += "model (experimental, uncalibrated, " + std::string(io.sandbox_model ? "sandboxed" : "NOT sandboxed") + "): " + (p.tool.empty() ? std::string("no command") : p.tool) + ", confidence " + cb + ", threshold " + tb + "\n";
   if (p.verdict != Verdict::Accepted) {
     *out += std::string("NOT RUN: ") + verdict_name(p.verdict) + ": " + p.reason + "\n";
     if (p.args_ok && p.verdict == Verdict::LowConfidence) *out += "closest guess (not run): " + p.command() + "\n";
