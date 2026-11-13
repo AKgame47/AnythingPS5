@@ -101,7 +101,10 @@ unsupported", producing an informative error — never a fake load.
 
 - Jail root set at construction. Virtual paths start with `/` and resolve
   inside the root; `..` escaping the root, backslashes, and NULs are
-  rejected.
+  rejected. This is virtual path routing at the application level, not an
+  OS-enforced security sandbox: a binary calling the host directly bypasses
+  it. Trusted developer-built content only until Module 11 lands a real
+  boundary.
 - `resolve / write_file / read_file / exists / create_dirs`.
 
 ## IF-COMPAT-04 ThreadService (v1) — Implemented, Tested
@@ -116,7 +119,28 @@ Currently the loader and compat modules carry POSIX paths directly; the
 abstraction lands before the Windows build (P1 follow-up) so both OSes
 share one core.
 
-## IF-GRAPH-01 .. — Planned (Phase 2)
+## IF-GRAPH-01 VulkanBackend + SpirvModule (v1) — Implemented (first slice), Tested
+
+- `VulkanBackend::open()` dlopens the system Vulkan loader; a host without
+  one returns an honest error (graphics is Blocked there, never faked).
+- `create_instance()` enumerates real physical devices with
+  name/vendor/api/type (software Vulkan devices are labeled, not hidden).
+- `create_device()` picks a compute-capable queue family or fails honestly.
+- `run_compute_words(spirv, io)` runs a compute shader with one SSBO
+  (set 0 binding 0): buffer, host-coherent memory, shader module,
+  descriptors, pipeline, dispatch, fence, readback. Every stage reports
+  its own failure with the driver result code.
+- `SpirvModule::compute_write_u32(value)` emits a SPIR-V 1.0 module at
+  word level; validated externally (spirv-val when `PNR_SPIRV_VAL` is set)
+  and by real execution. The emitted interface follows Vulkan 1.0 rules
+  (BufferBlock SSBO; Uniform storage is not listed in OpEntryPoint).
+- Builds without the Vulkan SDK via `graphics/vulkan_shim.h` (declarations
+  taken from the official Khronos headers, Apache-2.0/MIT); define
+  `PNR_USE_SYSTEM_VULKAN` to build against the SDK instead - the test
+  suite passes identically both ways.
+- Planned, not built: render passes, swapchains, vertex/fragment stages,
+  texture/sampler objects.
+
 
 Game Rendering Interface → Graphics Compatibility Adapter → Intermediate
 Rendering Commands → Shader/Resource Translator → Vulkan Backend.
@@ -261,7 +285,9 @@ touches nothing in the library.
   `PNR_JAIL_ROOT=<game data dir>/jail` in the environment; the shim resolves
   its jail root from that variable (default `/tmp/pnr_psabi_default_jail`).
 - Shim file calls dispatch through `compat::FileSystemService` + `PsFileTable`,
-  so a guest stays inside its jail exactly like an emulated file table.
+  so the guest's sce file calls land inside its jail exactly like an emulated
+  file table. The guest's own direct host calls are NOT contained - see the
+  FileSystemService contract.
 - The CLI installs the same jail's file table into its classification registry
   before resolving imports, so the printed classification matches the real
   dispatch environment.
