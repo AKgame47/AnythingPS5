@@ -19,6 +19,10 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | ELF64 binary parser + validator (bounds-checked, specific errors) | Implemented, Tested |
 | Native loader: validated binaries executed in a supervised separate process | Implemented (Linux), Tested |
 | Compat services: memory, timing, jailed filesystem, threads | Implemented, Tested |
+| Host OS abstraction (IF-OS): Linux backend (CPU/memory/power/process launch) | Implemented (Linux), Tested |
+| `.pnrgame` package format: ustar + SHA-256 manifests, builder | Implemented, Tested |
+| Controlled importer: checksum verification, ELF validation, traversal protection, library registration | Implemented, Tested |
+| Game library metadata: SQLite store (games, installations, compatibility, launches) | Implemented, Tested |
 | CLI driving the full 10-step launch workflow with honest per-step results | Implemented, Tested |
 | Developer-controlled demo app running only on compat services | Implemented, Tested |
 | Vulkan graphics backend | Blocked in the dev sandbox (no GPU); Planned (Phase 2) |
@@ -28,8 +32,9 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**49/49 unit tests pass, 2/2 CTest suites pass** (unit + end-to-end native
-launch). No benchmarks exist yet; none are claimed.
+**80/80 unit tests pass, 3/3 CTest suites pass** (unit, end-to-end native
+launch, and full package workflow: build -> import -> list -> run imported
+game). No benchmarks exist yet; none are claimed.
 
 ## Build (Linux)
 
@@ -46,7 +51,17 @@ cd build
 ./pnr run ./pnr_test_app     # validate + natively execute the demo app
 ./pnr validate ./pnr_test_app
 ./pnr hwinfo
+
+# package workflow
+./pnr_make_package demo.pnrgame demo-game "PNR Demo Game" 0.1.0 bin/game bin/game=./pnr_test_app
+./pnr import demo.pnrgame    # verifies checksums + ELF, installs, registers
+./pnr games                  # library listing from SQLite
+./pnr run ./pnr_data/games/demo-game-0.1.0/bin/game
 ```
+
+Note: this sandbox has the SQLite runtime but no dev headers, so the repo
+carries a minimal API shim (`library/sqlite3_shim.h`). On a normal dev
+machine define `PNR_USE_SYSTEM_SQLITE3` and use the system header.
 
 `pnr run` prints the master workflow's ten steps with explicit
 SUCCESS / FAILED / BLOCKED / SKIPPED markers — a BLOCKED graphics step is
@@ -66,8 +81,12 @@ apps/        pnr CLI now; desktop launcher + diagnostics later
 core/        MODULE 01 - runtime, lifecycle, events, config, capabilities
 loader/      MODULE 02 - ELF parser (A), native loader (B), format adapters (C, planned)
 compat/      MODULE 03 - memory, timing, filesystem, thread services
+platform/    MODULE 07 - host OS abstraction, Linux backend (Windows planned)
+package/     .pnrgame format: ustar, SHA-256, importer
+library/     MODULE 09 - SQLite game/installation/compatibility/launch store
+tools/       pnr_make_package - dev package builder
 examples/    pnr_test_app - developer-controlled native demo "game"
-tests/       unit tests (no framework) + end-to-end CTest
+tests/       unit tests (no framework) + end-to-end CTest + package workflow
 docs/        architecture, feasibility, risk register, interface contracts
 ```
 
