@@ -26,6 +26,14 @@ target_link_libraries(pnr_loader PUBLIC pnr_core)
 add_library(pnr_compat compat/services.cpp)
 target_link_libraries(pnr_compat PUBLIC pnr_core)
 
+# MODULE 05 - adaptive performance engine (deterministic rules)
+add_library(pnr_ape ape/ape.cpp)
+target_link_libraries(pnr_ape PUBLIC pnr_core)
+
+# MODULE 06 - laptop optimization manager
+add_library(pnr_laptop laptop/laptop.cpp)
+target_link_libraries(pnr_laptop PUBLIC pnr_ape)
+
 # MODULE 07 - host OS abstraction (Linux + Windows backends)
 if(WIN32)
   add_library(pnr_platform platform/host_windows_stub.cpp)
@@ -72,7 +80,7 @@ target_link_libraries(pnr_package PUBLIC pnr_library)
 
 # CLI launcher (STEP 1-10 workflow driver)
 add_executable(pnr apps/pnr_cli.cpp)
-target_link_libraries(pnr PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform)
+target_link_libraries(pnr PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop)
 
 # Dev tooling: build .pnrgame packages
 add_executable(pnr_make_package tools/make_package.cpp)
@@ -84,7 +92,7 @@ target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
 add_executable(pnr_tests tests/test_main.cpp)
-target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform)
+target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop)
 
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
 # End-to-end: the CLI validates and natively runs the demo app.
