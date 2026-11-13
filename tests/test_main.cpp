@@ -1172,8 +1172,8 @@ int main() {
     reject(w, "dynamic: ALU SDWA rejected");
     w = kernel(0x25); w[8] = (0x08u<<25u) | (2u<<17u) | (3u<<9u) | 258u;
     reject(w, "dynamic: float ALU rejected");
-    w = kernel(0x25); w[5] = 0x007f0000; // load overwrites address v0
-    reject(w, "dynamic: runtime-dependent address rejected");
+    w = kernel(0x25); w[5] = 0x017f0000; // load overwrites high address v1
+    reject(w, "dynamic: runtime-dependent high address rejected");
     CHECK(SpirvModule::compute_u32({{U32Op::Add,0,0}}).empty(),
           "dynamic: emitter rejects forward SSA references");
     CHECK(SpirvModule::compute_u32({{U32Op::Constant,1}, {U32Op::Store,0},
@@ -1351,6 +1351,102 @@ int main() {
           CHECK(edge.ok && run && clean,"bounds: last binding word and max aligned FLAT offset execute");
         }
       } else CHECK(false,"bounds: physical device available");
+    }
+  }
+
+
+  // --- Runtime low-address indexing: guarded load/store, never raw OOB ---
+  {
+    using namespace pnr::shader;
+    using namespace pnr::graphics;
+    constexpr uint64_t base=0x1200001000ull;
+    // Runtime address fetched from buf[0] into v4, high word v5=0x12.
+    const std::vector<uint32_t> prefix={0x7e0002ff,0x1000,0x7e0202ff,0x12,
+      0xdc300000,0x047f0000,0x7e0a02ff,0x12};
+    auto load_code=prefix;
+    load_code.insert(load_code.end(),{0xdc300000,0x027f0004,
+      0xdc70000c,0x007f0200,0xbf810000});
+    auto store_code=prefix;
+    store_code.insert(store_code.end(),{0xdc300004,0x027f0000,
+      0xdc700000,0x007f0204,0xbf810000});
+    auto both_code=prefix;
+    both_code.insert(both_code.end(),{0xdc300000,0x027f0004,
+      (0x25u<<25u)|(2u<<17u)|(2u<<9u)|129u,
+      0xdc700000,0x007f0204,0xbf810000});
+    auto alu_address_code=load_code;
+    alu_address_code.insert(alu_address_code.begin()+8,
+      (0x25u<<25u)|(4u<<17u)|(4u<<9u)|132u); // v4 += inline 4
+    std::vector<ComputeTranslation> modules;
+    for(const auto* code : {&load_code,&store_code,&both_code,&alu_address_code}) {
+      auto t=translate_compute_words(*code,base,8);
+      CHECK(t.ok && t.guarded_memory && !t.stored_value_known,
+            "guards: runtime-indexed module compiles with honest metadata");
+      bool selection=false, branch=false;
+      for(size_t i=5;i<t.spirv.size();) {
+        selection |= (t.spirv[i]&65535)==247;
+        branch |= (t.spirv[i]&65535)==250;
+        if(!(t.spirv[i]>>16u))break;
+        i+=t.spirv[i]>>16u;
+      }
+      CHECK(selection && branch,"guards: structured selection and conditional branch emitted");
+      const char* val=std::getenv("PNR_SPIRV_VAL");
+      if(val && std::filesystem::exists(val)) {
+        const std::string path="/tmp/pnr_guards_"+std::to_string(::getpid())+".spv";
+        {std::ofstream o(path,std::ios::binary);o.write(reinterpret_cast<const char*>(t.spirv.data()),t.spirv.size()*4);}
+        CHECK(std::system((std::string(val)+" --target-env vulkan1.0 "+path).c_str())==0,
+              "guards: structured guarded SPIR-V validates for Vulkan 1.0");
+        std::filesystem::remove(path);
+      } else std::puts("    note: guards spirv-val skipped (not configured)");
+      modules.push_back(t);
+    }
+    auto reject=[&](std::vector<uint32_t> w,uint64_t b,uint32_t n,const char* label) {
+      auto t=translate_compute_words(w,b,n);
+      CHECK(!t.ok && t.spirv.empty(),label);
+    };
+    auto w=store_code;w[7]=0x13;
+    reject(w,base,8,"guards: mismatched constant address high rejected");
+    w=store_code;w[7]=0x12;w[1]=0xfffffffc;
+    reject(w,0x12fffffffcull,2,"guards: crossing 32-bit boundary binding rejected");
+    w=store_code;w[10]|=4;
+    reject(w,base,8,"guards: dynamic pointer plus immediate offset rejected");
+    w=load_code;w[8]|=4;
+    reject(w,base,8,"guards: dynamic load offset rejected");
+    w=load_code;w[9]=0x027f00ff;
+    reject(w,base,8,"guards: runtime address pair overflow rejected");
+    CHECK(SpirvModule::compute_u32({{U32Op::GuardedLoad,0}},8,0x1000).empty(),
+          "guards: missing runtime address IR value rejected");
+    CHECK(SpirvModule::compute_u32({{U32Op::Constant,0x1000},
+      {U32Op::GuardedStore,1,0}},8,0x1000).empty(),
+          "guards: forward store data IR rejected");
+    CHECK(SpirvModule::compute_u32({{U32Op::Constant,0},
+      {U32Op::GuardedLoad,0}},2,0xfffffffc).empty(),
+          "guards: emitter rejects crossing 32-bit boundary");
+    VulkanBackend vk;auto st=vk.open();
+    if(!st)std::printf("    note: guard execution skipped: %s\n",st.error.message.c_str());
+    else {
+      st=vk.create_instance("pnr-guard-tests");CHECK(st,"guards: Vulkan instance created");
+      if(st && !vk.devices().empty()) {
+        st=vk.create_device(0);CHECK(st,"guards: compute device created");
+        if(st)for(size_t k=0;k<modules.size();++k) {
+          // Same compiled shader for valid first/middle/last, below-base,
+          // one-past, misaligned, huge/wrapped-looking runtime addresses.
+          for(uint32_t addr:{0x1000u,0x1004u,0x101cu,0xffcu,0x1020u,
+                            0x1001u,0x101du,0u,0xffffffffu}) {
+            std::vector<uint32_t> io={addr,0x12345678,0xaaaa5555,0x87654321,
+                                     0x01020304,0xfeedface,0xdeadbeef,0xcafebabe};
+            auto expected=io;
+            const uint32_t effective=k==3 ? uint32_t(addr+4) : addr;
+            const bool valid=effective>=0x1000 && effective<=0x101c && effective%4==0;
+            const uint32_t index=valid ? (effective-0x1000)/4 : 0;
+            if(k==0 || k==3)expected[3]=valid?io[index]:0;
+            if(k==1 && valid)expected[index]=io[1];
+            if(k==2 && valid)expected[index]=io[index]+1;
+            auto run=run_translated_compute(vk,modules[k],&io);
+            CHECK(run && io==expected,
+                  "guards: runtime load=zero/store=skip for invalid index, all other words exact");
+          }
+        }
+      }else CHECK(false,"guards: physical device available");
     }
   }
 
