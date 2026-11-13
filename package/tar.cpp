@@ -68,10 +68,18 @@ Status tar_write(const std::string& out_path,
   return Status::Ok();
 }
 
+static Status Fail_entry_beyond_file() {
+  return Status::Fail(60, "pkg.tar", "entry size exceeds the archive file (truncated or hostile header)");
+}
+
 Status tar_read(const std::string& in_path, std::vector<TarEntry>& out) {
   std::ifstream in(in_path, std::ios::binary);
   if (!in) return Status::Fail(54, "pkg.tar", "cannot open for read: " + in_path);
   out.clear();
+  in.seekg(0, std::ios::end);
+  const std::streamoff file_len = in.tellg();
+  in.seekg(0, std::ios::beg);
+  if (file_len < 0) return Status::Fail(54, "pkg.tar", "cannot size: " + in_path);
   for (;;) {
     char hdr[512];
     in.read(hdr, sizeof(hdr));
@@ -99,6 +107,10 @@ Status tar_read(const std::string& in_path, std::vector<TarEntry>& out) {
     uint64_t size = strtoull(sizebuf, nullptr, 8);
     if (size > (1ull << 32))
       return Status::Fail(57, "pkg.tar", "entry unreasonably large");
+    // Never allocate more than the file can actually hold (a 1 KB file that
+    // claims a 4 GB entry must fail fast, not allocate).
+    if (static_cast<std::streamoff>(size) > file_len - in.tellg())
+      return Fail_entry_beyond_file();
     const char type = hdr[156];
 
     std::string name(hdr, strnlen(hdr, 100));
