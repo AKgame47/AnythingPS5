@@ -31,6 +31,12 @@ ParseResult NativeLoader::validate(const std::string& path) {
 
 LaunchResult NativeLoader::launch(const std::string& path,
                                   const std::vector<std::string>& args) {
+  return launch(path, args, {});
+}
+
+LaunchResult NativeLoader::launch(const std::string& path,
+                                  const std::vector<std::string>& args,
+                                  const std::vector<std::string>& env) {
   LaunchResult out;
 
   ParseResult v = validate(path);
@@ -54,7 +60,12 @@ LaunchResult NativeLoader::launch(const std::string& path,
     return out;
   }
   if (pid == 0) {
-    // Child: build argv and exec. On failure, exit 127 (shell convention).
+    // Child: apply extra env, build argv and exec. On failure, exit 127.
+    for (const auto& kv : env) {
+      const auto eq = kv.find('=');
+      if (eq != std::string::npos && eq > 0)
+        ::setenv(kv.substr(0, eq).c_str(), kv.substr(eq + 1).c_str(), 1);
+    }
     std::vector<char*> argv;
     argv.push_back(const_cast<char*>(path.c_str()));
     for (auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
