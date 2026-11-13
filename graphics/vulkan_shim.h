@@ -149,6 +149,9 @@ typedef struct VkDescriptorSetLayoutCreateInfo {
   VkStructureType sType; const void* pNext; VkFlags flags;
   uint32_t bindingCount; const VkDescriptorSetLayoutBinding* pBindings;
 } VkDescriptorSetLayoutCreateInfo;
+typedef struct VkPushConstantRange {
+  VkFlags stageFlags; uint32_t offset; uint32_t size;
+} VkPushConstantRange;
 typedef struct VkPipelineLayoutCreateInfo {
   VkStructureType sType; const void* pNext; VkFlags flags;
   uint32_t setLayoutCount; const VkDescriptorSetLayout* pSetLayouts;
