@@ -58,6 +58,28 @@ static Status migrate_installations(sqlite3* h) {
   return Status::Ok();
 }
 
+// Older databases predate the human_set mark; add it once (default 0 = automatic).
+static Status migrate_compatibility(sqlite3* h) {
+  sqlite3_stmt* st = nullptr;
+  if (sqlite3_prepare_v2(h, "PRAGMA table_info(compatibility)", -1, &st, nullptr) != SQLITE_OK)
+    return Status::Fail(93, "library.db", "compat schema probe failed");
+  bool has = false;
+  while (sqlite3_step(st) == SQLITE_ROW) {
+    const char* n = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
+    if (n && std::strcmp(n, "human_set") == 0) has = true;
+  }
+  sqlite3_finalize(st);
+  if (has) return Status::Ok();
+  sqlite3_stmt* a = nullptr;
+  if (sqlite3_prepare_v2(h, "ALTER TABLE compatibility ADD COLUMN human_set INTEGER NOT NULL DEFAULT 0",
+                         -1, &a, nullptr) != SQLITE_OK)
+    return Status::Fail(94, "library.db", "compat migration failed");
+  const int rc = sqlite3_step(a);
+  sqlite3_finalize(a);
+  if (rc != SQLITE_DONE) return Status::Fail(95, "library.db", "compat migration step failed");
+  return Status::Ok();
+}
+
 Status GameDb::open(const std::string& path) {
   close();
   // Ensure the parent directory exists so SQLite can create the file.
@@ -90,7 +112,9 @@ Status GameDb::open(const std::string& path) {
       "schema");
     if (!st) return st;
   }
-  return migrate_installations(db_->h);
+  auto mst = migrate_installations(db_->h);
+  if (!mst) return mst;
+  return migrate_compatibility(db_->h);
 }
 
 void GameDb::close() {
@@ -205,13 +229,50 @@ std::optional<InstallationRecord> GameDb::get_installation(
 }
 
 Status GameDb::set_compatibility(const CompatibilityRecord& c) {
-  Stmt s(db_->h, "INSERT OR REPLACE INTO compatibility(game_id,state,notes)"
-                 " VALUES(?,?,?)");
+  Stmt s(db_->h, "INSERT OR REPLACE INTO compatibility(game_id,state,notes,human_set)"
+                 " VALUES(?,?,?,0)");
   if (!s.ok()) return sql_status(s.rc(), db_->h, "set_compat prepare");
   s.bind_text(1, c.game_id);
   s.bind_text(2, c.state);
   s.bind_text(3, c.notes);
   return s.run(db_->h, "set_compat");
+}
+
+Status GameDb::set_compatibility_human(const CompatibilityRecord& c) {
+  Stmt s(db_->h, "INSERT OR REPLACE INTO compatibility(game_id,state,notes,human_set)"
+                 " VALUES(?,?,?,1)");
+  if (!s.ok()) return sql_status(s.rc(), db_->h, "set_compat_human prepare");
+  s.bind_text(1, c.game_id);
+  s.bind_text(2, c.state);
+  s.bind_text(3, c.notes);
+  return s.run(db_->h, "set_compat_human");
+}
+
+bool GameDb::compat_is_human_set(const std::string& game_id) {
+  Stmt s(db_->h, "SELECT human_set FROM compatibility WHERE game_id=?");
+  if (!s.ok()) return false;
+  s.bind_text(1, game_id);
+  if (!s.step_row()) return false;
+  return s.integer(0) != 0;
+}
+
+std::vector<LaunchRow> GameDb::launch_history(const std::string& game_id, int limit) {
+  std::vector<LaunchRow> out;
+  if (limit < 1) limit = 1;
+  if (limit > 1000) limit = 1000;
+  Stmt s(db_->h, "SELECT exit_code,wall_seconds,at FROM launches WHERE game_id=?"
+                 " ORDER BY id DESC LIMIT ?");
+  if (!s.ok()) return out;
+  s.bind_text(1, game_id);
+  s.bind_int(2, limit);
+  while (s.step_row()) {
+    LaunchRow r;
+    r.exit_code = static_cast<int>(s.integer(0));
+    r.wall_seconds = sqlite3_column_double(s.raw(), 1);
+    r.at = sqlite3_column_double(s.raw(), 2);
+    out.push_back(r);
+  }
+  return out;
 }
 
 std::optional<CompatibilityRecord> GameDb::get_compatibility(
