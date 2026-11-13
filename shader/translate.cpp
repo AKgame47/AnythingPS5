@@ -1,5 +1,6 @@
 #include "shader/translate.hpp"
 #include "shader/rdna.hpp"
+#include "shader/loop_memory.hpp"
 #include "graphics/spirv.hpp"
 #include "graphics/vulkan.hpp"
 #include <array>
@@ -54,7 +55,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   struct Compare { uint32_t a,b; };
   Compare scc{};bool scc_defined=false;
   uint32_t carry_flag=0;bool carry_defined=false;
-  bool looped=false;uint32_t loop_count_uniform=16;
+  bool memory_loop=false;bool looped=false;uint32_t loop_count_uniform=16;
   bool merge_active=false;
   uint32_t merge_pc=0;
   std::array<std::optional<Reg>,256> before_branch{};
@@ -65,6 +66,82 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
     const auto& i=d.instructions[ip];
     const auto at = " at pc=" + std::to_string(i.pc);
     if (ended) return fail("instructions after s_endpgm" + at);
+    // Strict counted copy body: load, store, two pointer increments,
+    // scalar decrement/equality and backward branch. Prove BOTH axes.
+    if(i.family==RdnaFamily::SOP1 && i.opcode_id==3 && ip+7<d.instructions.size() &&
+       d.instructions[ip+7].family==RdnaFamily::SOPP &&
+       d.instructions[ip+7].opcode_id==4 && d.instructions[ip+7].simm<0) {
+      const auto& ld=d.instructions[ip+1];const auto& st=d.instructions[ip+2];
+      const auto& sa=d.instructions[ip+3];const auto& da=d.instructions[ip+4];
+      const auto& dec=d.instructions[ip+5];const auto& cmp=d.instructions[ip+6];
+      const auto& jump=d.instructions[ip+7];
+      auto isreg=[](const RdnaOperand& o,RdnaOperandKind kind,uint32_t reg){return o.kind==kind && o.reg==reg;};
+      auto literal=[](const RdnaOperand& o,uint32_t v){return
+        (o.kind==RdnaOperandKind::InlineIntConst || o.kind==RdnaOperandKind::LiteralConst) && o.value==v;};
+      auto increment=[&](const RdnaInstruction& a,uint32_t reg){return
+        a.family==RdnaFamily::VOP2 && a.opcode_id==0x25 &&
+        isreg(a.dst,RdnaOperandKind::VectorReg,reg) && isreg(a.src1,RdnaOperandKind::VectorReg,reg) &&
+        (a.src0.kind==RdnaOperandKind::InlineIntConst || a.src0.kind==RdnaOperandKind::LiteralConst);};
+      const auto trip=source(i.src0);
+      if(looped || conditional || merge_active || stored || i.dst.kind!=RdnaOperandKind::ScalarReg ||
+         !trip || (!trip->constant && !trip->uniform_input) ||
+         (trip->constant && (!*trip->constant || *trip->constant>64)) ||
+         ld.family!=RdnaFamily::FLAT || ld.opcode_id!=0x0c || ld.memory_addr>=255 ||
+         st.family!=RdnaFamily::FLAT || st.opcode_id!=0x1c || st.memory_addr>=255 ||
+         (ld.raw0 & ~0x7ffu)!=0xdc300000 || (ld.raw1 & 0x00ffff00u)!=0x007f0000u ||
+         (st.raw0 & ~0x7ffu)!=0xdc700000 || (st.raw1 & 0xffff0000u)!=0x007f0000u ||
+         st.memory_data!=ld.dst.reg || ld.memory_addr==st.memory_addr ||
+         ld.dst.reg==ld.memory_addr || ld.dst.reg==ld.memory_addr+1 ||
+         ld.dst.reg==st.memory_addr || ld.dst.reg==st.memory_addr+1 ||
+         ld.memory_addr==st.memory_addr+1 || st.memory_addr==ld.memory_addr+1 ||
+         !increment(sa,ld.memory_addr) || !increment(da,st.memory_addr) ||
+         dec.family!=RdnaFamily::SOP2 || dec.opcode_id!=1 ||
+         !isreg(dec.dst,RdnaOperandKind::ScalarReg,i.dst.reg) ||
+         !isreg(dec.src0,RdnaOperandKind::ScalarReg,i.dst.reg) || !literal(dec.src1,1) ||
+         cmp.family!=RdnaFamily::SOPC || cmp.opcode_id!=6 ||
+         !isreg(cmp.src0,RdnaOperandKind::ScalarReg,i.dst.reg) || !literal(cmp.src1,0) || jump.branch_target!=ld.pc)
+        return fail("unsupported counted memory-loop shape/control"+at);
+      const auto src=regs[ld.memory_addr],dst=regs[st.memory_addr];
+      const auto sh=regs[ld.memory_addr+1],dh=regs[st.memory_addr+1];
+      const uint32_t count=trip->constant.value_or(64);
+      if(!src || !dst || !src->origin || !src->stride || !dst->origin || !dst->stride ||
+         !sh || !dh || !sh->constant || !dh->constant ||
+         *sh->constant!=uint32_t(base>>32u) || *dh->constant!=uint32_t(base>>32u) ||
+         uint64_t(uint32_t(base))+size>0x100000000ull)
+        return fail("memory loop needs proven affine low pointers and constant binding high"+at);
+      const uint64_t sr=uint64_t(*src->origin)+ld.memory_offset,dr=uint64_t(*dst->origin)+st.memory_offset;
+      if(sr<uint32_t(base) || dr<uint32_t(base) ||
+         uint64_t(*src->origin)+uint64_t(*src->stride)*(local_size_x-1)+uint64_t(sa.src0.value)*count>UINT32_MAX ||
+         uint64_t(*dst->origin)+uint64_t(*dst->stride)*(local_size_x-1)+uint64_t(da.src0.value)*count>UINT32_MAX)
+        return fail("memory-loop pointer increment wraps/below-base"+at);
+      std::vector<LoopMemoryAccess> maps={{false,sr-uint32_t(base),*src->stride,sa.src0.value},
+                                        {true,dr-uint32_t(base),*dst->stride,da.src0.value}};
+      const auto proof=prove_loop_memory(maps,buffer_words,local_size_x,count);
+      if(!proof.ok)return fail("memory-loop proof: "+proof.error+at);
+      const uint64_t writelast=dr+uint64_t(*dst->stride)*(local_size_x-1)+uint64_t(da.src0.value)*(count-1);
+      for(const auto& read:reads)if(read.first<=writelast && dr<=read.last)
+        return fail("memory-loop output overlaps earlier read envelope"+at);
+      // Internal disjointness already proven exactly; keep its read envelope
+      // separate from the older parallel straight-line alias check.
+      writes=Range{dr,writelast};
+      uint32_t countarg=count,mode=0;
+      if(!trip->constant){loop_count_uniform=*trip->uniform_input;countarg=trip->node;mode=1;}
+      nodes.push_back({U32Op::LoopCopy,src->node,dst->node,countarg,mode,
+                       sa.src0.value,da.src0.value,ld.memory_offset,st.memory_offset});
+      const auto loop=uint32_t(nodes.size()-1);
+      regs[ld.dst.reg]=Reg{loop,{}};
+      for(bool sourceptr:{true,false}) {
+        const auto prior=sourceptr?src:dst;const uint32_t step=sourceptr?sa.src0.value:da.src0.value;
+        nodes.push_back({sourceptr?U32Op::LoopCopySource:U32Op::LoopCopyDest,loop});
+        Reg after{uint32_t(nodes.size()-1),{}};
+        if(trip->constant){after.origin=*prior->origin+step*count;after.stride=prior->stride;
+          if(prior->constant)after.constant=*prior->constant+step*count;}
+        regs[sourceptr?ld.memory_addr:st.memory_addr]=after;
+      }
+      nodes.push_back({U32Op::Constant,0});const auto zero=uint32_t(nodes.size()-1);
+      sregs[i.dst.reg]=Reg{zero,0,0,0};scc=Compare{zero,zero};scc_defined=true;carry_defined=false;
+      looped=true;stored=true;guarded=true;memory_loop=true;value={};ip+=7;continue;
+    }
     // Recognize exactly: constant scalar init; vector accumulator add;
     // scalar decrement by one; compare counter==0; SCC0 backward branch.
     // No general backedge recovery, body effects or dynamic count guessing.
@@ -282,6 +359,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
     if(read.first<=writes->last && writes->first<=read.last)
       return fail("multi-invocation load/output ranges overlap; barriers not supported");
   ComputeTranslation r;
+  r.loop_memory=memory_loop;
   r.loop_count_uniform=loop_count_uniform;
   r.structured_loop=looped;
   r.full64_pointers=full64;
