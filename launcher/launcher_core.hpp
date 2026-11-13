@@ -5,6 +5,7 @@
 // top of this API later. Status: Implemented, Tested (headless).
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -157,6 +158,8 @@ public:
   // caller already supplied those variables in env.
   // A clean exit (0) moves Untested -> Launches Only; nothing else changes
   // compatibility, and no state ever claims playability.
+  // Hook run in the game's forked child before exec (the sandbox uses it).
+  void set_child_setup(std::function<bool(std::string*)> f) { child_setup_ = std::move(f); }
   LaunchOutcome launch(const std::string& game_id,
                        const std::vector<std::string>& args = {},
                        const std::vector<std::string>& env = {});
@@ -200,6 +203,7 @@ private:
   library::GameDb db_;
   std::string root_;  // library directory (parent of the db file)
   bool open_ = false;
+  std::function<bool(std::string*)> child_setup_;
   std::string jail_root_;  // <library dir>/jail; each game gets <jail_root_>/<game_id>
 };
 
