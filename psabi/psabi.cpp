@@ -29,6 +29,7 @@
 #include "graphics/demo/spin_shaders.hpp"
 #include "graphics/demo/clip_shaders.hpp"
 #include "graphics/demo/lit_shaders.hpp"
+#include "graphics/demo/tex_shaders.hpp"
 #include "graphics/mat4.hpp"
 #include "graphics/rdna_vertex.hpp"
 #include "graphics/vulkan.hpp"
@@ -64,6 +65,13 @@ struct Gfx {
   std::vector<uint32_t> l_idx, lvs_hand, lvs_clip, lfs;
   float light[3] = {0.3f, 0.5f, 0.8124f};  // toward the light, view space
   uint32_t lit_draws = 0;
+  // game-uploaded texture (pnrGfxSetTexture) and textured mesh
+  std::vector<uint8_t> t_rgba;
+  uint32_t t_w = 0, t_h = 0;
+  bool t_linear = false, t_repeat = false;
+  std::vector<float> x_verts;
+  std::vector<uint32_t> x_idx, tvs, tfs;
+  uint32_t tex_draws = 0;
   std::vector<uint8_t> last;
   std::string error;
 };
@@ -95,6 +103,8 @@ std::int32_t pnrGfxInit(std::uint32_t w, std::uint32_t h) {
   g.lvs_hand.assign(std::begin(lit_hand_vert), std::end(lit_hand_vert));
   g.lvs_clip.assign(std::begin(lit_clip_vert), std::end(lit_clip_vert));
   g.lfs.assign(std::begin(lit_frag), std::end(lit_frag));
+  g.tvs.assign(std::begin(tex_vert), std::end(tex_vert));
+  g.tfs.assign(std::begin(tex_frag), std::end(tex_frag));
   g.vs.assign(std::begin(cube_vert), std::end(cube_vert));
   g.fs.assign(std::begin(spin_frag), std::end(spin_frag));
   g.w = w; g.h = h; g.up = true;
@@ -326,6 +336,78 @@ std::int32_t pnrGfxDrawLitMesh(float yaw, float pitch, std::int32_t mode) {
 }
 
 std::uint32_t pnrGfxLitDraws() { return gfx().lit_draws; }
+
+// ---- textured mesh ------------------------------------------------------
+// One RGBA8 texture (row 0 on top, no mipmaps) sampled by a hand-authored
+// fragment shader: rgb = texel.rgb * vertex colour, alpha 1. Filtering and
+// addressing are the host Vulkan sampler's (nearest/linear, repeat/clamp);
+// results are only verified against a CPU reference within tolerance on
+// software Vulkan. The transform is the hand-authored vertex stage only.
+
+// flags: bit 0 = linear filter (else nearest), bit 1 = repeat (else clamp to
+// edge); other bits are refused. 1..256 per side, rgba is w*h*4 bytes, copied.
+// A failed call keeps the previous texture. Returns 0 / -1 / -6.
+std::int32_t pnrGfxSetTexture(const std::uint8_t* rgba, std::uint32_t w, std::uint32_t h,
+                              std::uint32_t flags) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  auto bad = [&](const char* why) { g.error = std::string("pnrGfxSetTexture: ") + why; return -6; };
+  if (rgba == nullptr) return bad("null pixel pointer");
+  if (w == 0 || h == 0 || w > 256 || h > 256) return bad("size must be 1..256 per side");
+  if (flags & ~3u) return bad("unknown flag bits (only 1 = linear, 2 = repeat)");
+  g.t_rgba.assign(rgba, rgba + (std::size_t)w * h * 4);
+  g.t_w = w; g.t_h = h; g.t_linear = flags & 1; g.t_repeat = (flags & 2) != 0;
+  return 0;
+}
+
+// Upload: 8 floats per vertex (x,y,z, r,g,b tint, u,v), 1..64 vertices,
+// 3..384 indices (multiple of 3), all finite, indices in range. uv may lie
+// outside 0..1 (the sampler's address mode decides). Returns 0 / -1 / -6.
+std::int32_t pnrGfxSetTexturedMesh(const float* verts, std::uint32_t vertex_count,
+                                   const std::uint32_t* indices, std::uint32_t index_count) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  auto bad = [&](const char* why) { g.error = std::string("pnrGfxSetTexturedMesh: ") + why; return -6; };
+  if (verts == nullptr || indices == nullptr) return bad("null pointer");
+  if (vertex_count == 0 || vertex_count > 64) return bad("vertex count must be 1..64");
+  if (index_count < 3 || index_count > 384 || index_count % 3) return bad("index count must be a multiple of 3 in 3..384");
+  for (std::uint32_t i = 0; i < vertex_count * 8; ++i)
+    if (!std::isfinite(verts[i])) return bad("non-finite vertex float");
+  for (std::uint32_t i = 0; i < index_count; ++i)
+    if (indices[i] >= vertex_count) return bad("index out of range");
+  g.x_verts.assign(verts, verts + vertex_count * 8);
+  g.x_idx.assign(indices, indices + index_count);
+  return 0;
+}
+
+// Draw the textured mesh rotated by pitch (X) then yaw (Y), 60 deg
+// perspective, 3 units back. Returns covered pixels, -7 no mesh, -8 no
+// texture, -6 bad angle, -3 render failure.
+std::int32_t pnrGfxDrawTexturedMesh(float yaw, float pitch) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  if (g.x_idx.empty()) { g.error = "pnrGfxSetTexturedMesh first"; return -7; }
+  if (g.t_rgba.empty()) { g.error = "pnrGfxSetTexture first"; return -8; }
+  if (!std::isfinite(yaw) || !std::isfinite(pitch)) { g.error = "pnrGfxDrawTexturedMesh: non-finite angle"; return -6; }
+  using namespace pnr::graphics;
+  const Mat4 P = mat4_perspective(1.0471976f, (float)g.w / (float)g.h, 0.1f, 10.0f);
+  const Mat4 T = mat4_translate(0, 0, -3);
+  const Mat4 M = mat4_mul(mat4_rotate_x(pitch), mat4_rotate_y(yaw));
+  std::vector<std::vector<std::uint32_t>> push{mat4_words(mat4_mul(P, mat4_mul(T, M)))};
+  TexInput tex;
+  tex.rgba = g.t_rgba.data(); tex.w = g.t_w; tex.h = g.t_h; tex.linear = g.t_linear; tex.repeat = g.t_repeat;
+  const float black[4] = {0, 0, 0, 1};
+  std::vector<std::vector<std::uint8_t>> out;
+  auto st = g.vk.render_textured_mesh_frames_rgba(g.w, g.h, g.tvs, g.tfs, g.x_verts, g.x_idx, true, tex, push, black, &out);
+  if (!st || out.size() != 1) { g.error = st ? "no frame" : st.error.message; return -3; }
+  g.last = std::move(out[0]);
+  ++g.frames;
+  const std::int32_t r = coverage(g.last);
+  if (r >= 0) ++g.tex_draws;
+  return r;
+}
+
+std::uint32_t pnrGfxTexturedDraws() { return gfx().tex_draws; }
 
 
 std::uint32_t pnrGfxRdnaFramesRendered() { return gfx().rdna_frames; }
