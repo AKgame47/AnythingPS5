@@ -131,3 +131,13 @@ add_test(NAME pnr_package_workflow
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/package_workflow.cmake)
 set_tests_properties(pnr_package_workflow PROPERTIES
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+# PS-style game journey: package a sce-only binary, import, run BY ID.
+add_test(NAME pnr_psgame_workflow
+  COMMAND ${CMAKE_COMMAND}
+    -DPS_DEMO=$<TARGET_FILE:ps_demo>
+    -DMAKE=$<TARGET_FILE:pnr_make_package>
+    -DPNR=$<TARGET_FILE:pnr>
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/psgame_workflow.cmake)
+set_tests_properties(pnr_psgame_workflow PROPERTIES
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
