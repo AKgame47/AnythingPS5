@@ -8,6 +8,7 @@
 // compat/services.hpp.)
 // This is how the registry's prx-implemented promises get kept.
 // Taxonomy per AnyPS5 (GPL-2.0); implementation original. Status: Implemented, Tested.
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -52,6 +53,10 @@ struct Gfx {
   uint32_t w = 0, h = 0, frames = 0, rdna_frames = 0;
   std::vector<float> verts, xyz, col;
   std::vector<uint32_t> idx, vs, fs, cvs;
+  // game-uploaded mesh (pnrGfxSetMesh)
+  std::vector<float> m_verts, m_xyz, m_col;
+  std::vector<uint32_t> m_idx;
+  uint32_t mesh_draws = 0;
   std::vector<uint8_t> last;
   std::string error;
 };
@@ -104,24 +109,52 @@ pnr::graphics::Mat4 cube_mvp(const Gfx& g, float yaw, float pitch) {
 }
 }  // namespace
 
-extern "C" {
 
-// Renders one frame of the unit cube rotated by pitch (X) then yaw (Y) with
-// the hand-authored MVP vertex shader.
-// Returns the number of non-background pixels, or a negative error.
-std::int32_t pnrGfxDrawCube(float yaw, float pitch) {
-  Gfx& g = gfx();
-  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+namespace {
+// Shared draw helpers: hand-authored MVP vertex shader, or translated RDNA
+// compute-as-vertex kernel + pass-through shader. Both fill g.last.
+std::int32_t draw_hand(Gfx& g, const std::vector<float>& verts, const std::vector<uint32_t>& idx,
+                       const pnr::graphics::Mat4& mvp) {
   using namespace pnr::graphics;
-  std::vector<std::vector<uint32_t>> push{mat4_words(cube_mvp(g, yaw, pitch))};
+  std::vector<std::vector<uint32_t>> push{mat4_words(mvp)};
   const float black[4] = {0, 0, 0, 1};
   std::vector<std::vector<uint8_t>> out;
-  auto st = g.vk.render_mesh_frames_rgba(g.w, g.h, g.vs, g.fs, g.verts, g.idx, true,
-                                         push, black, &out);
+  auto st = g.vk.render_mesh_frames_rgba(g.w, g.h, g.vs, g.fs, verts, idx, true, push, black, &out);
   if (!st || out.size() != 1) { g.error = st ? "no frame" : st.error.message; return -3; }
   g.last = std::move(out[0]);
   ++g.frames;
   return coverage(g.last);
+}
+std::int32_t draw_rdna(Gfx& g, const std::vector<float>& xyz, const std::vector<float>& col,
+                       const std::vector<uint32_t>& idx, const pnr::graphics::Mat4& mvp) {
+  using namespace pnr::graphics;
+  std::vector<float> clip;
+  auto st = rdna_transform_points(g.vk, xyz, mat4_words(mvp), &clip);
+  if (!st) { g.error = st.error.message; return -4; }
+  const size_t n = xyz.size() / 3;
+  std::vector<float> cv;
+  for (size_t i = 0; i < n; ++i) {
+    for (int c = 0; c < 4; ++c) cv.push_back(clip[i * 4 + c]);
+    for (int c = 0; c < 3; ++c) cv.push_back(col[i * 3 + c]);
+  }
+  const float black[4] = {0, 0, 0, 1};
+  std::vector<uint8_t> img;
+  st = g.vk.render_clip_mesh_rgba(g.w, g.h, g.cvs, g.fs, cv, idx, true, black, &img);
+  if (!st) { g.error = st.error.message; return -3; }
+  g.last = std::move(img);
+  ++g.frames; ++g.rdna_frames;
+  return coverage(g.last);
+}
+}  // namespace
+
+extern "C" {
+
+// Renders one frame of the built-in unit cube rotated by pitch (X) then yaw
+// (Y) with the hand-authored MVP vertex shader. Returns covered pixels or <0.
+std::int32_t pnrGfxDrawCube(float yaw, float pitch) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  return draw_hand(g, g.verts, g.idx, cube_mvp(g, yaw, pitch));
 }
 
 // Same cube, but the vertex stage is a translated RDNA-style compute kernel
@@ -131,23 +164,50 @@ std::int32_t pnrGfxDrawCube(float yaw, float pitch) {
 std::int32_t pnrGfxDrawCubeRdna(float yaw, float pitch) {
   Gfx& g = gfx();
   if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
-  using namespace pnr::graphics;
-  std::vector<float> clip;
-  auto st = rdna_transform_points(g.vk, g.xyz, mat4_words(cube_mvp(g, yaw, pitch)), &clip);
-  if (!st) { g.error = st.error.message; return -4; }
-  std::vector<float> cv;
-  for (size_t i = 0; i < 24; ++i) {
-    for (int c = 0; c < 4; ++c) cv.push_back(clip[i * 4 + c]);
-    for (int c = 0; c < 3; ++c) cv.push_back(g.col[i * 3 + c]);
-  }
-  const float black[4] = {0, 0, 0, 1};
-  std::vector<uint8_t> img;
-  st = g.vk.render_clip_mesh_rgba(g.w, g.h, g.cvs, g.fs, cv, g.idx, true, black, &img);
-  if (!st) { g.error = st.error.message; return -3; }
-  g.last = std::move(img);
-  ++g.frames; ++g.rdna_frames;
-  return coverage(g.last);
+  return draw_rdna(g, g.xyz, g.col, g.idx, cube_mvp(g, yaw, pitch));
 }
+
+// Upload a game-supplied mesh: vertices are 6 floats each (x,y,z,r,g,b),
+// indices a triangle list. Bounded: 1..24 vertices (the RDNA kernel's lane
+// count), 3..384 indices, finite floats, every index < vertex count. The data
+// is COPIED; on any error the previously uploaded mesh is kept.
+// Returns 0, or -1 not initialised, -6 invalid arguments (see pnrGfxLastError).
+std::int32_t pnrGfxSetMesh(const float* verts, std::uint32_t vertex_count,
+                           const std::uint32_t* indices, std::uint32_t index_count) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  auto bad = [&](const char* why) { g.error = std::string("pnrGfxSetMesh: ") + why; return -6; };
+  if (verts == nullptr || indices == nullptr) return bad("null pointer");
+  if (vertex_count == 0 || vertex_count > 24) return bad("vertex count must be 1..24");
+  if (index_count < 3 || index_count > 384 || index_count % 3) return bad("index count must be a multiple of 3 in 3..384");
+  for (std::uint32_t i = 0; i < vertex_count * 6; ++i)
+    if (!std::isfinite(verts[i])) return bad("non-finite vertex float");
+  for (std::uint32_t i = 0; i < index_count; ++i)
+    if (indices[i] >= vertex_count) return bad("index out of range");
+  g.m_verts.assign(verts, verts + vertex_count * 6);
+  g.m_idx.assign(indices, indices + index_count);
+  g.m_xyz.clear(); g.m_col.clear();
+  for (std::uint32_t i = 0; i < vertex_count; ++i)
+    for (int k = 0; k < 3; ++k) { g.m_xyz.push_back(verts[i * 6 + k]); g.m_col.push_back(verts[i * 6 + 3 + k]); }
+  return 0;
+}
+
+// Draw the uploaded mesh rotated by pitch (X) then yaw (Y). mode 0 = hand-
+// authored MVP vertex shader, mode 1 = translated-RDNA compute-as-vertex path.
+// Returns covered pixels or negative (-7 no mesh uploaded, -6 bad argument).
+std::int32_t pnrGfxDrawMesh(float yaw, float pitch, std::int32_t mode) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  if (g.m_idx.empty()) { g.error = "pnrGfxSetMesh first"; return -7; }
+  if (mode != 0 && mode != 1) { g.error = "pnrGfxDrawMesh: mode must be 0 or 1"; return -6; }
+  if (!std::isfinite(yaw) || !std::isfinite(pitch)) { g.error = "pnrGfxDrawMesh: non-finite angle"; return -6; }
+  const auto mvp = cube_mvp(g, yaw, pitch);
+  const std::int32_t r = mode == 0 ? draw_hand(g, g.m_verts, g.m_idx, mvp) : draw_rdna(g, g.m_xyz, g.m_col, g.m_idx, mvp);
+  if (r >= 0) ++g.mesh_draws;
+  return r;
+}
+
+std::uint32_t pnrGfxMeshDraws() { return gfx().mesh_draws; }
 
 std::uint32_t pnrGfxRdnaFramesRendered() { return gfx().rdna_frames; }
 
