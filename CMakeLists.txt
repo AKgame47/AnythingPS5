@@ -21,7 +21,7 @@ target_include_directories(pnr_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # MODULE 02 - native executable loader (POSIX today; Windows backend planned)
 add_library(pnr_loader loader/elf_parser.cpp loader/native_loader.cpp loader/nid.cpp)
 
-add_library(pnr_prx prx/prx.cpp)
+add_library(pnr_prx prx/prx.cpp loader/import_resolver.cpp)
 target_link_libraries(pnr_prx PUBLIC pnr_loader)
 target_link_libraries(pnr_loader PUBLIC pnr_core)
 
@@ -87,7 +87,7 @@ target_link_libraries(pnr_package PUBLIC pnr_library)
 
 # CLI launcher (STEP 1-10 workflow driver)
 add_executable(pnr apps/pnr_cli.cpp)
-target_link_libraries(pnr PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services)
+target_link_libraries(pnr PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx)
 
 # Dev tooling: build .pnrgame packages
 add_executable(pnr_make_package tools/make_package.cpp)
