@@ -30,6 +30,7 @@
 #include "graphics/demo/clip_shaders.hpp"
 #include "graphics/demo/lit_shaders.hpp"
 #include "graphics/demo/tex_shaders.hpp"
+#include "graphics/demo/littex_shaders.hpp"
 #include "graphics/mat4.hpp"
 #include "graphics/rdna_vertex.hpp"
 #include "graphics/vulkan.hpp"
@@ -72,6 +73,9 @@ struct Gfx {
   std::vector<float> x_verts;
   std::vector<uint32_t> x_idx, tvs, tfs;
   uint32_t tex_draws = 0;
+  std::vector<float> lx_verts;
+  std::vector<uint32_t> lx_idx, ltvs, ltfs;
+  uint32_t littex_draws = 0;
   std::vector<uint8_t> last;
   std::string error;
 };
@@ -103,6 +107,8 @@ std::int32_t pnrGfxInit(std::uint32_t w, std::uint32_t h) {
   g.lvs_hand.assign(std::begin(lit_hand_vert), std::end(lit_hand_vert));
   g.lvs_clip.assign(std::begin(lit_clip_vert), std::end(lit_clip_vert));
   g.lfs.assign(std::begin(lit_frag), std::end(lit_frag));
+  g.ltvs.assign(std::begin(littex_vert), std::end(littex_vert));
+  g.ltfs.assign(std::begin(littex_frag), std::end(littex_frag));
   g.tvs.assign(std::begin(tex_vert), std::end(tex_vert));
   g.tfs.assign(std::begin(tex_frag), std::end(tex_frag));
   g.vs.assign(std::begin(cube_vert), std::end(cube_vert));
@@ -408,6 +414,69 @@ std::int32_t pnrGfxDrawTexturedMesh(float yaw, float pitch) {
 }
 
 std::uint32_t pnrGfxTexturedDraws() { return gfx().tex_draws; }
+
+// ---- lit + textured mesh -------------------------------------------------
+// Combines the lit path (pnrGfxSetLight, Lambert ambient 0.25, per-vertex d)
+// with the texture (pnrGfxSetTexture): rgb = texel.rgb * tint * (0.25 +
+// 0.75 * max(d, 0)). Hand-authored vertex + fragment shaders only (no RDNA
+// path for this combination).
+
+// 11 floats per vertex (x y z, r g b tint, u v, nx ny nz), 1..64 vertices,
+// 3..384 indices, finite, indices in range, unit normals within 1%.
+std::int32_t pnrGfxSetLitTexturedMesh(const float* verts, std::uint32_t vertex_count,
+                                      const std::uint32_t* indices, std::uint32_t index_count) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  auto bad = [&](const char* why) { g.error = std::string("pnrGfxSetLitTexturedMesh: ") + why; return -6; };
+  if (verts == nullptr || indices == nullptr) return bad("null pointer");
+  if (vertex_count == 0 || vertex_count > 64) return bad("vertex count must be 1..64");
+  if (index_count < 3 || index_count > 384 || index_count % 3) return bad("index count must be a multiple of 3 in 3..384");
+  for (std::uint32_t i = 0; i < vertex_count * 11; ++i)
+    if (!std::isfinite(verts[i])) return bad("non-finite vertex float");
+  for (std::uint32_t i = 0; i < vertex_count; ++i) {
+    const float* n = verts + i * 11 + 8;
+    const double len = std::sqrt((double)n[0] * n[0] + (double)n[1] * n[1] + (double)n[2] * n[2]);
+    if (len < 0.99 || len > 1.01) return bad("normal is not unit length (within 1%)");
+  }
+  for (std::uint32_t i = 0; i < index_count; ++i)
+    if (indices[i] >= vertex_count) return bad("index out of range");
+  g.lx_verts.assign(verts, verts + vertex_count * 11);
+  g.lx_idx.assign(indices, indices + index_count);
+  return 0;
+}
+
+// Returns covered pixels, -7 no mesh, -8 no texture, -6 bad angle, -3 render failure.
+std::int32_t pnrGfxDrawLitTexturedMesh(float yaw, float pitch) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  if (g.lx_idx.empty()) { g.error = "pnrGfxSetLitTexturedMesh first"; return -7; }
+  if (g.t_rgba.empty()) { g.error = "pnrGfxSetTexture first"; return -8; }
+  if (!std::isfinite(yaw) || !std::isfinite(pitch)) { g.error = "pnrGfxDrawLitTexturedMesh: non-finite angle"; return -6; }
+  using namespace pnr::graphics;
+  const Mat4 P = mat4_perspective(1.0471976f, (float)g.w / (float)g.h, 0.1f, 10.0f);
+  const Mat4 T = mat4_translate(0, 0, -3);
+  const Mat4 M = mat4_mul(mat4_rotate_x(pitch), mat4_rotate_y(yaw));
+  const Mat4 mvp = mat4_mul(P, mat4_mul(T, M));
+  float lobj[3];
+  for (int c = 0; c < 3; ++c) lobj[c] = M[c * 4 + 0] * g.light[0] + M[c * 4 + 1] * g.light[1] + M[c * 4 + 2] * g.light[2];
+  auto words = mat4_words(mvp);
+  for (int k = 0; k < 3; ++k) { std::uint32_t u; std::memcpy(&u, &lobj[k], 4); words.push_back(u); }
+  words.push_back(0);
+  std::vector<std::vector<std::uint32_t>> push{words};
+  TexInput tex;
+  tex.rgba = g.t_rgba.data(); tex.w = g.t_w; tex.h = g.t_h; tex.linear = g.t_linear; tex.repeat = g.t_repeat;
+  const float black[4] = {0, 0, 0, 1};
+  std::vector<std::vector<std::uint8_t>> out;
+  auto st = g.vk.render_lit_textured_mesh_frames_rgba(g.w, g.h, g.ltvs, g.ltfs, g.lx_verts, g.lx_idx, true, tex, push, black, &out);
+  if (!st || out.size() != 1) { g.error = st ? "no frame" : st.error.message; return -3; }
+  g.last = std::move(out[0]);
+  ++g.frames;
+  const std::int32_t r = coverage(g.last);
+  if (r >= 0) ++g.littex_draws;
+  return r;
+}
+
+std::uint32_t pnrGfxLitTexturedDraws() { return gfx().littex_draws; }
 
 
 std::uint32_t pnrGfxRdnaFramesRendered() { return gfx().rdna_frames; }
