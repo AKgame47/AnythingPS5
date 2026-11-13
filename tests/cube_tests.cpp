@@ -4,6 +4,8 @@
 #include "graphics/vulkan.hpp"
 #include "graphics/demo/cube_shaders.hpp"
 #include "graphics/demo/spin_shaders.hpp"
+#include "graphics/demo/tex_shaders.hpp"
+#include "graphics/demo/littex_shaders.hpp"
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -206,6 +208,48 @@ void pnr_cube_tests(int& pass,int& fail) {
     std::filesystem::remove_all(jail);
   }
 #endif
+  // ---- audit: texture / lit-texture rejection and mutation invariants (backend level) ----
+  {
+    std::vector<uint32_t> tvs(std::begin(tex_vert),std::end(tex_vert)),tfs(std::begin(tex_frag),std::end(tex_frag));
+    std::vector<uint32_t> lvs(std::begin(littex_vert),std::end(littex_vert)),lfs(std::begin(littex_frag),std::end(littex_frag));
+    std::vector<float> q={-.7f,.7f,0,1,1,1,0,0, .7f,.7f,0,1,1,1,1,0, .7f,-.7f,0,1,1,1,1,1, -.7f,-.7f,0,1,1,1,0,1};
+    std::vector<uint32_t> qi={0,1,2,0,2,3};
+    std::vector<uint8_t> px(4*4*4,200);
+    TexInput tx;tx.rgba=px.data();tx.w=4;tx.h=4;
+    auto id=mat4_words(mat4_mul(P,T));
+    std::vector<std::vector<uint32_t>> push{id};
+    std::vector<std::vector<uint8_t>> out;
+    check(vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,q,qi,true,tx,push,black,&out).ok&&out.size()==1,"audit: baseline textured render works");
+    auto bad=[&](auto&& call,const char* label){std::vector<std::vector<uint8_t>> o;auto r=call(o);check(!r.ok&&o.empty(),label);};
+    bad([&](auto& o){TexInput t=tx;t.rgba=nullptr;return vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,q,qi,true,t,push,black,&o);},"audit: null texture pixels rejected");
+    bad([&](auto& o){TexInput t=tx;t.w=0;return vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,q,qi,true,t,push,black,&o);},"audit: zero-width texture rejected");
+    bad([&](auto& o){TexInput t=tx;t.h=257;return vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,q,qi,true,t,push,black,&o);},"audit: 257-high texture rejected");
+    bad([&](auto& o){auto v=q;v.pop_back();return vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,v,qi,true,tx,push,black,&o);},"audit: textured vertex array not multiple of 8 rejected");
+    bad([&](auto& o){auto i=qi;i[5]=4;return vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,q,i,true,tx,push,black,&o);},"audit: textured index out of range rejected");
+    bad([&](auto& o){std::vector<std::vector<uint32_t>> p2{std::vector<uint32_t>(33)};return vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,q,qi,true,tx,p2,black,&o);},"audit: 33 push words rejected");
+    bad([&](auto& o){std::vector<std::vector<uint32_t>> p2{id,std::vector<uint32_t>(8)};return vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,q,qi,true,tx,p2,black,&o);},"audit: ragged per-frame push sizes rejected");
+    bad([&](auto& o){return vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,q,qi,true,tx,std::vector<std::vector<uint32_t>>{},black,&o);},"audit: zero frames rejected");
+    bad([&](auto&){return vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,q,qi,true,tx,push,black,nullptr);},"audit: null frame output rejected");
+    bad([&](auto& o){return vk.render_textured_mesh_frames_rgba(W,H,{},tfs,q,qi,true,tx,push,black,&o);},"audit: empty vertex shader rejected");
+    bad([&](auto& o){std::vector<uint32_t> junk(64,0x12345678u);return vk.render_textured_mesh_frames_rgba(W,H,junk,tfs,q,qi,true,tx,push,black,&o);},"audit: garbage SPIR-V rejected by the driver, no crash");
+    bad([&](auto& o){return vk.render_lit_textured_mesh_frames_rgba(W,H,lvs,lfs,std::vector<float>(10),qi,true,tx,push,black,&o);},"audit: lit textured vertex array not multiple of 11 rejected");
+    bad([&](auto& o){return vk.render_lit_textured_mesh_frames_rgba(W,H,lvs,lfs,std::vector<float>(33),std::vector<uint32_t>{0,1,3},true,tx,push,black,&o);},"audit: lit textured index out of range rejected");
+    // a failure must not poison later renders
+    out.clear();
+    check(vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,q,qi,true,tx,push,black,&out).ok&&out.size()==1,"audit: renders still work after the rejected calls");
+    // mutation: changing one texel / the filter / the address mode must change pixels
+    std::vector<uint8_t> t2(8*8*4);for(int i=0;i<8*8;++i){t2[i*4]=uint8_t(i*4);t2[i*4+1]=uint8_t(255-i*4);t2[i*4+2]=uint8_t(i*3);t2[i*4+3]=255;}
+    auto draw=[&](const TexInput& t,const std::vector<float>& v){std::vector<std::vector<uint8_t>> o;auto r=vk.render_textured_mesh_frames_rgba(W,H,tvs,tfs,v,qi,true,t,push,black,&o);return r.ok&&o.size()==1?o[0]:std::vector<uint8_t>();};
+    TexInput a;a.rgba=t2.data();a.w=8;a.h=8;
+    auto base=draw(a,q);check(!base.empty()&&draw(a,q)==base,"audit: textured render is deterministic (same inputs, same pixels)");
+    auto t3=t2;t3[(3*8+4)*4]^=0x40;TexInput b=a;b.rgba=t3.data();
+    check(draw(b,q)!=base,"audit: mutating one texel changes the image");
+    TexInput c=a;c.linear=true;check(draw(c,q)!=base,"audit: nearest vs linear filter changes the image");
+    auto q2=q;for(int i=0;i<4;++i){q2[i*8+6]*=2;q2[i*8+7]*=2;}
+    TexInput rp=a;rp.repeat=true;TexInput cl=a;
+    check(draw(rp,q2)!=draw(cl,q2),"audit: repeat vs clamp with uv 0..2 changes the image");
+    check(draw(rp,q)==base,"audit: repeat vs clamp is identical when uv stays inside 0..1");
+  }
 #ifdef PNR_PS_TEX_DEMO_PATH
   // ---- a game uploads a texture + uv quad; CPU ray-cast + sampler reference ----
   {
