@@ -128,3 +128,58 @@ here that has not been validated against a real device.
 A narrow C ABI (`pnr_` prefix, opaque handles, explicit error codes) is
 reserved for future Rust crates (telemetry, package management). No Rust
 code ships yet; no Rust toolchain exists in the current dev sandbox.
+
+## IF-OS-01 Host Platform (v1) — Implemented (Linux), Tested
+
+`pnr::platform::IHostPlatform` (platform/os.hpp):
+
+- `name()` → "linux" (Windows backend Planned).
+- `cpu_logical_cores()`, `memory()` → optional MemoryInfo (absent when the
+  host cannot report it), `monotonic_seconds()`.
+- `launch_process(path, args) → ProcessResult` — supervised child process:
+  `{started, finished, exit_code | signal, wall_seconds}`.
+- `on_battery()` → optional; absent on hosts without power_supply nodes.
+  Unknown is reported, never guessed.
+- Factory: `make_host_platform()`.
+
+## IF-PKG-01 Package Format .pnrgame (v1) — Implemented, Tested
+
+ustar archive (regular files, entry names ≤ 100 bytes, no `..` segments):
+
+- `manifest.pnr` — `key = value` lines. Required: `id` (directory-safe),
+  `title`, `version`, `executable`. Optional: `arch` (must be `x86-64`),
+  `min_runtime`.
+- `checksums.sha256` — `<hex>  <path>` per payload file.
+- Payload: executable (must itself validate as x86-64 ELF) + assets.
+
+`build_package(out, manifest, files)` (dev tooling) and
+`import_package(path, library_root, db)`:
+
+1. Read archive (header checksums verified).
+2. Reject unsafe entry names (absolute, `..`, backslash, NUL).
+3. Parse + validate manifest (all required fields, arch, safe id).
+4. Verify EVERY payload SHA-256 before any disk write.
+5. Validate the executable's ELF bytes from memory.
+6. Extract to `<root>/games/<id>-<version>/`, executable marked +x.
+7. Register game + installation(integrity=verified) +
+   compatibility(Untested) in the db. Importing never asserts playability.
+
+Failure names the exact stage. Tampered payloads fail at CHECKSUM
+MISMATCH. Non-packages fail at archive validation.
+
+## IF-LIB-01 Game Database (v1) — Implemented, Tested
+
+`pnr::library::GameDb` over SQLite (WAL):
+
+- Tables: `games(game_id,title,version,platform)`,
+  `installations(game_id,path,version,integrity)`,
+  `compatibility(game_id,state,notes)`,
+  `launches(game_id,exit_code,wall_seconds,at)`.
+- `open(path)` creates parent dirs + schema; `add_game / get_game /
+  list_games / set_installation / get_installation / set_compatibility /
+  get_compatibility / record_launch / launch_count`.
+- Compatibility states: Verified Playable | Playable With Issues |
+  Launches Only | Unsupported | Untested | Blocked by Missing Dependency.
+  New imports are always Untested.
+- Entitlement records are a separate future table; this store never
+  asserts ownership, distribution or execution rights.
