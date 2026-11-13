@@ -31,9 +31,10 @@ static void usage() {
             "  pnr-launcher clean --orphans [--yes] [--json]   (orphan install dirs only; dry run by default)\n"
             "  pnr-launcher export <game-id> <out.tar> [--json]   (back up saves)\n"
             "  pnr-launcher restore-saves <game-id> <in.tar> [--overwrite] [--json]\n"
-            "  pnr-launcher psn status [--json]   (offline PSN connector: no network code)\n"
+            "  pnr-launcher psn status [--json]   (local state; no network)\n"
             "  pnr-launcher psn set-token [--file PATH]   (token from stdin or a file, never argv)\n"
             "  pnr-launcher psn import-json <file> [--complete] [--json]   (saved purchased-games response)\n"
+            "  pnr-launcher psn sync [--complete] [--json]   (LIVE: contacts Sony hosts with your stored token; untested vs Sony)\n"
             "  pnr-launcher psn owned [--platform PS4|PS5] [--json]\n"
             "  pnr-launcher psn link <entitlement-id> <game-id> | psn unlink <entitlement-id>\n"
             "  pnr-launcher psn disconnect [--forget-owned] [--yes]");
@@ -162,6 +163,7 @@ int main(int argc, char** argv) {
       rc = pnr::psn::cmd_set_token(tp, in, json, &out);
     }
     else if (pos[0] == "import-json" && pos.size() == 2) rc = pnr::psn::cmd_import_json(core.db(), pos[1], complete, json, &out);
+    else if (pos[0] == "sync" && pos.size() == 1) rc = pnr::psn::cmd_sync(core.db(), tp, complete, json, &out);
     else if (pos[0] == "owned" && pos.size() == 1) rc = pnr::psn::cmd_owned(core.db(), json, platform, &out);
     else if (pos[0] == "link" && pos.size() == 3) rc = pnr::psn::cmd_link(core.db(), pos[1], pos[2], json, &out);
     else if (pos[0] == "unlink" && pos.size() == 2) rc = pnr::psn::cmd_unlink(core.db(), pos[1], json, &out);
