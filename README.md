@@ -49,7 +49,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**1027/1027 unit tests pass, 5/5 CTest suites pass** (unit, end-to-end native
+**1102/1102 unit tests pass, 5/5 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
 game, plus compact shader fixtures/mutation diagnostics). Clean Release
 build with `-Werror` passes. ASan+UBSan unit/fixture runs pass with leak
@@ -397,3 +397,11 @@ Vulkan readback (when available) plus 4096 deterministic instruction-mutation
 checks. It prints fixture names, translated sizes, guard status and failures.
 This smoke corpus is not exhaustive fuzzing, ISA certification or a benchmark.
 See `docs/shader-audit.md` for the measured audit and reproducible commands.
+
+
+Loop-memory preparation: `shader/loop_memory.hpp` proves exact nonnegative
+lane x iteration affine address maps (1..64 per axis, 1..32 accesses). It
+rejects alignment/range/overflow, store collisions and read/write aliases
+across all lanes and iterations. Tested against 12,000 deterministic maps.
+This is a verifier only: loop-body memory translation remains Planned and
+rejected. Existing counted loops still have no memory operations in the body.
