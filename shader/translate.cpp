@@ -53,15 +53,54 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   struct Compare { uint32_t a,b; };
   Compare scc{};bool scc_defined=false;
   uint32_t carry_flag=0;bool carry_defined=false;
+  bool looped=false;
   bool merge_active=false;
   uint32_t merge_pc=0;
   std::array<std::optional<Reg>,256> before_branch{};
   std::array<bool,256> assigned{};
   Compare branch_compare{};
   std::optional<uint32_t> value;
-  for (const auto& i : d.instructions) {
+  for (size_t ip=0;ip<d.instructions.size();++ip) {
+    const auto& i=d.instructions[ip];
     const auto at = " at pc=" + std::to_string(i.pc);
     if (ended) return fail("instructions after s_endpgm" + at);
+    // Recognize exactly: constant scalar init; vector accumulator add;
+    // scalar decrement by one; compare counter==0; SCC0 backward branch.
+    // No general backedge recovery, body effects or dynamic count guessing.
+    if(i.family==RdnaFamily::SOP1 && i.opcode_id==3 &&
+       ip+4<d.instructions.size() &&
+       d.instructions[ip+4].family==RdnaFamily::SOPP &&
+       d.instructions[ip+4].opcode_id==4 && d.instructions[ip+4].simm<0) {
+      const auto& body=d.instructions[ip+1];const auto& dec=d.instructions[ip+2];
+      const auto& cmp=d.instructions[ip+3];const auto& jump=d.instructions[ip+4];
+      auto isreg=[](const RdnaOperand& o,RdnaOperandKind kind,uint32_t reg){return o.kind==kind && o.reg==reg;};
+      auto literal=[](const RdnaOperand& o,uint32_t v){return
+        (o.kind==RdnaOperandKind::InlineIntConst || o.kind==RdnaOperandKind::LiteralConst) && o.value==v;};
+      if(looped || conditional || merge_active || i.dst.kind!=RdnaOperandKind::ScalarReg ||
+         (i.src0.kind!=RdnaOperandKind::InlineIntConst && i.src0.kind!=RdnaOperandKind::LiteralConst) ||
+         !i.src0.value || i.src0.value>64 ||
+         body.family!=RdnaFamily::VOP2 || body.opcode_id!=0x25 ||
+         body.dst.kind!=RdnaOperandKind::VectorReg ||
+         !isreg(body.src1,RdnaOperandKind::VectorReg,body.dst.reg) ||
+         isreg(body.src0,RdnaOperandKind::VectorReg,body.dst.reg) ||
+         isreg(body.src0,RdnaOperandKind::ScalarReg,i.dst.reg) ||
+         dec.family!=RdnaFamily::SOP2 || dec.opcode_id!=1 ||
+         !isreg(dec.dst,RdnaOperandKind::ScalarReg,i.dst.reg) ||
+         !isreg(dec.src0,RdnaOperandKind::ScalarReg,i.dst.reg) || !literal(dec.src1,1) ||
+         cmp.family!=RdnaFamily::SOPC || cmp.opcode_id!=6 ||
+         !isreg(cmp.src0,RdnaOperandKind::ScalarReg,i.dst.reg) || !literal(cmp.src1,0) ||
+         jump.branch_target!=body.pc)
+        return fail("unsupported counted loop shape/count/body/control"+at);
+      const auto initial=regs[body.dst.reg],delta=source(body.src0);
+      if(!initial || !delta)return fail("undefined loop accumulator/delta"+at);
+      nodes.push_back({U32Op::LoopAdd,initial->node,delta->node,i.src0.value});
+      // Loop output is data, not an invented affine pointer proof.
+      regs[body.dst.reg]=Reg{uint32_t(nodes.size()-1),{}};
+      nodes.push_back({U32Op::Constant,0});const uint32_t zero=uint32_t(nodes.size()-1);
+      sregs[i.dst.reg]=Reg{zero,0,0,0};
+      scc=Compare{zero,zero};scc_defined=true;carry_defined=false;
+      looped=true;ip+=4;continue;
+    }
     if (merge_active && i.pc==merge_pc) {
       for (uint32_t reg=0;reg<256;++reg) if(assigned[reg]) {
         if(!before_branch[reg] || !regs[reg]) return fail("conditional VGPR undefined on skipped path"+at);
@@ -116,7 +155,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       if(!a || !b) return fail("undefined compare source"+at);
       scc=Compare{a->node,b->node};scc_defined=true;carry_defined=false;
     } else if(i.family==RdnaFamily::SOPP && i.opcode_id==4) {
-      if(conditional || !scc_defined || i.simm<=0)
+      if(looped || conditional || !scc_defined || i.simm<=0)
         return fail("unsupported branch: needs single forward SCC0 with defined compare"+at);
       bool boundary=false;
       for(const auto& target:d.instructions) boundary |= target.pc==i.branch_target;
@@ -237,6 +276,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
     if(read.first<=writes->last && writes->first<=read.last)
       return fail("multi-invocation load/output ranges overlap; barriers not supported");
   ComputeTranslation r;
+  r.structured_loop=looped;
   r.full64_pointers=full64;
   r.host_float32=floating;
   r.required_uniform_words=uniform_words;
