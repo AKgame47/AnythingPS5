@@ -46,11 +46,12 @@ developer-controlled test application and no graphics.
 | 04 | Graphics Engine (Vulkan) | `graphics/` | Blocked in sandbox (no GPU/Vulkan); Planned |
 | 05 | Adaptive Performance Engine | `performance/` | Planned |
 | 06 | Laptop Optimization Manager | `performance/laptop` | Planned |
-| 07 | Host OS Abstraction | `platform/` | Partial (POSIX paths in loader/compat; explicit interfaces Planned) |
+| 07 | Host OS Abstraction | `platform/` | Implemented (Linux backend: CPU/memory/power/process), Tested; Windows Planned |
 | 08 | Game Services (audio/input/storage) | `services/` | Planned (save-data storage exists inside `compat`) |
-| 09 | Game Manager (library) | `library/` | Planned |
+| 09 | Game Manager (library) | `library/` | SQLite data layer Implemented, Tested; UI Planned |
 | 10 | Desktop Launcher UI | `apps/launcher` | Planned (CLI exists: `apps/pnr_cli.cpp`) |
-| 11 | Security Manager | `security/` | Partial (process isolation + fs jail implemented; audit/sandboxing Planned) |
+| 11 | Security Manager | `security/` | Partial (process isolation, fs jail, package traversal/checksum rejection implemented; sandboxing Planned) |
+| - | Installer (.pnrgame) | `package/` | Implemented (tar+SHA-256, importer, registration), Tested |
 
 ## 4. Component diagram (current build)
 
