@@ -89,6 +89,56 @@ struct VerifyOutcome {
 // never "." or "..".
 bool valid_game_id(const std::string& id);
 
+struct DoctorIssue {
+  std::string kind;     // install-missing, install-outside-library, integrity-failed
+  std::string subject;  // game id
+  std::string detail;
+};
+struct DoctorOrphan {
+  std::string name;     // entry name directly under games/ or jail/
+  std::string kind;     // "dir", "file" or "symlink"
+  uint64_t bytes = 0;   // 0 for symlinks (not followed)
+};
+struct DoctorUsage {
+  std::string game_id;
+  uint64_t install_bytes = 0, saves_bytes = 0;
+};
+// Read-only health report. Deletes and fixes nothing.
+struct DoctorReport {
+  bool ok = false;       // the library was readable
+  std::string error;
+  int games = 0;
+  std::vector<DoctorIssue> issues;
+  std::vector<DoctorOrphan> orphan_installs;  // under <library>/games, no row points there
+  std::vector<DoctorOrphan> orphan_jails;     // under <library>/jail, no game row (often kept saves)
+  std::vector<DoctorUsage> usage;
+};
+
+struct CleanItem {
+  std::string name;
+  uint64_t bytes = 0;
+  bool removed = false;
+  std::string error;
+};
+struct CleanOutcome {
+  bool ok = false;
+  std::string error;
+  bool needs_confirmation = false;
+  std::vector<CleanItem> items;      // orphan install DIRECTORIES only
+  int left_alone = 0;                // orphan files and symlinks, never deleted
+};
+
+struct SavesOutcome {
+  bool ok = false;
+  std::string error;
+  int files = 0;
+  uint64_t bytes = 0;
+  int skipped = 0;   // export: symlinks and special files not followed; restore: existing files left alone
+};
+
+constexpr uint64_t kSavesMaxBytes = 64ull * 1024 * 1024;
+constexpr size_t kSavesMaxFiles = 10000;
+
 // The six compatibility states the library knows.
 const std::vector<std::string>& compat_states();
 bool valid_compat_state(const std::string& s);
@@ -133,6 +183,18 @@ public:
   // compatibility.
   VerifyOutcome verify(const std::string& game_id);
 
+  DoctorReport doctor();
+  // Removes only orphan install directories under <library>/games. Dry run
+  // unless confirmed. Never touches jail folders (saves) or library rows.
+  CleanOutcome clean_orphans(bool confirmed);
+  // Backs up <library>/jail/<id> as a plain ustar archive. Read-only on the
+  // library. Refuses to overwrite out_path.
+  SavesOutcome export_saves(const std::string& game_id, const std::string& out_path);
+  // Restores an archive into <library>/jail/<id>. All names are validated
+  // and every target checked before anything is written. Existing files are
+  // left alone unless overwrite.
+  SavesOutcome restore_saves(const std::string& game_id, const std::string& in_path, bool overwrite);
+
 private:
   library::GameDb db_;
   std::string root_;  // library directory (parent of the db file)
@@ -156,6 +218,15 @@ std::string render_remove_text(const std::string& id, const RemoveOutcome& o);
 std::string render_remove_json(const std::string& id, const RemoveOutcome& o);
 std::string render_verify_text(const std::string& id, const VerifyOutcome& o);
 std::string render_verify_json(const std::string& id, const VerifyOutcome& o);
+std::string render_doctor_text(const DoctorReport& r);
+std::string render_doctor_json(const DoctorReport& r);
+std::string render_clean_text(const CleanOutcome& o);
+std::string render_clean_json(const CleanOutcome& o);
+std::string render_saves_text(const char* verb, const SavesOutcome& o);
+std::string render_saves_json(const char* verb, const SavesOutcome& o);
+// Archive entry names a restore will accept: relative, no "." / ".." / empty
+// components, no NUL or backslash, at most 100 bytes.
+bool safe_archive_name(const std::string& n);
 std::string render_outcome_json(const std::string& game_id, const LaunchOutcome& o);
 
 }  // namespace pnr::launcher
