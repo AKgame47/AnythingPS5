@@ -71,7 +71,9 @@ Status validate_manifest(const std::map<std::string, std::string>& kv,
     try { m.min_runtime = std::stoll(it->second); }
     catch (...) { return fail(64, "bad min_runtime value"); }
   }
-  // id is used as a directory name: refuse hostile ids
+  // id is used as a directory name: refuse hostile ids ("." and ".." pass the
+  // character check but would name the jail parent)
+  if (m.id == "." || m.id == "..") return fail(65, "manifest id is not a usable name");
   if (m.id.find_first_not_of(
           "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") !=
       std::string::npos)
