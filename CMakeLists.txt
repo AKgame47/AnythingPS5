@@ -30,12 +30,13 @@ target_link_libraries(pnr_prx PUBLIC pnr_loader pnr_compat)
 target_link_libraries(pnr_loader PUBLIC pnr_core)
 
 # MODULE 03 - compatibility services
-add_library(pnr_shader shader/rdna.cpp)
+add_library(pnr_shader shader/rdna.cpp shader/translate.cpp)
 target_include_directories(pnr_shader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(pnr_graphics graphics/vulkan.cpp graphics/spirv.cpp)
 target_include_directories(pnr_graphics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pnr_graphics PUBLIC pnr_core dl)
+target_link_libraries(pnr_shader PUBLIC pnr_graphics)
 set_target_properties(pnr_graphics PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(pnr_compat compat/services.cpp)
 # PIC: pnr_compat also links into the pnr_psabi shared library.
