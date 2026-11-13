@@ -13,6 +13,7 @@
 #include <string>
 
 #include "ask/ask.hpp"
+#include "sandbox/sandbox.hpp"
 #include "psn/json.hpp"
 
 namespace fs = std::filesystem;
@@ -150,11 +151,52 @@ void pnr_ask_tests(int& pass, int& fail) {
     check(!run_needle(d + "/flood", "x", nr, &out), "needle: unbounded output is cut off");
   }
 
+  // ---- D2: the model program inside PNR's sandbox
+  {
+    if (!pnr::sandbox::probe().usable()) std::printf("SKIP sandboxed-model tests: the sandbox is not usable on this host\n");
+    else {
+      spit(d + "/secret.txt", "user data\n");
+      const std::string probe = d + "/probe_needle";
+      spit(probe, "#!/bin/sh\n"
+        "if [ -r '" + d + "/secret.txt' ]; then echo SECRET_VISIBLE; else echo SECRET_HIDDEN; fi\n"
+        "if echo x > /etc/pnr_probe_write 2>/dev/null; then echo ETC_WRITABLE; else echo ETC_READONLY; fi\n"
+        "if [ -r \"$2\" ]; then echo TOOLS_READABLE; else echo TOOLS_MISSING; fi\n"
+        "echo IFACES=$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\\n' ,)\n"
+        "echo PID=$$\n");
+      ::chmod(probe.c_str(), 0755);
+      NeedleRun sr; sr.sandbox = true; std::string out;
+      auto s = run_needle(probe, "x", sr, &out);
+      check(s && has(out, "SECRET_HIDDEN") && !has(out, "SECRET_VISIBLE"), "sandboxed needle: the user's files outside its private directory are invisible");
+      check(has(out, "ETC_READONLY") && !fs::exists("/etc/pnr_probe_write"), "sandboxed needle: system directories are read-only");
+      check(has(out, "TOOLS_READABLE"), "sandboxed needle: it can still read its tools file");
+      check(has(out, "IFACES=lo,") , "sandboxed needle: the only network interface is loopback (no network)");
+      check(has(out, "PID=1"), "sandboxed needle: it runs as PID 1 of a private PID namespace");
+      NeedleRun ur; std::string uout; run_needle(probe, "x", ur, &uout);
+      check(has(uout, "SECRET_VISIBLE"), "control: without the sandbox the same program does see the user's files");
+      bool leftover = false; for (auto& de : fs::directory_iterator("/tmp")) if (de.path().filename().string().rfind("pnr-ask-", 0) == 0) leftover = true;
+      check(!leftover, "sandboxed needle: the private copy and tools file are removed afterwards");
+      spit(d + "/slow2", "#!/bin/sh\nsleep 20\n"); ::chmod((d + "/slow2").c_str(), 0755);
+      sr.timeout_seconds = 1; auto t0 = std::chrono::steady_clock::now();
+      auto st = run_needle(d + "/slow2", "x", sr, &out);
+      check(!st && std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 5, "sandboxed needle: a hung model is still killed at the timeout");
+      NeedleRun sr2; sr2.sandbox = true;
+      spit(d + "/bad2", "#!/bin/sh\nexit 3\n"); ::chmod((d + "/bad2").c_str(), 0755);
+      check(!run_needle(d + "/bad2", "x", sr2, &out), "sandboxed needle: a non-zero exit is still a failure");
+      AskIO sio; bool sandboxed_seen = false;
+      sio.model = [&](const std::string&, std::string* o) { sandboxed_seen = true; *o = "{\"success\":true,\"function_calls\":[],\"confidence\":0.9}"; return pnr::Status::Ok(); };
+      std::string o2; cmd_ask("x", "/x/needle", 0.8, lk, sio, &o2);
+      check(sandboxed_seen && has(o2, "uncalibrated, sandboxed)"), "ask: the sandbox is the default and the output says so");
+      sio.sandbox_model = false; o2.clear(); cmd_ask("x", "/x/needle", 0.8, lk, sio, &o2);
+      check(has(o2, "NOT sandboxed"), "ask: opting out is stated in the output");
+    }
+  }
+
   // ---- the real model, only when the user configured it
   if (const char* nb = std::getenv("PNR_NEEDLE")) {
-    std::string out; auto s = run_needle(nb, "what games do I have", NeedleRun{}, &out);
+    std::string out; NeedleRun rr; rr.sandbox = pnr::sandbox::probe().usable();   // sandboxed whenever this host can
+    auto s = run_needle(nb, "what games do I have", rr, &out);
     auto p = s ? interpret(out, 0.8, lk) : Parsed{};
-    check(s && p.verdict != Verdict::BadOutput && (p.verdict != Verdict::Accepted || p.tool == "list_games"), "REAL needle (PNR_NEEDLE set): output parses, and if accepted the tool is list_games");
+    check(s && p.verdict != Verdict::BadOutput && (p.verdict != Verdict::Accepted || p.tool == "list_games"), "REAL needle (PNR_NEEDLE set, sandboxed if usable): output parses, and if accepted the tool is list_games");
   } else std::printf("SKIP real Needle test: PNR_NEEDLE not set\n");
   fs::remove_all(d);
 }
