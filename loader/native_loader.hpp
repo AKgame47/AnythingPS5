@@ -33,6 +33,12 @@ public:
   LaunchResult launch(const std::string& path,
                       const std::vector<std::string>& args);
 
+  // Same, with extra environment variables set in the child before exec
+  // (e.g. PNR_JAIL_ROOT, LD_LIBRARY_PATH for the PS-ABI shim).
+  LaunchResult launch(const std::string& path,
+                      const std::vector<std::string>& args,
+                      const std::vector<std::string>& env);
+
   // Pre-flight validation only (STEP 1 of the launch workflow).
   ParseResult validate(const std::string& path);
 };
