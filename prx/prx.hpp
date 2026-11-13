@@ -62,6 +62,19 @@ SceInt32 sceKernelFree(void* ptr);
 SceInt32 sceKernelSleep(std::uint32_t seconds);
 SceInt32 sceKernelCreateThread(const char* name, void (*entry)(void*), void* arg);
 
+// Host implementations (libkernel memory management), over POSIX
+// mmap/mprotect/munmap. Only anonymous private mappings are supported;
+// anything else is EINVAL. Queries cover mappings created through this
+// API only - stated, not widened.
+constexpr std::int64_t SCE_KERNEL_PROT_READ = 1;
+constexpr std::int64_t SCE_KERNEL_PROT_WRITE = 2;
+constexpr std::int64_t SCE_KERNEL_PROT_EXEC = 4;
+void* sceKernelMapMemory(std::size_t size, std::int64_t prot);
+SceInt32 sceKernelMunmap(void* addr, std::size_t size);
+SceInt32 sceKernelMTypeprotect(void* addr, std::size_t size, std::int64_t prot);
+SceInt32 sceKernelQueryMemoryProtection(void* addr, void** start, void** end,
+                                        std::int64_t* prot);
+
 // Host implementations (libSceLibcInternal subset). printf is a bounded
 // formatter: %d %i %u %x %s %c %% only, at most 8 variadic args - the
 // honest limit of a NID trampoline; anything else prints literally.
