@@ -52,6 +52,7 @@ const char* import_class_name(ImportClass c) {
     case ImportClass::PrxImplemented: return "prx-implemented";
     case ImportClass::PrxDeclared: return "prx-declared";
     case ImportClass::Unknown: return "unknown";
+    case ImportClass::PnrExtension: return "pnr-extension";
   }
   return "?";
 }
@@ -120,6 +121,8 @@ pnr::Status resolve_imports(const std::string& path,
       if (sym != nullptr) {
         e.klass = sym->implemented ? ImportClass::PrxImplemented
                                    : ImportClass::PrxDeclared;
+      } else if (e.name.rfind("pnr", 0) == 0) {
+        e.klass = ImportClass::PnrExtension;
       } else if (e.name.rfind("sce", 0) == 0) {
         e.klass = ImportClass::Unknown;  // PS-style but outside taxonomy
       }
@@ -128,6 +131,7 @@ pnr::Status resolve_imports(const std::string& path,
         case ImportClass::PrxImplemented: ++out->prx_implemented; break;
         case ImportClass::PrxDeclared: ++out->prx_declared; break;
         case ImportClass::Unknown: ++out->unknown; break;
+        case ImportClass::PnrExtension: ++out->pnr_extension; break;
       }
       out->imports.push_back(std::move(e));
     }
