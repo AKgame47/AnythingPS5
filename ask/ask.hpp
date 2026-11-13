@@ -52,12 +52,19 @@ struct Parsed {
 // Pure function of the model's JSON text: no I/O besides the lookups.
 Parsed interpret(const std::string& needle_json, double threshold, const Lookups& lk);
 
-struct NeedleRun { int timeout_seconds = 30; };
+struct NeedleRun {
+  int timeout_seconds = 30;
+  // D2: run the model program inside PNR's namespace + pivot_root sandbox (no network, no
+  // access to the user's files). It sees a private copy of the executable and the tools
+  // file only. No silent fallback: if the sandbox cannot be entered the model is not run.
+  bool sandbox = false;
+};
 // Runs `needle --tools <tmp> --prompt <text>` with no shell, a cleared
 // environment, stdin from /dev/null, CPU/memory limits and a wall timeout.
 Status run_needle(const std::string& needle_path, const std::string& prompt, const NeedleRun& opt, std::string* json_out);
 
 struct AskIO {
+  bool sandbox_model = true;                                         // D2: run the model program in PNR's sandbox (default); false only via --no-model-sandbox
   bool interactive = false;                                          // stdin and stdout are a terminal
   std::function<bool(const std::string&)> confirm;                   // shown the command; true = run
   std::function<int(const std::vector<std::string>&, std::string*)> runner;  // runs a PNR argv, returns its exit code, appends output
