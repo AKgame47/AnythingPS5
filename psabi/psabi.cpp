@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <filesystem>
@@ -27,6 +28,7 @@
 #include "graphics/demo/cube_shaders.hpp"
 #include "graphics/demo/spin_shaders.hpp"
 #include "graphics/demo/clip_shaders.hpp"
+#include "graphics/demo/lit_shaders.hpp"
 #include "graphics/mat4.hpp"
 #include "graphics/rdna_vertex.hpp"
 #include "graphics/vulkan.hpp"
@@ -57,6 +59,11 @@ struct Gfx {
   std::vector<float> m_verts, m_xyz, m_col;
   std::vector<uint32_t> m_idx;
   uint32_t mesh_draws = 0;
+  // game-uploaded lit mesh (pnrGfxSetLitMesh) and light (pnrGfxSetLight)
+  std::vector<float> l_verts, l_xyz, l_col, l_nrm;
+  std::vector<uint32_t> l_idx, lvs_hand, lvs_clip, lfs;
+  float light[3] = {0.3f, 0.5f, 0.8124f};  // toward the light, view space
+  uint32_t lit_draws = 0;
   std::vector<uint8_t> last;
   std::string error;
 };
@@ -85,6 +92,9 @@ std::int32_t pnrGfxInit(std::uint32_t w, std::uint32_t h) {
   for (size_t i = 0; i + 5 < g.verts.size(); i += 6)
     for (int k = 0; k < 3; ++k) { g.xyz.push_back(g.verts[i + k]); g.col.push_back(g.verts[i + 3 + k]); }
   g.cvs.assign(std::begin(clip_vert), std::end(clip_vert));
+  g.lvs_hand.assign(std::begin(lit_hand_vert), std::end(lit_hand_vert));
+  g.lvs_clip.assign(std::begin(lit_clip_vert), std::end(lit_clip_vert));
+  g.lfs.assign(std::begin(lit_frag), std::end(lit_frag));
   g.vs.assign(std::begin(cube_vert), std::end(cube_vert));
   g.fs.assign(std::begin(spin_frag), std::end(spin_frag));
   g.w = w; g.h = h; g.up = true;
@@ -208,6 +218,115 @@ std::int32_t pnrGfxDrawMesh(float yaw, float pitch, std::int32_t mode) {
 }
 
 std::uint32_t pnrGfxMeshDraws() { return gfx().mesh_draws; }
+
+// ---- lit mesh (per-vertex normals + one directional light) -------------
+// Lambert: rgb = colour * (0.25 + 0.75 * max(d, 0)), d = dot(N, L) per vertex
+// (Gouraud: d is interpolated). mode 0: the hand-authored vertex shader
+// computes d; mode 1: the translated-RDNA dot3 kernel computes d and the
+// clip-space positions. The clamp/ambient live in a hand-authored fragment
+// shader (max() is outside the translated subset). Float policy: unfused
+// binary32 add/mul on the RDNA path, fused/unfused unspecified in the
+// hand-authored path, so results agree within rounding, not bit-for-bit.
+
+// Upload: 9 floats per vertex (x,y,z,r,g,b,nx,ny,nz), 1..24 vertices, 3..384
+// indices (multiple of 3), all finite, indices in range, each normal of unit
+// length within 1% (the shim never silently renormalises). Copied; a failed
+// upload keeps the previous lit mesh. Returns 0 / -1 / -6.
+std::int32_t pnrGfxSetLitMesh(const float* verts, std::uint32_t vertex_count,
+                              const std::uint32_t* indices, std::uint32_t index_count) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  auto bad = [&](const char* why) { g.error = std::string("pnrGfxSetLitMesh: ") + why; return -6; };
+  if (verts == nullptr || indices == nullptr) return bad("null pointer");
+  if (vertex_count == 0 || vertex_count > 24) return bad("vertex count must be 1..24");
+  if (index_count < 3 || index_count > 384 || index_count % 3) return bad("index count must be a multiple of 3 in 3..384");
+  for (std::uint32_t i = 0; i < vertex_count * 9; ++i)
+    if (!std::isfinite(verts[i])) return bad("non-finite vertex float");
+  for (std::uint32_t i = 0; i < vertex_count; ++i) {
+    const float* n = verts + i * 9 + 6;
+    const double len = std::sqrt((double)n[0] * n[0] + (double)n[1] * n[1] + (double)n[2] * n[2]);
+    if (len < 0.99 || len > 1.01) return bad("normal is not unit length (within 1%)");
+  }
+  for (std::uint32_t i = 0; i < index_count; ++i)
+    if (indices[i] >= vertex_count) return bad("index out of range");
+  g.l_verts.assign(verts, verts + vertex_count * 9);
+  g.l_idx.assign(indices, indices + index_count);
+  g.l_xyz.clear(); g.l_col.clear(); g.l_nrm.clear();
+  for (std::uint32_t i = 0; i < vertex_count; ++i)
+    for (int k = 0; k < 3; ++k) {
+      g.l_xyz.push_back(verts[i * 9 + k]);
+      g.l_col.push_back(verts[i * 9 + 3 + k]);
+      g.l_nrm.push_back(verts[i * 9 + 6 + k]);
+    }
+  return 0;
+}
+
+// Direction TOWARD the light in view space (x right, y up on screen is -y in
+// Vulkan clip space but this is plain view space: +z toward the camera).
+// Normalised by the shim; non-finite or near-zero is rejected with -6.
+std::int32_t pnrGfxSetLight(float x, float y, float z) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) { g.error = "pnrGfxSetLight: non-finite"; return -6; }
+  const double len = std::sqrt((double)x * x + (double)y * y + (double)z * z);
+  if (len < 1e-6) { g.error = "pnrGfxSetLight: zero-length direction"; return -6; }
+  g.light[0] = float(x / len); g.light[1] = float(y / len); g.light[2] = float(z / len);
+  return 0;
+}
+
+// Draw the lit mesh rotated by pitch (X) then yaw (Y); mode 0 hand-authored,
+// mode 1 translated RDNA. Returns covered pixels, -7 no lit mesh, -6 bad arg.
+std::int32_t pnrGfxDrawLitMesh(float yaw, float pitch, std::int32_t mode) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  if (g.l_idx.empty()) { g.error = "pnrGfxSetLitMesh first"; return -7; }
+  if (mode != 0 && mode != 1) { g.error = "pnrGfxDrawLitMesh: mode must be 0 or 1"; return -6; }
+  if (!std::isfinite(yaw) || !std::isfinite(pitch)) { g.error = "pnrGfxDrawLitMesh: non-finite angle"; return -6; }
+  using namespace pnr::graphics;
+  const Mat4 P = mat4_perspective(1.0471976f, (float)g.w / (float)g.h, 0.1f, 10.0f);
+  const Mat4 T = mat4_translate(0, 0, -3);
+  const Mat4 M = mat4_mul(mat4_rotate_x(pitch), mat4_rotate_y(yaw));
+  const Mat4 mvp = mat4_mul(P, mat4_mul(T, M));
+  float lobj[3];  // R^T * L: the view-space light in the mesh's object space
+  for (int c = 0; c < 3; ++c) lobj[c] = M[c * 4 + 0] * g.light[0] + M[c * 4 + 1] * g.light[1] + M[c * 4 + 2] * g.light[2];
+  const float black[4] = {0, 0, 0, 1};
+  std::int32_t r;
+  if (mode == 0) {
+    auto words = mat4_words(mvp);
+    for (int k = 0; k < 3; ++k) { std::uint32_t u; std::memcpy(&u, &lobj[k], 4); words.push_back(u); }
+    words.push_back(0);
+    std::vector<std::vector<std::uint32_t>> push{words};
+    std::vector<std::vector<std::uint8_t>> out;
+    auto st = g.vk.render_lit_mesh_frames_rgba(g.w, g.h, g.lvs_hand, g.lfs, g.l_verts, g.l_idx, true, push, black, &out);
+    if (!st || out.size() != 1) { g.error = st ? "no frame" : st.error.message; return -3; }
+    g.last = std::move(out[0]);
+    ++g.frames;
+    r = coverage(g.last);
+  } else {
+    std::vector<float> clip, d;
+    auto st = rdna_transform_points(g.vk, g.l_xyz, mat4_words(mvp), &clip);
+    if (!st) { g.error = st.error.message; return -4; }
+    st = rdna_light_dots(g.vk, g.l_nrm, lobj, &d);
+    if (!st) { g.error = st.error.message; return -4; }
+    std::vector<float> cv;
+    for (size_t i = 0; i < g.l_xyz.size() / 3; ++i) {
+      for (int c = 0; c < 4; ++c) cv.push_back(clip[i * 4 + c]);
+      for (int c = 0; c < 3; ++c) cv.push_back(g.l_col[i * 3 + c]);
+      cv.push_back(d[i]);
+    }
+    std::vector<std::uint8_t> img;
+    st = g.vk.render_lit_clip_mesh_rgba(g.w, g.h, g.lvs_clip, g.lfs, cv, g.l_idx, true, black, &img);
+    if (!st) { g.error = st.error.message; return -3; }
+    g.last = std::move(img);
+    ++g.frames; ++g.rdna_frames;
+    r = coverage(g.last);
+  }
+  if (r >= 0) ++g.lit_draws;
+  return r;
+}
+
+std::uint32_t pnrGfxLitDraws() { return gfx().lit_draws; }
+
 
 std::uint32_t pnrGfxRdnaFramesRendered() { return gfx().rdna_frames; }
 
