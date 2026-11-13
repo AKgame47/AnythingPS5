@@ -53,14 +53,19 @@ inline constexpr uint32_t DecorBinding = 33;
 // guest registers. Load.a is a word index; Store.a is a value node and
 // Store.b is a word index. Indices must be less than buffer_words. The emitter
 // returns empty for malformed IR instead of emitting invalid SPIR-V.
-enum class U32Op { Constant, Load, Add, Sub, And, Or, Xor, Store, GuardedLoad, GuardedStore, InvocationIndex, SelectEqual, UniformInput, FAdd, FSub, FMul, CarryAdd, BorrowSub, GuardedLoad64, GuardedStore64, LoopAdd, LoopAddUniform };
+enum class U32Op { Constant, Load, Add, Sub, And, Or, Xor, Store, GuardedLoad, GuardedStore, InvocationIndex, SelectEqual, UniformInput, FAdd, FSub, FMul, CarryAdd, BorrowSub, GuardedLoad64, GuardedStore64, LoopAdd, LoopAddUniform, LoopCopy, LoopCopySource, LoopCopyDest };
 // GuardedLoad.a is a runtime guest low-address node. GuardedStore.a is
 // data and .b is the address node. Invalid loads return 0; stores skip.
 // SelectEqual: a==b ? c : d; emits structured branch + uint Phi.
 // LoopAdd: a=initial, b=invariant delta, c=literal count 1..64; structured loop.
 // LoopAddUniform.c is matching UniformInput node; requires loop_count_uniform
 // parameter 0..15 and its entry guard. Sentinel 16 means no runtime-count guard.
-struct U32Node { U32Op op; uint32_t a = 0, b = 0, c = 0, d = 0; };
+// LoopCopy: a/b=source/dest low-address nodes, c=count or UniformInput node,
+// d=0 literal count / 1 runtime, e/f=source/dest byte steps, g/h=FLAT offsets.
+// Result=last loaded dword. LoopCopySource/Dest.a=earlier LoopCopy node,
+// results are final low pointers. Only translator performs two-axis alias
+// proof; emitter always guards each memory operation inside the loop.
+struct U32Node { U32Op op; uint32_t a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0; };
 class SpirvModule {
 public:
   // Emit a compute shader with LocalSize 1x1x1 that stores `value` into
