@@ -1170,8 +1170,8 @@ int main() {
     reject(w, "dynamic: undefined ALU register rejected");
     w = kernel(0x25); w[8] = (0x25u<<25u) | (2u<<17u) | (3u<<9u) | 249u;
     reject(w, "dynamic: ALU SDWA rejected");
-    w = kernel(0x25); w[8] = (0x08u<<25u) | (2u<<17u) | (3u<<9u) | 258u;
-    reject(w, "dynamic: float ALU rejected");
+    w = kernel(0x25); w[8] = (0x0fu<<25u) | (2u<<17u) | (3u<<9u) | 258u;
+    reject(w, "dynamic: float min outside subset rejected");
     w = kernel(0x25); w[5] = 0x017f0000; // load overwrites high address v1
     reject(w, "dynamic: runtime-dependent high address rejected");
     CHECK(SpirvModule::compute_u32({{U32Op::Add,0,0}}).empty(),
@@ -1747,6 +1747,106 @@ int main() {
                 "uniform: byte entry preserves uniform input ABI");
         }
       }else CHECK(false,"uniform: physical device available");
+    }
+  }
+
+
+  // --- Binary32 host-policy add/sub/mul, register storage stays raw uint ---
+  {
+    using namespace pnr::shader;using namespace pnr::graphics;
+    constexpr uint64_t base=0x1200001000ull;
+    auto code=[](uint32_t op){return std::vector<uint32_t>{
+      0x7e0002ff,0x1000,0x7e0202ff,0x12,0xdc300000,0x027f0000,
+      0xdc300004,0x037f0000,(op<<25u)|(2u<<17u)|(3u<<9u)|258u,
+      0xdc700008,0x007f0200,0xbf810000};};
+    auto reject=[&](std::vector<uint32_t> w,const char* name){
+      auto t=translate_compute_words(w,base,4);
+      CHECK(!t.ok && t.spirv.empty(),name);
+    };
+    auto w=code(3);w[8]=(3u<<25u)|(2u<<17u)|(9u<<9u)|258u;
+    reject(w,"f32: undefined vector source rejected");
+    w=code(3);w[8]=(3u<<25u)|(2u<<17u)|(3u<<9u)|249u;
+    reject(w,"f32: SDWA source rejected");
+    w=code(3);w[8]=(3u<<25u)|(2u<<17u)|(3u<<9u)|250u;
+    reject(w,"f32: DPP source rejected");
+    w=code(3);w[8]=(3u<<25u)|(2u<<17u)|(3u<<9u)|242u;
+    reject(w,"f32: inline float selector not yet implemented rejected");
+    reject(code(5),"f32: reverse subtract outside subset rejected");
+    reject(code(0xf),"f32: min/NaN alternative semantics not guessed");
+    w=code(3);w[8]=0xd5030002;w.insert(w.begin()+9,0x60302);
+    reject(w,"f32: VOP3 modifiers outside subset rejected");
+    CHECK(SpirvModule::compute_u32({{U32Op::FAdd,0,0}}).empty(),
+          "f32: malformed float SSA refs rejected");
+    struct Case {uint32_t a,b,add,sub,mul;bool nan=false;};
+    const std::vector<Case> cases={
+      {0x3fc00000,0x40100000,0x40700000,0xbf400000,0x40580000}, // 1.5,2.25
+      {0xbf800000,0x40000000,0x3f800000,0xc0400000,0xc0000000}, // -1,2
+      {0x3f800000,0x33800000,0x3f800000,0x3f7fffff,0x33800000}, // tie add 1+2^-24
+      {0x3f800001,0x33800000,0x3f800002,0x3f800000,0x33800001}, // tie odd -> even
+      {0x80000000,0x80000000,0x80000000,0,0},
+      {0x7fc12345,0x3f800000,0,0,0,true}, // NaN classification only
+      {0x7f800001,0x3f800000,0,0,0,true} // signaling payload: no exact bit promise
+    };
+    VulkanBackend vk;auto st=vk.open();
+    if(!st)std::printf("    note: f32 Vulkan skipped: %s\n",st.error.message.c_str());
+    else {
+      st=vk.create_instance("pnr-float-tests");CHECK(st,"f32: Vulkan instance created");
+      if(st && !vk.devices().empty()) {
+        st=vk.create_device(0);CHECK(st,"f32: compute device created");
+        if(st)for(uint32_t op:{3u,4u,8u}) {
+          auto t=translate_compute_words(code(op),base,4);
+          CHECK(t.ok && t.host_float32 && !t.stored_value_known,"f32: host-policy metadata, runtime values not invented");
+          bool arithmetic=false,decorate=false;
+          for(size_t i=5;i<t.spirv.size();) {
+            auto opcode=t.spirv[i]&65535;
+            arithmetic|=opcode==(op==3?129u:op==4?131u:133u);
+            decorate|=opcode==71 && (t.spirv[i]>>16u)==3 && t.spirv[i+2]==42;
+            if(!(t.spirv[i]>>16u))break;
+            i+=t.spirv[i]>>16u;
+          }
+          CHECK(arithmetic && decorate,"f32: real float operation and NoContraction decoration emitted");
+          const char* val=std::getenv("PNR_SPIRV_VAL");
+          if(val && std::filesystem::exists(val)) {
+            const std::string path="/tmp/pnr_float_"+std::to_string(::getpid())+".spv";
+            {std::ofstream o(path,std::ios::binary);o.write(reinterpret_cast<const char*>(t.spirv.data()),t.spirv.size()*4);}
+            CHECK(std::system((std::string(val)+" --target-env vulkan1.0 "+path).c_str())==0,
+                  "f32: bitcast arithmetic module validates for Vulkan 1.0");
+            std::filesystem::remove(path);
+          }else std::puts("    note: float validator skipped (not configured)");
+          for(const auto& c:cases) {
+            std::vector<uint32_t> io={c.a,c.b,0xdeadbeef,0xcafebabe};
+            auto run=run_translated_compute(vk,t,&io);
+            const uint32_t expect=op==3?c.add:op==4?c.sub:c.mul;
+            const bool nan=(io[2]&0x7f800000)==0x7f800000 && (io[2]&0x7fffff)!=0;
+            CHECK(run && io[0]==c.a && io[1]==c.b && io[3]==0xcafebabe && (c.nan?nan:io[2]==expect),
+                  "f32: lavapipe finite/zero exact bits or NaN class, input/neighbor unchanged");
+          }
+          // Literal source and scalar uniform are raw bit operands, not int->float conversions.
+          auto literal_code=code(op);
+          literal_code[8]=(op<<25u)|(2u<<17u)|(3u<<9u)|255u;
+          literal_code.insert(literal_code.begin()+9,0x3fc00000);
+          auto literal=translate_compute_words(literal_code,base,4);
+          std::vector<uint32_t> lit_io={0,0x40100000,0,0xcafebabe};
+          auto lit_run=run_translated_compute(vk,literal,&lit_io);
+          CHECK(literal.ok && lit_run && lit_io[2]==(op==3?0x40700000u:op==4?0xbf400000u:0x40580000u),
+                "f32: literal raw bits used as binary32 source");
+          auto uniform_code=code(op);uniform_code[8]=(op<<25u)|(2u<<17u)|(3u<<9u);
+          auto uniform=translate_compute_words(uniform_code,base,4,1,1);
+          lit_io={0,0x40100000,0,0xcafebabe};
+          lit_run=run_translated_compute(vk,uniform,&lit_io,{0x3fc00000});
+          CHECK(uniform.ok && lit_run && lit_io[2]==(op==3?0x40700000u:op==4?0xbf400000u:0x40580000u),
+                "f32: scalar uniform raw bits used as binary32 source");
+          // Observation only: portable NaN/Inf/denorm bit preservation is not asserted.
+          for(const auto& pair:std::vector<std::pair<uint32_t,uint32_t>>{
+              {0x7f800000,0x3f800000},{1,0x3f800000},{0x7f7fffff,0x40000000}}) {
+            std::vector<uint32_t> io={pair.first,pair.second,0,0xcafebabe};
+            auto run=run_translated_compute(vk,t,&io);
+            CHECK(run && io[3]==0xcafebabe,"f32: special-value probe dispatch succeeds");
+            std::printf("    f32 host probe op=%u a=0x%08x b=0x%08x result=0x%08x (observation, not portability claim)\n",
+                        op,pair.first,pair.second,io[2]);
+          }
+        }
+      }else CHECK(false,"f32: physical device available");
     }
   }
 
