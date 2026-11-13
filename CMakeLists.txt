@@ -149,3 +149,8 @@ add_test(NAME pnr_psgame_workflow
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/psgame_workflow.cmake)
 set_tests_properties(pnr_psgame_workflow PROPERTIES
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+# Compact shader audit corpus and deterministic mutation diagnostics.
+add_executable(pnr_shader_checks tests/shader_fixtures.cpp)
+target_link_libraries(pnr_shader_checks PRIVATE pnr_shader)
+add_test(NAME pnr_shader_fixtures COMMAND pnr_shader_checks)
