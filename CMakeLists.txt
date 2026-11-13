@@ -108,7 +108,7 @@ target_link_libraries(pnr_psn PUBLIC pnr_library pnr_core ${CMAKE_DL_LIBS})
 # Unofficial store core (slice A1: sources, index validation, search; no downloads yet)
 add_library(pnr_store store/store.cpp store/store_cli.cpp store/download.cpp crypto/ed25519.cpp scan/scan.cpp research/research.cpp ask/ask.cpp)
 target_include_directories(pnr_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(pnr_store PUBLIC pnr_psn pnr_package pnr_core pnr_loader)
+target_link_libraries(pnr_store PUBLIC pnr_psn pnr_package pnr_core pnr_loader pnr_sandbox)
 
 # CLI launcher (STEP 1-10 workflow driver)
 add_library(pnr_sandbox sandbox/sandbox.cpp)
