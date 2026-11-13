@@ -57,11 +57,11 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**1431/1431 unit tests pass, 13/13 CTest suites pass** (unit, end-to-end native
+**1500/1500 unit tests pass, 13/13 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journey, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
-and on a build against the official Vulkan headers. ASan+UBSan: 1431/1431
+and on a build against the official Vulkan headers. ASan+UBSan: 1500/1500
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -632,6 +632,29 @@ would sit on, with a text/JSON front end.
   path routing, not a security sandbox. Imported games are whatever the
   importer wrote. Exit codes: 0 ok, 1 game ran but not clean, 2 unknown id or library open failure, 64 usage.
 
+### Library management (second launcher slice)
+
+Status: **Implemented, Tested**, still headless.
+
+- `compat set <id> <state> [--note TEXT]`, `compat show <id>`, `compat states`.
+  Only a person sets a state this way. It is stored as human-set.
+  Launches and re-imports never overwrite it, not even a human-set
+  "Untested". No automatic path ever writes a "Playable" state.
+  Unknown ids, unknown state names, notes over 500 bytes and notes with control
+  characters are refused.
+- `history <id> [--limit N] [--json]`: launches newest first (time in UTC,
+  exit code, wall time). N is 1..1000.
+- `scan <dir> [--json]`: read-only. Looks at regular files in one directory
+  (not recursive, symlinks and folders skipped, at most 1000 entries). A
+  `.pnrgame` gets the same checks an import runs (structure, manifest,
+  SHA-256, x86-64 ELF entry) with no extraction and no library change. An
+  ELF file gets a parse check and import counts by class. It imports and runs
+  nothing, and says nothing about whether a game works.
+- Older libraries are migrated by adding a `human_set` column. Existing
+  states count as automatic.
+- Limit: `pnr run <id>` honors the human-set mark too, but all of it is
+  single-user local bookkeeping, not tamper-proof.
+
 Real captured output (`ps_demo` packaged and imported, then driven):
 
 ```
@@ -651,6 +674,33 @@ $ pnr-launcher list --json
 {"games":[{"game_id":"ps-demo","title":"PNR PS Demo","version":"0.1.0","platform":"pnr-dev","compatibility":"Launches Only","compatibility_notes":"launched natively, exit 0; gameplay not verified","installed":true,"install_path":"./pnr_data/games/ps-demo-0.1.0","executable":"bin/game","integrity":"verified","runnable":true,"not_runnable_reason":"","launch_count":1}],"count":1}
 $ pnr-launcher launch nope
 LAUNCH NOT STARTED: no such game id in the library
+```
+
+Second captured session (library management; a person set the state, then
+two launches left it alone):
+
+```
+$ pnr-launcher scan ./demo_dir
+cut.bin  [elf]  REJECTED: file too small to contain an ELF header (30 bytes)
+ps.pnrgame  [pnrgame]  valid package id=ps-demo v0.1.0  already in library
+ps_demo  [elf]  valid x86-64 ELF; imports: 8 host, 8 prx-implemented, 6 prx-declared-only, 0 unknown, 0 pnr-extension
+3 inspected, 1 other files skipped
+scan is read-only classification: nothing imported, extracted or run
+$ pnr-launcher compat set ps-demo "Playable With Issues" --note "boots, no audio"
+COMPAT SET: ps-demo -> Playable With Issues (set by a person)
+$ pnr-launcher launch ps-demo
+LAUNCH OK: exit 0 in 0.023s
+$ pnr-launcher compat show ps-demo
+ps-demo: Playable With Issues  (set by a person)
+  notes: boots, no audio
+$ pnr-launcher launch ps-demo
+LAUNCH OK: exit 0 in 0.023s
+$ pnr-launcher history ps-demo --limit 5
+PNR PS Demo  (ps-demo)  total launches: 2
+  2026-11-13 18:59:09Z  exit 0  0.023s
+  2026-11-13 18:59:09Z  exit 0  0.023s
+$ pnr-launcher compat set ps-demo "Fully Awesome"
+launcher: compat set refused: unknown compatibility state: Fully Awesome
 ```
 
 ## Windows build
@@ -691,7 +741,7 @@ platform/    MODULE 07 - host OS abstraction, Linux + Windows backends (Windows 
 ape/         MODULE 05 - adaptive performance engine (classification, frame stats, controller)
 laptop/      MODULE 06 - laptop optimization manager (power modes, caps)
 package/     .pnrgame format: ustar, SHA-256, importer
-launcher/    MODULE 10 core - headless launcher core (list, details, launch + history)
+launcher/    MODULE 10 core - headless launcher core (list, details, launch, history, human compatibility, read-only scan)
 library/     MODULE 09 - SQLite game/installation/compatibility/launch store
 services/    MODULE 08 - virtual filesystem, input, audio backends
 tools/       pnr_make_package - dev package builder
