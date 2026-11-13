@@ -313,15 +313,15 @@ touches nothing in the library.
   dispatch environment.
 
 
-## IF-GRAPH-03 Restricted integer-compute translation (v6)
+## IF-GRAPH-03 Restricted integer-compute translation (v7)
 
 Status: Experimental, Implemented (strict subset), Tested.
 
-- `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base, buffer_words=1, local_size_x=1)` parses
+- `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base, buffer_words=1, local_size_x=1, uniform_words=0)` parses
   little-endian words without alignment assumptions; partial words fail.
-  `translate_compute_words(words, guest_base, buffer_words=1, local_size_x=1)` is the word-level entry point.
+  `translate_compute_words(words, guest_base, buffer_words=1, local_size_x=1, uniform_words=0)` is the word-level entry point.
 - Result: `ok`, diagnostic `error`, `spirv`, `stored_value_known`,
-  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`. Every failure returns empty SPIR-V. `stored_value` is
+  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`, `required_uniform_words`. Every failure returns empty SPIR-V. `stored_value` is
   meaningful only when `stored_value_known` is true; runtime results are
   never invented by the compiler.
 - Explicit test ABI: one workgroup with 1..64 invocations, one fixed-size uint array SSBO at set 0/binding 0.
@@ -346,7 +346,7 @@ Status: Experimental, Implemented (strict subset), Tested.
   no carry into high word is inferred. This is not full 64-bit pointer math.
   FLAT scalar address must be 0x7f, all segment/cache/LDS/reserved
   fields zero (including offset bit 11); load VDATA/store VDST must be zero.
-- `graphics::SpirvModule::compute_u32(nodes, buffer_words=1, guest_base_low=0, local_size_x=1)` emits the straight-line uint
+- `graphics::SpirvModule::compute_u32(nodes, buffer_words=1, guest_base_low=0, local_size_x=1, uniform_words=0)` emits the straight-line uint
   IR. Invalid forward references or reads from Store nodes return empty.
   Load.a and Store.b are checked word indices; malformed/out-of-range
   static accesses produce no module. GuardedLoad.a is an earlier runtime
@@ -472,3 +472,35 @@ Status: Experimental, Implemented (strict subset), Tested.
 diagnostics; CTest name `pnr_shader_fixtures`. See `shader-audit.md` for exact
 coverage, sanitizer scope and reproduction. Shared scalar literal selectors
 consume one word, with PC/truncation regression checks.
+
+
+### Explicit scalar/uniform input ABI
+
+- Translation entry points take uniform_words=0..16. Initial ordinary SGPRs
+  s0..sN-1 are runtime push-constant inputs, uniform across invocations.
+  Other initial SGPRs stay undefined. Values are not compilation parameters;
+  a single module accepts changing inputs at dispatch. This is PNR test ABI,
+  not a Sony user-data/descriptor layout or generic uniform-buffer support.
+- IR UniformInput.a selects a checked member of a PushConstant Block with
+  uint members at offsets 0,4,... . SPIR-V 1.0 push variables are not listed
+  as Input/Output entry-point interface variables. Storage/decoration values
+  checked using spirv-as, full modules validated for Vulkan 1.0.
+- `run_translated_compute(backend, translation, io, uniforms={})` requires
+  exactly required_uniform_words values before Vulkan. Missing/extra values,
+  or malformed counts >16 fail without modifying io. Raw backend optional
+  uniform vector also caps at 16, but matching shader layout is caller-owned.
+- Backend pipeline layout declares that compute push range and command
+  recording calls vkCmdPushConstants before dispatch. No new descriptor set
+  is used. VkPushConstantRange shim was checked against official headers;
+  complete Release -Werror tests pass with both shim and official headers.
+- Existing scalar moves and compare use these runtime SSA inputs. Vector
+  integer ALU can read a declared SGPR as its scalar source. SGPR copies keep
+  old values after later overwrites. Uniform-derived addresses remain runtime
+  data, subject to guards in single mode and affine restrictions in multi mode.
+- Tests execute changing uniforms on unchanged modules: copied s0 values,
+  s15 with overflow arithmetic, both uniform-compare outcomes, and broadcast
+  increment for an eight-invocation separate-input/output kernel. Four modules
+  validate and execute on lavapipe. Negative tests cover count/index limits,
+  undeclared SGPRs, special scalar destinations and missing/extra dispatch data.
+- Still no scalar arithmetic flags, scalar memory/resource descriptors,
+  wave reduction, multi-invocation scalar branch or commercial shader ABI.
