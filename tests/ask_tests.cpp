@@ -43,7 +43,7 @@ void pnr_ask_tests(int& pass, int& fail) {
     std::set<std::string> mut, names;
     for (auto& t : tools()) { names.insert(t.name); if (t.mutating) mut.insert(t.name); }
     check(mut == std::set<std::string>{"launch_game", "store_get", "store_install", "import", "remove"}, "table: exactly the five approved mutating commands are marked mutating");
-    check(names.size() == 14, "table: 14 commands in D1");
+    check(names.size() == 15, "table: 15 commands (D1 + suggest_manifest)");
     bool bad = false;
     for (auto& t : tools()) {
       for (auto& a : t.argv) if (a == "--yes" || a == "--force" || a == "--allow-flagged" || a == "--overwrite" || a == "--complete") bad = true;
@@ -52,9 +52,10 @@ void pnr_ask_tests(int& pass, int& fail) {
       if (t.argv[0] == "research" && t.argv.size() > 1 && t.argv[1] == "fetch") bad = true;
       if (t.argv[0] == "store" && t.argv.size() > 1 && (t.argv[1] == "source")) bad = true;
     }
+    for (auto& t : tools()) for (auto& a : t.argv) if (a == "--out") bad = true;
     check(!bad, "table: psn, set-token, source, compat set, research fetch and the --yes/--force/--allow-flagged flags are unreachable");
     pnr::psn::Json j; std::string e;
-    check(pnr::psn::json_parse(tools_json(), &j, &e) && j.is(pnr::psn::Json::T::Arr) && j.a.size() == 14 && j.a[1].get("parameters") != nullptr, "table: tools_json is valid JSON generated from the table");
+    check(pnr::psn::json_parse(tools_json(), &j, &e) && j.is(pnr::psn::Json::T::Arr) && j.a.size() == 15 && j.a[1].get("parameters") != nullptr, "table: tools_json is valid JSON generated from the table");
   }
 
   // ---- interpret
@@ -132,7 +133,7 @@ void pnr_ask_tests(int& pass, int& fail) {
     check(has(args, "--tools\n") && has(args, "--prompt\nwhat games do I have\n"), "needle: invoked with --tools <file> --prompt <text> as separate argv elements");
     const std::string env = slurp(d + "/env.txt");
     check(!has(env, "PNR_SECRET_TEST") && !has(env, "HOME_TEST_X") && has(env, "PATH=/usr/bin:/bin"), "needle: the environment is cleared (no tokens or PNR variables reach the model program)");
-    pnr::psn::Json j; std::string e; check(pnr::psn::json_parse(slurp(d + "/tools_copy.json"), &j, &e) && j.a.size() == 14, "needle: the tools file it received is PNR's generated table");
+    pnr::psn::Json j; std::string e; check(pnr::psn::json_parse(slurp(d + "/tools_copy.json"), &j, &e) && j.a.size() == 15, "needle: the tools file it received is PNR's generated table");
     bool leftover = false; for (auto& de : fs::directory_iterator("/tmp")) if (de.path().filename().string().rfind("pnr-ask-", 0) == 0) leftover = true;
     check(!leftover, "needle: the temporary tools file is removed");
     const std::string evil = "x'; touch " + d + "/pwned; echo '";
@@ -166,6 +167,7 @@ void pnr_ask_tests(int& pass, int& fail) {
       ::chmod(probe.c_str(), 0755);
       NeedleRun sr; sr.sandbox = true; std::string out;
       auto s = run_needle(probe, "x", sr, &out);
+      if (!s) std::printf("note: sandboxed probe failed: %s\n", s.error.message.c_str());
       check(s && has(out, "SECRET_HIDDEN") && !has(out, "SECRET_VISIBLE"), "sandboxed needle: the user's files outside its private directory are invisible");
       check(has(out, "ETC_READONLY") && !fs::exists("/etc/pnr_probe_write"), "sandboxed needle: system directories are read-only");
       check(has(out, "TOOLS_READABLE"), "sandboxed needle: it can still read its tools file");
