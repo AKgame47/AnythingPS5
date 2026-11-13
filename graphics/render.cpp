@@ -21,6 +21,35 @@ Status VulkanBackend::render_offscreen_rgba(
     uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
     const std::vector<uint32_t>& fs, uint32_t vertex_count, const float clear[4],
     std::vector<uint8_t>* out) {
+  if (!out) return Status::Fail(100, "vulkan", "render needs an output buffer");
+  std::vector<std::vector<uint8_t>> fr;
+  Status s = render_core(w, h, vs, fs, vertex_count, nullptr, nullptr, clear, &fr);
+  if (s && !fr.empty()) *out = std::move(fr[0]);
+  return s;
+}
+
+Status VulkanBackend::render_frames_rgba(
+    uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
+    const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
+    const std::vector<std::vector<uint32_t>>& fp, const float clear[4],
+    std::vector<std::vector<uint8_t>>* frames) {
+  if (vertices.empty() || vertices.size() % 5)
+    return Status::Fail(100, "vulkan", "vertices must be float2 position + float3 colour per vertex (multiple of 5 floats)");
+  if (fp.empty() || fp.size() > 64)
+    return Status::Fail(100, "vulkan", "frame count must be 1..64");
+  for (auto& p : fp)
+    if (p.empty() || p.size() > 16 || p.size() != fp[0].size())
+      return Status::Fail(100, "vulkan", "push constants must be 1..16 words, same size every frame");
+  return render_core(w, h, vs, fs, (uint32_t)(vertices.size() / 5), &vertices, &fp, clear, frames);
+}
+
+Status VulkanBackend::render_core(
+    uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
+    const std::vector<uint32_t>& fs, uint32_t vertex_count,
+    const std::vector<float>* verts, const std::vector<std::vector<uint32_t>>* fp,
+    const float clear[4], std::vector<std::vector<uint8_t>>* out) {
+  const uint32_t nframes = fp ? (uint32_t)fp->size() : 1;
+  const uint32_t push_words = fp ? (uint32_t)(*fp)[0].size() : 0;
   if (!device_ || !out) return Status::Fail(100, "vulkan", "render needs a device and an output buffer");
   if (!(queue_flags_ & VK_QUEUE_GRAPHICS_BIT))
     return Status::Fail(100, "vulkan", "selected queue family has no graphics support; offscreen render Blocked on this device");
@@ -37,6 +66,7 @@ Status VulkanBackend::render_offscreen_rgba(
   } guard{undo};
 
   const VkDeviceSize bytes = (VkDeviceSize)w * h * 4;
+  const VkDeviceSize total = bytes * nframes;
   VkPhysicalDeviceMemoryProperties mem{};
   fn<void (*)(VkPhysicalDevice, VkPhysicalDeviceMemoryProperties*)>(
       vkGetPhysicalDeviceMemoryProperties)(phys_, &mem);
@@ -94,7 +124,7 @@ Status VulkanBackend::render_offscreen_rgba(
   // --- host readback buffer ---
   VkBufferCreateInfo bci{};
   bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bci.size = bytes; bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  bci.size = total; bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
   bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   VkBuffer buf = 0;
   r = fn<VkResult (*)(VkDevice, const VkBufferCreateInfo*, void*, VkBuffer*)>(
@@ -113,6 +143,37 @@ Status VulkanBackend::render_offscreen_rgba(
   undo.push_back([&, bmem] { fn<void (*)(VkDevice, VkDeviceMemory, void*)>(vkFreeMemory)(device_, bmem, nullptr); });
   r = fn<VkResult (*)(VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize)>(vkBindBufferMemory)(device_, buf, bmem, 0);
   if (r != VK_SUCCESS) return vkfail("vkBindBufferMemory", r);
+
+  // --- optional vertex buffer (host visible, written once) ---
+  VkBuffer vbuf = 0;
+  if (verts) {
+    VkBufferCreateInfo vb{};
+    vb.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    vb.size = verts->size() * 4; vb.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vb.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    r = fn<VkResult (*)(VkDevice, const VkBufferCreateInfo*, void*, VkBuffer*)>(
+        vkCreateBuffer)(device_, &vb, nullptr, &vbuf);
+    if (r != VK_SUCCESS) return vkfail("vkCreateBuffer (vertex)", r);
+    undo.push_back([&, vbuf] { fn<void (*)(VkDevice, VkBuffer, void*)>(vkDestroyBuffer)(device_, vbuf, nullptr); });
+    VkMemoryRequirements vreq{};
+    fn<void (*)(VkDevice, VkBuffer, VkMemoryRequirements*)>(vkGetBufferMemoryRequirements)(device_, vbuf, &vreq);
+    int vt = pick(vreq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vt < 0) return Status::Fail(100, "vulkan", "no host-visible+coherent memory type for the vertex buffer");
+    mai.allocationSize = vreq.size; mai.memoryTypeIndex = (uint32_t)vt;
+    VkDeviceMemory vmem = 0;
+    r = fn<VkResult (*)(VkDevice, const VkMemoryAllocateInfo*, void*, VkDeviceMemory*)>(
+        vkAllocateMemory)(device_, &mai, nullptr, &vmem);
+    if (r != VK_SUCCESS) return vkfail("vkAllocateMemory (vertex)", r);
+    undo.push_back([&, vmem] { fn<void (*)(VkDevice, VkDeviceMemory, void*)>(vkFreeMemory)(device_, vmem, nullptr); });
+    r = fn<VkResult (*)(VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize)>(vkBindBufferMemory)(device_, vbuf, vmem, 0);
+    if (r != VK_SUCCESS) return vkfail("vkBindBufferMemory (vertex)", r);
+    void* vm = nullptr;
+    r = fn<VkResult (*)(VkDevice, VkDeviceMemory, VkDeviceSize, VkDeviceSize, VkFlags, void**)>(
+        vkMapMemory)(device_, vmem, 0, verts->size() * 4, 0, &vm);
+    if (r != VK_SUCCESS) return vkfail("vkMapMemory (vertex)", r);
+    std::memcpy(vm, verts->data(), verts->size() * 4);
+    fn<void (*)(VkDevice, VkDeviceMemory)>(vkUnmapMemory)(device_, vmem);
+  }
 
   // --- render pass: clear on load, store, end in TRANSFER_SRC ---
   VkAttachmentDescription att{};
@@ -174,6 +235,8 @@ Status VulkanBackend::render_offscreen_rgba(
 
   VkPipelineLayoutCreateInfo plci{};
   plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  VkPushConstantRange prange{VK_SHADER_STAGE_VERTEX_BIT, 0, push_words * 4};
+  if (push_words) { plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &prange; }
   VkPipelineLayout pl = 0;
   r = fn<VkResult (*)(VkDevice, const VkPipelineLayoutCreateInfo*, void*, VkPipelineLayout*)>(
       vkCreatePipelineLayout)(device_, &plci, nullptr, &pl);
@@ -186,6 +249,13 @@ Status VulkanBackend::render_offscreen_rgba(
   stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fmod; stages[1].pName = "main";
   VkPipelineVertexInputStateCreateInfo vin{};
   vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  VkVertexInputBindingDescription vbind{0, 20, VK_VERTEX_INPUT_RATE_VERTEX};
+  VkVertexInputAttributeDescription vattr[2] = {
+      {0, 0, VK_FORMAT_R32G32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 8}};
+  if (verts) {
+    vin.vertexBindingDescriptionCount = 1; vin.pVertexBindingDescriptions = &vbind;
+    vin.vertexAttributeDescriptionCount = 2; vin.pVertexAttributeDescriptions = vattr;
+  }
   VkPipelineInputAssemblyStateCreateInfo ia{};
   ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
   ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -229,39 +299,53 @@ Status VulkanBackend::render_offscreen_rgba(
       vkCreateCommandPool)(device_, &kpci, nullptr, &pool);
   if (r != VK_SUCCESS) return vkfail("vkCreateCommandPool", r);
   undo.push_back([&, pool] { fn<void (*)(VkDevice, VkCommandPool, void*)>(vkDestroyCommandPool)(device_, pool, nullptr); });
+  std::vector<VkCommandBuffer> cmds(nframes);
   VkCommandBufferAllocateInfo cbai{};
   cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
   cbai.commandPool = pool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  cbai.commandBufferCount = 1;
-  VkCommandBuffer cmd = 0;
+  cbai.commandBufferCount = nframes;
   r = fn<VkResult (*)(VkDevice, const VkCommandBufferAllocateInfo*, VkCommandBuffer*)>(
-      vkAllocateCommandBuffers)(device_, &cbai, &cmd);
+      vkAllocateCommandBuffers)(device_, &cbai, cmds.data());
   if (r != VK_SUCCESS) return vkfail("vkAllocateCommandBuffers", r);
 
-  VkCommandBufferBeginInfo begin{};
-  begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-  begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  fn<VkResult (*)(VkCommandBuffer, const VkCommandBufferBeginInfo*)>(vkBeginCommandBuffer)(cmd, &begin);
   VkClearValue cv{};
   for (int i = 0; i < 4; ++i) cv.color.float32[i] = clear[i];
   VkRenderPassBeginInfo rbi{};
   rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
   rbi.renderPass = rp; rbi.framebuffer = fb; rbi.renderArea = sc;
   rbi.clearValueCount = 1; rbi.pClearValues = &cv;
-  fn<void (*)(VkCommandBuffer, const VkRenderPassBeginInfo*, int32_t)>(vkCmdBeginRenderPass)(
-      cmd, &rbi, (int32_t)VK_SUBPASS_CONTENTS_INLINE);
-  fn<void (*)(VkCommandBuffer, int32_t, VkPipeline)>(vkCmdBindPipeline)(
-      cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-  fn<void (*)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t)>(vkCmdDraw)(
-      cmd, vertex_count, 1, 0, 0);
-  fn<void (*)(VkCommandBuffer)>(vkCmdEndRenderPass)(cmd);
-  VkBufferImageCopy region{};
-  region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  region.imageExtent = {w, h, 1};
-  fn<void (*)(VkCommandBuffer, VkImage, int32_t, VkBuffer, uint32_t, const VkBufferImageCopy*)>(
-      vkCmdCopyImageToBuffer)(cmd, image, (int32_t)VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &region);
-  fn<VkResult (*)(VkCommandBuffer)>(vkEndCommandBuffer)(cmd);
+  VkCommandBufferBeginInfo begin{};
+  begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  for (uint32_t f = 0; f < nframes; ++f) {
+    VkCommandBuffer cmd = cmds[f];
+    fn<VkResult (*)(VkCommandBuffer, const VkCommandBufferBeginInfo*)>(vkBeginCommandBuffer)(cmd, &begin);
+    fn<void (*)(VkCommandBuffer, const VkRenderPassBeginInfo*, int32_t)>(vkCmdBeginRenderPass)(
+        cmd, &rbi, (int32_t)VK_SUBPASS_CONTENTS_INLINE);
+    fn<void (*)(VkCommandBuffer, int32_t, VkPipeline)>(vkCmdBindPipeline)(
+        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    if (vbuf) {
+      VkDeviceSize off = 0;
+      fn<void (*)(VkCommandBuffer, uint32_t, uint32_t, const VkBuffer*, const VkDeviceSize*)>(
+          vkCmdBindVertexBuffers)(cmd, 0, 1, &vbuf, &off);
+    }
+    if (push_words)
+      fn<void (*)(VkCommandBuffer, VkPipelineLayout, VkFlags, uint32_t, uint32_t, const void*)>(
+          vkCmdPushConstants)(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT, 0, push_words * 4, (*fp)[f].data());
+    fn<void (*)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t)>(vkCmdDraw)(
+        cmd, vertex_count, 1, 0, 0);
+    fn<void (*)(VkCommandBuffer)>(vkCmdEndRenderPass)(cmd);
+    VkBufferImageCopy region{};
+    region.bufferOffset = bytes * f;
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {w, h, 1};
+    fn<void (*)(VkCommandBuffer, VkImage, int32_t, VkBuffer, uint32_t, const VkBufferImageCopy*)>(
+        vkCmdCopyImageToBuffer)(cmd, image, (int32_t)VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &region);
+    fn<VkResult (*)(VkCommandBuffer)>(vkEndCommandBuffer)(cmd);
+  }
 
+  // One submit + fence wait per frame: frames are strictly sequential, the
+  // single image is reused, and no frame pacing or presentation is implied.
   VkFenceCreateInfo fci{};
   fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
   VkFence fence = 0;
@@ -269,21 +353,28 @@ Status VulkanBackend::render_offscreen_rgba(
       vkCreateFence)(device_, &fci, nullptr, &fence);
   if (r != VK_SUCCESS) return vkfail("vkCreateFence", r);
   undo.push_back([&, fence] { fn<void (*)(VkDevice, VkFence, void*)>(vkDestroyFence)(device_, fence, nullptr); });
-  VkSubmitInfo submit{};
-  submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-  submit.commandBufferCount = 1; submit.pCommandBuffers = &cmd;
-  r = fn<VkResult (*)(VkQueue, uint32_t, const VkSubmitInfo*, VkFence)>(vkQueueSubmit)(queue_, 1, &submit, fence);
-  if (r != VK_SUCCESS) return vkfail("vkQueueSubmit", r);
-  r = fn<VkResult (*)(VkDevice, uint32_t, const VkFence*, VkBool32, uint64_t)>(
-      vkWaitForFences)(device_, 1, &fence, 1, 30000000000ull);
-  if (r != VK_SUCCESS) return vkfail("vkWaitForFences", r);
+  for (uint32_t f = 0; f < nframes; ++f) {
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1; submit.pCommandBuffers = &cmds[f];
+    r = fn<VkResult (*)(VkQueue, uint32_t, const VkSubmitInfo*, VkFence)>(vkQueueSubmit)(queue_, 1, &submit, fence);
+    if (r != VK_SUCCESS) return vkfail("vkQueueSubmit", r);
+    r = fn<VkResult (*)(VkDevice, uint32_t, const VkFence*, VkBool32, uint64_t)>(
+        vkWaitForFences)(device_, 1, &fence, 1, 30000000000ull);
+    if (r != VK_SUCCESS) return vkfail("vkWaitForFences", r);
+    r = fn<VkResult (*)(VkDevice, uint32_t, const VkFence*)>(vkResetFences)(device_, 1, &fence);
+    if (r != VK_SUCCESS) return vkfail("vkResetFences", r);
+  }
 
   void* mapped = nullptr;
   r = fn<VkResult (*)(VkDevice, VkDeviceMemory, VkDeviceSize, VkDeviceSize, VkFlags, void**)>(
-      vkMapMemory)(device_, bmem, 0, bytes, 0, &mapped);
+      vkMapMemory)(device_, bmem, 0, total, 0, &mapped);
   if (r != VK_SUCCESS) return vkfail("vkMapMemory (readback)", r);
-  out->resize((size_t)bytes);
-  std::memcpy(out->data(), mapped, (size_t)bytes);
+  out->assign(nframes, std::vector<uint8_t>());
+  for (uint32_t f = 0; f < nframes; ++f) {
+    const uint8_t* src = static_cast<const uint8_t*>(mapped) + bytes * f;
+    (*out)[f].assign(src, src + bytes);
+  }
   fn<void (*)(VkDevice, VkDeviceMemory)>(vkUnmapMemory)(device_, bmem);
   return Status::Ok();
 }
