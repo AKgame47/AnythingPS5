@@ -59,7 +59,7 @@ void pnr_store_tests(int& pass, int& fail) {
 
   // index validation
   {
-    Source s{"demo", url, "mine", "games.example.invalid"}; Index idx;
+    Source s{"demo", url, "mine", "games.example.invalid", std::string()}; Index idx;
     check(parse_index(index_of(pkg("alpha")), s, &idx).ok && idx.packages.size() == 1 && idx.packages[0].size == 1234 && label_for(idx.packages[0]) == "supported", "index: a valid index parses; pnr-package is 'supported'");
     check(parse_index(index_of(pkg("alpha", ",\"experimental\":true")), s, &idx).ok && label_for(idx.packages[0]) == "experimental", "index: experimental flag gives 'experimental'");
     std::string other = pkg("beta"); other.replace(other.find("pnr-package"), 11, "ps5-pkg");
