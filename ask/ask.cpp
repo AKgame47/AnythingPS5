@@ -53,6 +53,7 @@ const std::vector<ToolDef>& tools() {
     {"research_inspect", "Inspect a local file read-only", {{"path", "path of an existing file"}}, {"research", "inspect", "{path}"}, false},
     {"sandbox_probe", "Check whether the sandbox works on this machine", {}, {"sandbox", "probe"}, false},
     {"doctor", "Read-only health report of the library", {}, {"doctor"}, false},
+    {"suggest_manifest", "Print a draft package manifest for a directory (read-only, writes nothing)", {{"dir", "path of an existing directory"}}, {"manifest", "suggest", "{dir}"}, false},
     {"launch_game", "Launch an installed game by its id", {{"game_id", "exact id of an installed game"}}, {"launch", "{game_id}"}, true},
     {"store_get", "Queue a store package for download", {{"source", "store source id"}, {"package", "package id"}}, {"store", "get", "{source}", "{package}"}, true},
     {"store_install", "Install a downloaded store package", {{"source", "store source id"}, {"package", "package id"}}, {"store", "install", "{source}", "{package}"}, true},
@@ -130,6 +131,7 @@ Parsed interpret(const std::string& text, double threshold, const Lookups& lk) {
     if (prm.name == "game_id") { if (!id_chars(s) || !lk.game_exists || !lk.game_exists(s)) { bad = "no installed game with that exact id"; break; } }
     else if (prm.name == "source") { if (!id_chars(s) || !lk.source_exists || !lk.source_exists(s)) { bad = "no store source with that exact id"; break; } }
     else if (prm.name == "package") { if (!id_chars(s)) { bad = "not a valid package id"; break; } }
+    else if (prm.name == "dir") { std::error_code ec; if (!fs::is_directory(s, ec)) { bad = "no such directory"; break; } }
     else if (prm.name == "path") { std::error_code ec; if (!fs::is_regular_file(s, ec)) { bad = "no such file"; break; } }
     else if (prm.name == "text") { if (s.size() > 120) { bad = "search text too long"; break; } }
     vals.emplace_back(prm.name, s);
