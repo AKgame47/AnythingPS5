@@ -1,0 +1,4 @@
+{"data":{"purchasedTitlesRetrieve":{"__typename":"GameList","games":[
+{"__typename":"GameLibraryTitle","conceptId":"1","entitlementId":"EP0001-PPSA00001_00-SYNTHALPHA","image":{"__typename":"Media","url":"https://example.invalid/synthetic-alpha.png"},"isActive":true,"isDownloadable":true,"isPreOrder":false,"membership":"NONE","name":"Synthetic Alpha","platform":"PS5","productId":"EP0001-PPSA00001_00-SYNTHALPHA","titleId":"PPSA00001_00"},
+{"__typename":"GameLibraryTitle","conceptId":null,"entitlementId":"EP0001-CUSA00002_00-SYNTHBETA","image":{"__typename":"Media","url":"https://example.invalid/synthetic-beta.png"},"isActive":true,"isDownloadable":false,"isPreOrder":false,"membership":"PS_PLUS","name":"Synthetic Beta","platform":"PS4","productId":"EP0001-CUSA00002_00-SYNTHBETA","titleId":"CUSA00002_00"}
+]}}}
