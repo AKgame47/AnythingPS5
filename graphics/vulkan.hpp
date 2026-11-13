@@ -25,12 +25,22 @@ struct VulkanDeviceInfo {
 // Mesh description for the 3D slice. Vertices are interleaved: pos_floats
 // position floats (2 or 3) then 3 colour floats. indices may be null (plain
 // vertex list). depth enables a D32_SFLOAT depth buffer (LESS, write on).
+// One RGBA8 texture (single mip level, no mipmaps). rgba is w*h*4 bytes, row 0
+// at the top; the sampler is nearest or linear, repeat or clamp-to-edge.
+struct TexInput {
+  const uint8_t* rgba = nullptr;
+  uint32_t w = 0, h = 0;
+  bool linear = false;
+  bool repeat = false;
+};
+
 struct MeshInput {
   const std::vector<float>* vertices = nullptr;
   uint32_t pos_floats = 2;
   uint32_t extra_floats = 0;  // optional location-2 attribute after colour: 1 (float) or 3 (vec3)
   const std::vector<uint32_t>* indices = nullptr;
   bool depth = false;
+  const TexInput* tex = nullptr;  // sampled at set 0 binding 0 (fragment stage)
 };
 
 class VulkanBackend {
@@ -127,6 +137,19 @@ public:
                                    const std::vector<uint32_t>& indices, bool depth,
                                    const float clear[4], std::vector<uint8_t>* image);
 
+  // Textured variant: float3 position + float3 colour (tint) + float2 uv (8
+  // floats), push constants 1..32 words per frame (vertex stage). The fragment
+  // shader samples a combined image sampler at set 0 binding 0.
+  Status render_textured_mesh_frames_rgba(uint32_t width, uint32_t height,
+                                          const std::vector<uint32_t>& vert_spirv,
+                                          const std::vector<uint32_t>& frag_spirv,
+                                          const std::vector<float>& vertices,
+                                          const std::vector<uint32_t>& indices, bool depth,
+                                          const TexInput& tex,
+                                          const std::vector<std::vector<uint32_t>>& frame_push,
+                                          const float clear[4],
+                                          std::vector<std::vector<uint8_t>>* frames);
+
   void shutdown();
 
 private:
@@ -171,7 +194,8 @@ private:
   X(vkDestroyFramebuffer) X(vkCreateGraphicsPipelines) \
   X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCmdDraw) \
   X(vkCmdCopyImageToBuffer) X(vkCmdBindVertexBuffers) X(vkResetFences) \
-  X(vkGetPhysicalDeviceFormatProperties) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed)
+  X(vkGetPhysicalDeviceFormatProperties) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) \
+  X(vkCreateSampler) X(vkDestroySampler) X(vkCmdPipelineBarrier) X(vkCmdCopyBufferToImage)
 #define PNR_VK_MEMBER(name) void* name = nullptr;
   PNR_VK_LIST(PNR_VK_MEMBER)
 #undef PNR_VK_MEMBER
