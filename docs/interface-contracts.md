@@ -243,3 +243,17 @@ MISMATCH. Non-packages fail at archive validation.
 - `PsFileTable(fs)`: a jailed descriptor table over a `compat::FileSystemService`. Every path is resolved through the jail before any host syscall; traversal (`..`, escaping segments) returns EINVAL, absolute virtual paths stay inside the jail.
 - `open(path, flags) -> fd>=3` (RDONLY/WRONLY/RDWR + CREAT/TRUNC/APPEND subset; unknown flags EINVAL), `read`/`write` -> byte counts, `close`, `lseek` (SET/CUR/END), `fstat` -> `{size, is_directory}`. Closed or foreign fds are EINVAL, never host-fd guesses.
 - Registry integration: file calls are declared-only until `PrxRegistry::install_file_calls(&table)` wires them; `bind()` then resolves them as implemented. This keeps "no filesystem" an honest state.
+
+## IF-ABI-01 PS-ABI shim and PS-style guests (v1) — Implemented, Tested
+
+- `libpnr_psabi.so` exports `sceKernelAlloc/Free`, `sceKernelUsleep/Sleep`,
+  `sceKernelCreateThread`, `sceKernelMapMemory/Munmap/MTypeprotect`, and the
+  `sceKernelOpen/Read/Write/Close/Lseek/Fstat` file family.
+- `pnr run` launches guests with the shim preloaded and
+  `PNR_JAIL_ROOT=<game data dir>/jail` in the environment; the shim resolves
+  its jail root from that variable (default `/tmp/pnr_psabi_default_jail`).
+- Shim file calls dispatch through `compat::FileSystemService` + `PsFileTable`,
+  so a guest stays inside its jail exactly like an emulated file table.
+- The CLI installs the same jail's file table into its classification registry
+  before resolving imports, so the printed classification matches the real
+  dispatch environment.
