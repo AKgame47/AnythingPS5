@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <thread>
 
 #include "package/sha256.hpp"
@@ -259,7 +260,45 @@ Status Queue::mark_installed(const std::string& s, const std::string& p, const s
   Status r = load_state(s, p, &st, &ex);
   if (!r || !ex) return r;
   st.status = "installed"; st.error = "game id: " + game_id;
-  return save_state(st);
+  Status sv = save_state(st);
+  if (!sv) return sv;
+  // provenance record for the launch-time re-check
+  Package k; const Source* so = reg_.find(s);
+  if (!find_pkg(s, p, &k) || !so) return Status::Ok();
+  std::error_code ec; fs::create_directories(dir_ + "/provenance", ec);
+  std::ofstream f(dir_ + "/provenance/" + game_id + ".prov", std::ios::trunc);
+  f << "source=" << s << "\npkg=" << p << "\nversion=" << k.version << "\nsha256=" << k.sha256 << "\nsize=" << k.size
+    << "\nsignature=" << k.signature << "\npubkey=" << so->pubkey << "\n";
+  return f ? Status::Ok() : Status::Fail(kErrIo, "store", "could not write the provenance record");
+}
+
+Status check_provenance(const std::string& store_dir, Registry& reg, const std::string& game_id, std::string* note) {
+  if (game_id.empty() || game_id.find_first_of("/\\") != std::string::npos || game_id.find("..") != std::string::npos) { *note = ""; return Status::Ok(); }
+  std::ifstream f(store_dir + "/provenance/" + game_id + ".prov");
+  if (!f) { *note = "not installed from a store source: no signature check applies"; return Status::Ok(); }
+  std::map<std::string, std::string> kv; std::string line;
+  while (std::getline(f, line)) { auto e = line.find('='); if (e != std::string::npos) kv[line.substr(0, e)] = line.substr(e + 1); }
+  auto bad = [&](const std::string& why) { return Status::Fail(kErrSignature, "store", "refusing to launch: " + why); };
+  if (kv["source"].empty() || kv["pkg"].empty()) return bad("provenance record is damaged");
+  const Source* so = reg.find(kv["source"]);
+  const std::string& pk = kv["pubkey"];
+  if (pk.empty()) {
+    if (so && !so->pubkey.empty()) return bad("source '" + so->id + "' now pins a key but this game was installed unsigned: reinstall it from the source");
+    *note = "installed from a source without a pinned key: hash only, no signature";
+    return Status::Ok();
+  }
+  if (!so) return bad("the source it was installed from was removed: its pinned key is no longer trusted");
+  if (so->pubkey != pk) return bad("the source's pinned key changed since install: reinstall from the source");
+  Package k; k.id = kv["pkg"]; k.version = kv["version"]; k.sha256 = kv["sha256"]; k.size = std::atoll(kv["size"].c_str()); k.signature = kv["signature"];
+  std::string mode; Status sg = check_signature(*so, k, &mode);
+  if (!sg) return bad(sg.error.message);
+  // the retained package file must still match the signed hash
+  std::string hex; long long n = 0;
+  Status h = hash_file(store_dir + "/downloads/" + kv["source"] + "/" + k.id + ".pnrgame", &hex, &n);
+  if (!h) return bad("the retained package file is missing, so the signed hash cannot be re-checked");
+  if (hex != k.sha256 || n != k.size) return bad("the retained package file no longer matches the signed hash");
+  *note = "signature verified again under the pinned key; retained package hash matches";
+  return Status::Ok();
 }
 
 }  // namespace pnr::store
