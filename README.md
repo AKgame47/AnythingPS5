@@ -40,7 +40,7 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **1902/1902 unit tests, 16/16 CTest suites** on a fresh Linux
+Test state: **1976/1976 unit tests, 16/16 CTest suites** on a fresh Linux
 Release `-Werror` build (details in the capability section below).
 
 ## Rendered output
@@ -200,11 +200,11 @@ compiles but cannot run ELF games.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**1902/1902 unit tests pass, 16/16 CTest suites pass** (unit, end-to-end native
+**1976/1976 unit tests pass, 16/16 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
-and on a build against the official Vulkan headers. ASan+UBSan: 1902/1902
+and on a build against the official Vulkan headers. ASan+UBSan: 1976/1976
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -1103,6 +1103,30 @@ Planned (per the master prompt's structure): `graphics/`, `performance/`,
 - [Risk register](docs/risk-register.md)
 - [Interface contracts](docs/interface-contracts.md)
 
+### Unofficial store, core (slice A1)
+
+Full details: [docs/store.md](docs/store.md). **Status: Implemented, Tested
+with local fakes. No download, install or update yet.** The store starts
+with **no sources**; you add your own (https index URL plus a rights
+statement). PNR cannot verify rights statements and you are responsible for
+the sources you add. Real captured session (the host does not resolve here,
+so the refresh failure is genuine):
+
+```
+$ pnr-launcher store source list
+STORE SOURCES: none. The store starts empty; add your own with 'store source add <id> <https index url> --rights "..."'.
+$ pnr-launcher store source add demo https://games.example.invalid/index.json --rights "Author's own homebrew, shared by the author"
+SOURCE ADDED: demo
+  index: https://games.example.invalid/index.json
+  declared rights: Author's own homebrew, shared by the author
+  nothing was fetched yet: run 'store refresh demo'
+  rights are declared by the source and cannot be verified by PNR; you are responsible for the sources you add
+$ pnr-launcher store refresh demo
+STORE REFRESH
+ demo: FAILED: transfer failed: Couldn't resolve host name (cached index unchanged)
+(index is checked before it replaces the cache; nothing was downloaded)
+```
+
 ## Roadmap
 
 | Item | Status |
@@ -1110,6 +1134,8 @@ Planned (per the master prompt's structure): `graphics/`, `performance/`,
 | Headless launcher core (list, run, library care, install, doctor, saves backup) | Implemented, Tested |
 | PSN connector (token store, saved-response import, owned rows, linking) | Implemented, Tested on synthetic fixtures |
 | PSN live transport (`psn sync`: token exchange, paged library fetch, refresh, error mapping) | Implemented, Tested against a fake and a local server; **Untested against real Sony** |
+| Store core: sources, index validation, search (no downloads) | Implemented, Tested on fakes |
+| Store downloads, install, signatures, scanning, sandbox | Planned (approved order: downloads, security, research engine, Needle 2 front end) |
 | Downloading purchased games | Blocked: no authorized mechanism found; PNR will not bypass DRM or licensing |
 | Desktop launcher UI | Planned |
 | Security manager with a real isolation boundary (seccomp, namespaces) | Planned (required before any untrusted code) |
