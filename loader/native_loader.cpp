@@ -66,6 +66,14 @@ LaunchResult NativeLoader::launch(const std::string& path,
       if (eq != std::string::npos && eq > 0)
         ::setenv(kv.substr(0, eq).c_str(), kv.substr(eq + 1).c_str(), 1);
     }
+    if (child_setup) {
+      std::string why;
+      if (!child_setup(&why)) {
+        const std::string m = "launch aborted in the child: " + why + "\n";
+        if (::write(2, m.data(), m.size()) < 0) {}
+        _exit(125);
+      }
+    }
     std::vector<char*> argv;
     argv.push_back(const_cast<char*>(path.c_str()));
     for (auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
