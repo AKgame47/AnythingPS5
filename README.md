@@ -1146,7 +1146,7 @@ STORE REFRESH
 | `pnr-launcher manifest suggest <dir>` (D2b): read-only, deterministic DRAFT `manifest.pnr` from a directory, guessed fields marked, writes only with `--out` to a new file, never installs; also reachable read-only through `ask` | Experimental. Tested with generated fixtures and real CLI output; heuristic, no accuracy claim (see docs/manifest-suggest.md) |
 | Windows sandbox | Planned (notes only, nothing built) |
 | Store scan pipeline: hash always on, EMBER2024 model stage via external helper (OFF unless model+helper present), ClamAV (OFF unless installed); flagged blocks install; see docs/scan.md | Implemented + Tested with fakes; model stage Experimental, never run against a real model or ClamAV |
-| Research engine, Needle 2 front end, filesystem isolation for the sandbox | Planned |
+| Autonomous research engine (a model deciding what to fetch on its own) | Planned, not started. Only the manual C1 research tools exist (see above) |
 | Downloading purchased games | Blocked: no authorized mechanism found; PNR will not bypass DRM or licensing |
 | Desktop launcher UI | Planned |
 | Security manager with a real isolation boundary (seccomp, namespaces) | Planned (required before any untrusted code) |
