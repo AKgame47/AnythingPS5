@@ -89,8 +89,14 @@ Status VulkanBackend::create_device(uint32_t physical_index) {
   fn<void (*)(VkPhysicalDevice, uint32_t*, VkQueueFamilyProperties*)>(
       vkGetPhysicalDeviceQueueFamilyProperties)(phys_, &fam_count, fams.data());
   int family = -1;
+  // Prefer a family that can do both compute and graphics.
   for (uint32_t i = 0; i < fam_count; ++i)
-    if (fams[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { family = (int)i; break; }
+    if ((fams[i].queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) ==
+        (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) { family = (int)i; break; }
+  if (family < 0)
+    for (uint32_t i = 0; i < fam_count; ++i)
+      if (fams[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { family = (int)i; break; }
+  if (family >= 0) queue_flags_ = fams[family].queueFlags;
   if (family < 0)
     return fail("vulkan", "no compute queue family on " + device_name());
   queue_family_ = (uint32_t)family;
