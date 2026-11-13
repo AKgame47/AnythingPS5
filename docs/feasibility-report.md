@@ -13,7 +13,7 @@ every blocked dependency. Nothing here claims commercial PS5 compatibility.
 | The game runs in a separate process; crashes/non-zero exits surface as failures, never successes | unit tests `loader: *` |
 | Compat services (memory/timing/filesystem/threads) work for a real program | `examples/test_app.cpp`; unit tests `mem: *`, `timing: *`, `fs: *`, `threads: *` |
 | Lifecycle state machine enforces legal transitions only | unit tests `lifecycle: *` |
-| Filesystem jail rejects `..` traversal | unit tests `fs: *` |
+| Filesystem path routing (application-level jail) rejects `..` traversal | unit tests `fs: *` |
 | Full 10-step launch workflow reports per-step SUCCESS/FAILED/BLOCKED/SKIPPED | CLI run log in Phase 1 report |
 
 Test status (2026-11-13, second increment): 80/80 unit tests pass; 3/3
@@ -107,7 +107,7 @@ Until unblocked, any commercial PS5 content is reported as
 |---|---|---|
 | 0 | This doc set: what is implementable with public interfaces vs blocked | Done |
 | 1 | `ctest` green: unit + end-to-end native run of `pnr_test_app` via CLI | Done (80/80, 3/3) |
-| 2 | Render + animate a 3D scene via Vulkan on Windows and Linux, validation layers clean | Blocked in sandbox (no GPU) |
+| 2 | Render + animate a 3D scene via Vulkan on Windows and Linux, validation layers clean | Partially unblocked: compute dispatch + SSBO readback tested on software Vulkan (Mesa lavapipe) in the sandbox; full render passes Planned |
 | 3 | Demo game runs using only compat APIs (no direct host calls) for audio/input/storage/timing | Partially demonstrated (memory/fs/timing/threads; imported .pnrgame game installs + runs) |
 | 4 | Measured frame-time improvement from dynamic resolution on ≥1 real GPU, baseline vs adapted, same scene | Planned |
 | 5 | Correct power-profile + hybrid-GPU behavior on a real laptop | Planned (needs hardware) |
