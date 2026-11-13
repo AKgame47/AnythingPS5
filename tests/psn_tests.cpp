@@ -38,7 +38,9 @@ std::string game(const std::string& eid, const std::string& name, const std::str
 std::string resp(const std::string& games) { return "{\"data\":{\"purchasedTitlesRetrieve\":{\"__typename\":\"GameList\",\"games\":[" + games + "]}}}"; }
 }  // namespace
 
+void pnr_psn_sync_tests(int& pass, int& fail);  // psn_sync_tests.cpp, run after these
 void pnr_psn_tests(int& pass, int& fail) {
+  struct RunSync { int& p; int& f; ~RunSync() { pnr_psn_sync_tests(p, f); } } run_sync{pass, fail};
   auto check = [&](bool ok, const std::string& label) { if (ok) ++pass; else ++fail; std::printf("%s %s\n", ok ? "PASS" : "FAIL", label.c_str()); };
   const std::string dir = "/tmp/pnr_psn_" + std::to_string(::getpid());
   fs::remove_all(dir); fs::create_directories(dir);
