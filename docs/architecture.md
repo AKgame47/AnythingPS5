@@ -177,3 +177,5 @@ driver state. The single-store translator limit is why it takes four
 dispatches. Float results follow host Vulkan policy.
 
 `pnrGfxSetMesh` / `pnrGfxDrawMesh` / `pnrGfxMeshDraws` let a game supply its own vertices (x,y,z,r,g,b) and triangle indices. The shim validates and copies them (1..24 vertices because the RDNA kernel uses one lane per vertex, 3..384 indices, finite floats, in-range indices) and keeps the previous mesh when an upload fails. `ps_mesh_demo` exercises this under `pnr run`. Not a Sony API.
+
+`pnrGfxSetLitMesh` / `pnrGfxSetLight` / `pnrGfxDrawLitMesh` / `pnrGfxLitDraws` add per-vertex normals and one directional light (Lambert, ambient 0.25, Gouraud). Mode 0 computes the dot in a hand-authored vertex shader; mode 1 uses the translated-RDNA transform kernels plus `rdna_dot3_kernel` (s0..s2 = object-space light, unfused binary32 mul/add, no clamp since max() is outside the translated subset). A hand-authored fragment shader applies `0.25 + 0.75*max(d,0)`. Rounding between the two vertex paths agrees within a small tolerance, not by contract. `ps_lit_demo` exercises it under `pnr run`. No specular, textures, shadows or multiple lights.
