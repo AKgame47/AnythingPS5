@@ -26,6 +26,7 @@ struct InstallationRecord {
   std::string path;
   std::string version;
   std::string integrity = "unverified";  // unverified|verified|failed
+  std::string executable;  // entry point inside the installed tree
 };
 
 struct CompatibilityRecord {
