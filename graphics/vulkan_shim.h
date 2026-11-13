@@ -41,6 +41,7 @@ typedef uint64_t VkPipeline;
 typedef uint64_t VkPipelineLayout;
 typedef uint64_t VkCommandPool;
 typedef uint64_t VkFence;
+typedef uint64_t VkSampler;
 typedef uint64_t VkSemaphore;
 typedef uint64_t VkImage;
 typedef uint64_t VkImageView;
@@ -78,6 +79,8 @@ enum : VkStructureType {
   VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO = 33,
   VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO = 34,
   VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET = 35,
+  VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO = 31,
+  VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER = 45,
   VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO = 39,
   VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO = 40,
   VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO = 42,
@@ -91,6 +94,13 @@ enum : VkFlags {
   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT = 0x80,
   VK_QUEUE_COMPUTE_BIT = 0x2,
   VK_IMAGE_USAGE_TRANSFER_SRC_BIT = 0x1,
+  VK_IMAGE_USAGE_TRANSFER_DST_BIT = 0x2,
+  VK_IMAGE_USAGE_SAMPLED_BIT = 0x4,
+  VK_BUFFER_USAGE_TRANSFER_SRC_BIT = 0x1,
+  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT = 0x1,
+  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT = 0x80,
+  VK_ACCESS_TRANSFER_WRITE_BIT = 0x1000,
+  VK_ACCESS_SHADER_READ_BIT = 0x20,
   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT = 0x10,
   VK_BUFFER_USAGE_TRANSFER_DST_BIT = 0x2,
   VK_SHADER_STAGE_VERTEX_BIT = 0x1,
@@ -133,6 +143,14 @@ enum : int32_t {
   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL = 2,
   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL = 6,
   VK_IMAGE_VIEW_TYPE_2D = 1,
+  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER = 1,
+  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL = 7,
+  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL = 5,
+  VK_FILTER_NEAREST = 0,
+  VK_FILTER_LINEAR = 1,
+  VK_SAMPLER_MIPMAP_MODE_NEAREST = 0,
+  VK_SAMPLER_ADDRESS_MODE_REPEAT = 0,
+  VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE = 2,
   VK_ATTACHMENT_LOAD_OP_CLEAR = 1,
   VK_ATTACHMENT_LOAD_OP_DONT_CARE = 2,
   VK_ATTACHMENT_STORE_OP_STORE = 0,
@@ -144,6 +162,7 @@ enum : int32_t {
   VK_SUBPASS_CONTENTS_INLINE = 0,
 };
 inline constexpr uint32_t VK_SUBPASS_EXTERNAL = ~0u;
+inline constexpr uint32_t VK_QUEUE_FAMILY_IGNORED = ~0u;
 inline constexpr uint32_t vk_api_version_1_0 = (1u << 22);
 
 typedef struct VkApplicationInfo {
@@ -387,6 +406,23 @@ typedef struct VkRenderPassBeginInfo {
 typedef struct VkImageSubresourceLayers {
   VkFlags aspectMask; uint32_t mipLevel, baseArrayLayer, layerCount;
 } VkImageSubresourceLayers;
+typedef struct VkSamplerCreateInfo {
+  VkStructureType sType; const void* pNext; VkFlags flags; int32_t magFilter;
+  int32_t minFilter; int32_t mipmapMode; int32_t addressModeU;
+  int32_t addressModeV; int32_t addressModeW; float mipLodBias;
+  VkBool32 anisotropyEnable; float maxAnisotropy; VkBool32 compareEnable;
+  int32_t compareOp; float minLod; float maxLod; int32_t borderColor;
+  VkBool32 unnormalizedCoordinates;
+} VkSamplerCreateInfo;
+typedef struct VkDescriptorImageInfo {
+  VkSampler sampler; VkImageView imageView; int32_t imageLayout;
+} VkDescriptorImageInfo;
+typedef struct VkImageMemoryBarrier {
+  VkStructureType sType; const void* pNext; VkFlags srcAccessMask;
+  VkFlags dstAccessMask; int32_t oldLayout; int32_t newLayout;
+  uint32_t srcQueueFamilyIndex; uint32_t dstQueueFamilyIndex; VkImage image;
+  VkImageSubresourceRange subresourceRange;
+} VkImageMemoryBarrier;
 typedef struct VkBufferImageCopy {
   VkDeviceSize bufferOffset; uint32_t bufferRowLength, bufferImageHeight;
   VkImageSubresourceLayers imageSubresource; VkOffset3D imageOffset;
