@@ -313,7 +313,7 @@ touches nothing in the library.
   dispatch environment.
 
 
-## IF-GRAPH-03 Restricted integer-compute translation (v7)
+## IF-GRAPH-03 Restricted compute translation (v8)
 
 Status: Experimental, Implemented (strict subset), Tested.
 
@@ -321,7 +321,7 @@ Status: Experimental, Implemented (strict subset), Tested.
   little-endian words without alignment assumptions; partial words fail.
   `translate_compute_words(words, guest_base, buffer_words=1, local_size_x=1, uniform_words=0)` is the word-level entry point.
 - Result: `ok`, diagnostic `error`, `spirv`, `stored_value_known`,
-  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`, `required_uniform_words`. Every failure returns empty SPIR-V. `stored_value` is
+  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`, `required_uniform_words`, `host_float32`. Every failure returns empty SPIR-V. `stored_value` is
   meaningful only when `stored_value_known` is true; runtime results are
   never invented by the compiler.
 - Explicit test ABI: one workgroup with 1..64 invocations, one fixed-size uint array SSBO at set 0/binding 0.
@@ -504,3 +504,41 @@ consume one word, with PC/truncation regression checks.
   undeclared SGPRs, special scalar destinations and missing/extra dispatch data.
 - Still no scalar arithmetic flags, scalar memory/resource descriptors,
   wave reduction, multi-invocation scalar branch or commercial shader ABI.
+
+
+### Bounded host-policy binary32 ALU
+
+- Supports unmodified VOP2 `v_add_f32` (3), `v_sub_f32` (4), `v_mul_f32`
+  (8), opcode taxonomy checked against AnyPS5's attributed vector decoder.
+  VGPR/SGPR/literal/inline-integer operands contain raw 32-bit register bits.
+  They are bitcast, not numerically converted from integer to float.
+- Emits OpTypeFloat 32, OpBitcast, OpFAdd/OpFSub/OpFMul, OpBitcast to uint
+  storage. Every float result is decorated NoContraction. No RelaxedPrecision
+  or FPFastMathMode decorations are emitted. No FMA operation is generated.
+  Result loses constant/affine facts; stored_value_known stays false.
+- `host_float32=true` identifies an experimental host-Vulkan FP policy.
+  PNR does not query/enable shader_float_controls or emit RoundingModeRTE,
+  RoundingModeRTZ, DenormPreserve/FlushToZero, SignedZeroInfNanPreserve modes.
+  Therefore exact PS5 float behavior is NOT implemented. No rounding-mode
+  selection, exception flags, traps, NaN payload/sign/signaling preservation,
+  denormal mode or signed-zero portability is promised. NoContraction alone
+  is not a substitute for those controls. Source references:
+  https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_shader_float_controls.html
+  https://github.khronos.org/SPIRV-Registry/extensions/KHR/SPV_KHR_float_controls.html
+- NaN and rounding contract: host default arithmetic applies. NaN payload,
+  canonicalization, signaling-to-quiet behavior and result sign are unspecified
+  by PNR. Even the preservation extension does not promise NaN bit patterns.
+  Tests check NaN classification on the tested lavapipe only, not payloads.
+  Rounding tests observe ties-to-even for selected normal add cases on
+  lavapipe; they do not establish a cross-driver rounding guarantee.
+- Tests use fixed expected binary32 bit patterns (not host C++ float as an
+  oracle): exact finite operations, tie-even inputs, signed-zero observations,
+  plus quiet/signaling NaN classification. Infinity, subnormal and overflow
+  probes print observed bits without claiming portable bit behavior. Three
+  arithmetic modules pass spirv-val for Vulkan 1.0 and execute on lavapipe.
+  Literal and scalar push-constant sources execute with correct raw bits.
+- Rejects undefined operands, inline float selectors (not yet implemented),
+  SDWA/DPP, VOP3/modifiers, reverse subtract/min/max/FMA and malformed SSA.
+  Float ALU remains forbidden in conditional move-only branch bodies.
+  Multi-invocation memory affine/race checks remain unchanged; float-derived
+  addresses lack a valid affine proof. No commercial shader compatibility.
