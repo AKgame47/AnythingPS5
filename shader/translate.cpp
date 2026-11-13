@@ -6,10 +6,11 @@
 #include <optional>
 namespace pnr::shader {
 ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
-                                           uint64_t base, uint32_t buffer_words) {
+                                           uint64_t base, uint32_t buffer_words, uint32_t local_size_x) {
   auto fail = [](const std::string& msg) {
     ComputeTranslation r; r.error = msg; return r;
   };
+  if (!local_size_x || local_size_x > 64) return fail("local size must be 1..64");
   if (!buffer_words || buffer_words > 65536) return fail("buffer word count must be 1..65536");
   const uint64_t size = uint64_t(buffer_words) * 4;
   if (base > UINT64_MAX - (size - 1)) return fail("guest range overflows uint64");
@@ -19,15 +20,27 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   if (!d.ok) return fail("decode: " + d.error);
   using graphics::U32Op;
   using graphics::U32Node;
-  struct Reg { uint32_t node; std::optional<uint32_t> constant; };
+  struct Reg {
+    uint32_t node; std::optional<uint32_t> constant;
+    std::optional<uint32_t> origin = {}, stride = {};
+  };
   std::array<std::optional<Reg>, 256> regs{};
   std::vector<U32Node> nodes;
+  // Only multi-invocation mode initializes v0. Legacy single mode keeps
+  // undefined-v0 behavior. This is PNR test ABI, not a PS5 launch ABI.
+  if (local_size_x > 1) {
+    nodes.push_back({U32Op::InvocationIndex});
+    regs[0]=Reg{0, {}, 0, 1};
+  }
+  struct Range { uint64_t first, last; };
+  std::vector<Range> reads;
+  std::optional<Range> writes;
   auto source = [&](const RdnaOperand& o) -> std::optional<Reg> {
     if (o.kind == RdnaOperandKind::VectorReg) return regs[o.reg];
     if (o.kind != RdnaOperandKind::LiteralConst &&
         o.kind != RdnaOperandKind::InlineIntConst) return {};
     nodes.push_back({U32Op::Constant, o.value});
-    return Reg{static_cast<uint32_t>(nodes.size()-1), o.value};
+    return Reg{static_cast<uint32_t>(nodes.size()-1), o.value, o.value, 0};
   };
   bool ended = false, stored = false, guarded = false;
   std::optional<uint32_t> value;
@@ -53,7 +66,20 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       nodes.push_back({op, a->node, b->node});
       // ALU values are runtime SSA, even on constant inputs. Address
       // uses therefore go through emitted low-word guards below.
-      regs[i.dst.reg] = Reg{static_cast<uint32_t>(nodes.size()-1), {}};
+      Reg result{static_cast<uint32_t>(nodes.size()-1), {}};
+      if (a->origin && a->stride && b->origin && b->stride) {
+        uint64_t origin=0, stride=0; bool affine=false;
+        if (op==U32Op::Add) {
+          origin=uint64_t(*a->origin)+*b->origin;
+          stride=uint64_t(*a->stride)+*b->stride; affine=true;
+        } else if(op==U32Op::Sub && *a->origin>=*b->origin && *a->stride>=*b->stride) {
+          origin=*a->origin-*b->origin; stride=*a->stride-*b->stride; affine=true;
+        }
+        if (affine && origin+stride*(local_size_x-1)<=UINT32_MAX) {
+          result.origin=uint32_t(origin); result.stride=uint32_t(stride);
+        }
+      }
+      regs[i.dst.reg] = result;
     } else if (i.family == RdnaFamily::FLAT &&
                (i.opcode_id == 0x1c || i.opcode_id == 0x0c)) {
       const bool load = i.opcode_id == 0x0c;
@@ -88,6 +114,23 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
           return fail("memory access is outside/alignment-invalid for SSBO range" + at);
         index = static_cast<uint32_t>((addr - base) / 4);
       }
+      if (local_size_x > 1) {
+        // Prove all invocation addresses before allowing parallel access.
+        // This prevents output collisions and read/write data races in
+        // the intentionally narrow one-store test ABI, without barriers.
+        const uint64_t first=dynamic ? lo->origin.value_or(UINT32_MAX) :
+                                       uint64_t(*lo->constant)+i.memory_offset;
+        const uint64_t stride=dynamic ? lo->stride.value_or(UINT32_MAX) : 0;
+        const uint64_t last=first+stride*(local_size_x-1);
+        if ((dynamic && (!lo->origin || !lo->stride)) || first%4 || stride%4 ||
+            first<uint32_t(base) || last>uint64_t(uint32_t(base))+size-4)
+          return fail("multi-invocation address not provably affine/in-range" + at);
+        if (load) reads.push_back({first,last});
+        else {
+          if(stride!=4) return fail("multi-invocation store requires disjoint stride-four addresses"+at);
+          writes=Range{first,last};
+        }
+      }
       if (load) {
         nodes.push_back({dynamic ? U32Op::GuardedLoad : U32Op::Load,
                          dynamic ? lo->node : index});
@@ -106,18 +149,22 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   }
   if (!ended) return fail("missing final s_endpgm");
   if (!stored) return fail("missing flat_store_dword");
+  if (local_size_x>1 && writes) for(const auto& read:reads)
+    if(read.first<=writes->last && writes->first<=read.last)
+      return fail("multi-invocation load/output ranges overlap; barriers not supported");
   ComputeTranslation r;
+  r.local_size_x = local_size_x;
   r.guarded_memory = guarded;
   r.required_buffer_words = buffer_words;
   r.stored_value_known = value.has_value();
   r.stored_value = value.value_or(0); // meaningful only when known=true
-  r.spirv = graphics::SpirvModule::compute_u32(nodes, buffer_words, uint32_t(base));
+  r.spirv = graphics::SpirvModule::compute_u32(nodes, buffer_words, uint32_t(base), local_size_x);
   if (r.spirv.empty()) return fail("invalid internal uint IR");
   r.ok = true;
   return r;
 }
 ComputeTranslation translate_compute_bytes(const std::vector<uint8_t>& code,
-                                           uint64_t base, uint32_t buffer_words) {
+                                           uint64_t base, uint32_t buffer_words, uint32_t local_size_x) {
   if (code.size() % 4) {
     ComputeTranslation r; r.error = "RDNA byte length is not a multiple of four"; return r;
   }
@@ -126,12 +173,13 @@ ComputeTranslation translate_compute_bytes(const std::vector<uint8_t>& code,
   for (size_t i = 0; i < code.size(); i += 4)
     words.push_back(uint32_t(code[i]) | (uint32_t(code[i+1]) << 8u) |
                     (uint32_t(code[i+2]) << 16u) | (uint32_t(code[i+3]) << 24u));
-  return translate_compute_words(words, base, buffer_words);
+  return translate_compute_words(words, base, buffer_words, local_size_x);
 }
 Status run_translated_compute(graphics::VulkanBackend& backend,
                               const ComputeTranslation& translation,
                               std::vector<uint32_t>* io) {
   if (!translation.ok || translation.spirv.empty() ||
+      !translation.local_size_x || translation.local_size_x>64 ||
       !translation.required_buffer_words || translation.required_buffer_words > 65536)
     return Status::Fail(101, "shader", "invalid translation for dispatch");
   if (!io || io->size() < translation.required_buffer_words)
