@@ -13,11 +13,13 @@ void pnr_loop_memory_tests(int& pass,int& fail);
 void pnr_loop_copy_tests(int& pass,int& fail);
 void pnr_render_tests(int& pass,int& fail);
 void pnr_cube_tests(int& pass,int& fail);
+void pnr_rdna_vertex_tests(int& pass,int& fail);
 void pnr_loop_tests(int& pass,int& fail) {
   pnr_loop_memory_tests(pass,fail);
   pnr_loop_copy_tests(pass,fail);
   pnr_render_tests(pass,fail);
   pnr_cube_tests(pass,fail);
+  pnr_rdna_vertex_tests(pass,fail);
   auto check=[&](bool ok,const char* label){
     if(ok)++pass;else ++fail;std::printf("%s %s\n",ok?"PASS":"FAIL",label);
   };
