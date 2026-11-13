@@ -17,6 +17,7 @@
 #include "launcher/launcher_core.hpp"
 #include "sandbox/sandbox.hpp"
 #include "ask/ask.hpp"
+#include "ask/suggest.hpp"
 #include "research/research.hpp"
 #include "scan/scan.hpp"
 #include "psn/psn_cli.hpp"
@@ -43,6 +44,7 @@ static void usage() {
             "  pnr-launcher store source add <id> <https-index-url> --rights <statement> | store source remove <id> [--yes] | store source list\n"
             "  pnr-launcher store get <source> <package> | store queue list|run [<source> <package>] | store queue pause|resume|cancel <source> <package> [--yes] | store install <source> <package>\n"
             "  pnr-launcher store refresh [id] | store search [text] [--source id] | store show <source> <package> [--json]\n"
+            "  pnr-launcher manifest suggest <dir> [--out FILE]   (EXPERIMENTAL, read-only; prints a DRAFT manifest.pnr, never installs)\n"
             "  pnr-launcher ask \"<sentence>\" [--threshold 0.8] [--no-model-sandbox]   (EXPERIMENTAL; needs PNR_NEEDLE; mutating commands always ask you first)\n"
             "  pnr-launcher research log add <text> | log list [--limit N] | log verify   (append-only, hash-chained)\n"
             "  pnr-launcher research fetch <https-url> <out-file> --rights <statement> [--sha256 HEX] [--force]   (user-supplied URL only)\n"
@@ -63,7 +65,7 @@ int main(int argc, char** argv) {
   std::vector<std::string> pos, gameargs;
   bool after = false, complete = false, forget = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
   bool no_model_sandbox = false, sandbox_on = false, allow_flagged = false, force = false, log_it = false;
-  std::string sha256_arg, threshold_s = "0.8";
+  std::string out_file, sha256_arg, threshold_s = "0.8";
   std::string note, limit_s = "20", file, platform, rights, source;
   for (size_t i = 1; i < a.size(); ++i) {
     if (after) gameargs.push_back(a[i]);
@@ -72,6 +74,7 @@ int main(int argc, char** argv) {
     else if (a[i] == "--yes") yes = true;
     else if (a[i] == "--sandbox") sandbox_on = true;
     else if (a[i] == "--no-model-sandbox") no_model_sandbox = true;
+    else if (a[i] == "--out" && i + 1 < a.size()) out_file = a[++i];
     else if (a[i] == "--allow-flagged") allow_flagged = true;
     else if (a[i] == "--force") force = true;
     else if (a[i] == "--threshold" && i + 1 < a.size()) threshold_s = a[++i];
@@ -232,6 +235,9 @@ int main(int argc, char** argv) {
     std::string out;
     rc = pnr::ask::cmd_ask(pos[0], nb ? nb : "", std::atof(threshold_s.c_str()), lk, io, &out);
     std::fputs(out.c_str(), stdout);
+  } else if (a[0] == "manifest") {
+    std::string out; rc = pnr::ask::cmd_manifest(pos, out_file, &out);
+    std::fputs(out.c_str(), rc == 2 ? stderr : stdout);
   } else if (a[0] == "research" && !pos.empty()) {
     pnr::research::CliOptions ro; ro.rights = rights; ro.expect_sha256 = sha256_arg; ro.limit = limit_s; ro.json = json; ro.force = force; ro.log_it = log_it;
     std::string out;
