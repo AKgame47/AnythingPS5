@@ -71,10 +71,12 @@ std::vector<uint32_t> SpirvModule::compute_write_u32(uint32_t value) {
 }
 
 std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes,
-                                                uint32_t buffer_words, uint32_t guest_base_low, uint32_t local_size_x, uint32_t uniform_words) {
+                                                uint32_t buffer_words, uint32_t guest_base_low, uint32_t local_size_x, uint32_t uniform_words, uint32_t guest_base_high) {
   if(uniform_words>16) return {};
   if (!local_size_x || local_size_x > 64) return {};
   if (!buffer_words || buffer_words > 65536) return {};
+  const uint64_t guest_base=(uint64_t(guest_base_high)<<32u)|guest_base_low;
+  if(guest_base>UINT64_MAX-(uint64_t(buffer_words)*4-1))return {};
   // SPIR-V 1.0 Uniform BufferBlock containing a fixed-size uint array.
   // IDs 1..12 retain the original emitter's meanings; 13=array type,
   // 14=array length. Every memory index is checked before emission.
@@ -140,7 +142,12 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
     inst(m,spv::OpVariable,{23,25,9});
   }
   inst(m,22,{26,32}); // binary32 OpTypeFloat
-  uint32_t next = 27;
+  inst(m,spv::OpConstant,{6,27,1});
+  inst(m,spv::OpConstant,{6,28,guest_base_high});
+  const uint64_t last64=(uint64_t(guest_base_high)<<32u)+guest_base_low+
+                         uint64_t(buffer_words-1)*4;
+  inst(m,spv::OpConstant,{6,29,uint32_t(last64>>32u)});
+  uint32_t next = 30;
   std::vector<uint32_t> no_contraction;
   std::vector<uint32_t> ids(nodes.size(), 0), indices(nodes.size(), 0);
   for (size_t i = 0; i < nodes.size(); ++i) {
@@ -148,6 +155,9 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
     if (n.op == U32Op::Constant) {
       ids[i] = next++;
       inst(m, spv::OpConstant, {6, ids[i], n.a});
+    } else if(n.op==U32Op::GuardedLoad64 || n.op==U32Op::GuardedStore64) {
+      if(n.d>2047)return {};
+      indices[i]=next++;inst(m,spv::OpConstant,{6,indices[i],n.d});
     } else if (n.op == U32Op::UniformInput) {
       if(n.a>=uniform_words)return {};
       indices[i]=next++;inst(m,spv::OpConstant,{6,indices[i],n.a});
@@ -186,6 +196,46 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
       inst(m,245,{6,ids[i],ids[n.c],yes,ids[n.d],no});
       current_label=merge;
       continue;
+    }
+    if(n.op==U32Op::CarryAdd || n.op==U32Op::BorrowSub) {
+      for(auto ref:{n.a,n.b,n.c})if(ref>=i || !ids[ref])return {};
+      const bool sub=n.op==U32Op::BorrowSub;
+      uint32_t temp=next++, result=next++, c1=next++, c2=next++, flag=next++;
+      inst(m,sub?130:128,{6,temp,ids[n.a],ids[n.b]});
+      inst(m,sub?130:128,{6,result,temp,ids[n.c]});
+      inst(m,176,{15,c1,sub?ids[n.a]:temp,sub?ids[n.b]:ids[n.a]});
+      inst(m,176,{15,c2,sub?temp:result,sub?ids[n.c]:temp});
+      inst(m,166,{15,flag,c1,c2});
+      ids[i]=next++;inst(m,169,{6,ids[i],flag,27,10});continue;
+    }
+    if(n.op==U32Op::GuardedLoad64 || n.op==U32Op::GuardedStore64) {
+      const bool load=n.op==U32Op::GuardedLoad64;
+      if(n.a>=i || n.b>=i || !ids[n.a] || !ids[n.b] ||
+         (!load && (n.c>=i || !ids[n.c])))return {};
+      // n.d is a literal unsigned byte offset, predeclared below.
+      uint32_t low=next++, carry=next++, carry_u=next++, high=next++, overflow=next++;
+      inst(m,128,{6,low,ids[n.a],indices[i]});
+      inst(m,176,{15,carry,low,ids[n.a]});
+      inst(m,169,{6,carry_u,carry,27,10});
+      inst(m,128,{6,high,ids[n.b],carry_u});
+      inst(m,174,{15,overflow,high,ids[n.b]}); // no high-word wrap
+      auto cmp=[&](uint16_t op,uint32_t a,uint32_t b){uint32_t id=next++;inst(m,op,{15,id,a,b});return id;};
+      auto logic=[&](uint16_t op,uint32_t a,uint32_t b){uint32_t id=next++;inst(m,op,{15,id,a,b});return id;};
+      auto ge=logic(166,cmp(172,high,28),logic(167,cmp(170,high,28),cmp(174,low,16)));
+      auto le=logic(166,cmp(176,high,29),logic(167,cmp(170,high,29),cmp(178,low,17)));
+      uint32_t mask=next++;inst(m,199,{6,mask,low,18});
+      auto valid=logic(167,logic(167,ge,le),logic(167,overflow,cmp(170,mask,10)));
+      uint32_t yes=next++,merge=next++;
+      inst(m,247,{merge,0});inst(m,250,{valid,yes,merge});inst(m,spv::OpLabel,{yes});
+      uint32_t delta=next++,index=next++,ptr=next++,loaded=0;
+      // Range <=256KiB: modular low subtraction equals exact delta after guard.
+      inst(m,130,{6,delta,low,16});inst(m,194,{6,index,delta,19});
+      inst(m,spv::OpAccessChain,{8,ptr,2,10,index});
+      if(load){loaded=next++;inst(m,61,{6,loaded,ptr});}
+      else inst(m,spv::OpStore,{ptr,ids[n.c]});
+      inst(m,249,{merge});inst(m,spv::OpLabel,{merge});
+      if(load){ids[i]=next++;inst(m,245,{6,ids[i],loaded,yes,10,current_label});}
+      current_label=merge;continue;
     }
     if (n.op == U32Op::GuardedLoad || n.op == U32Op::GuardedStore) {
       const bool load = n.op == U32Op::GuardedLoad;
