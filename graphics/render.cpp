@@ -45,6 +45,29 @@ Status VulkanBackend::render_frames_rgba(
   return render_core(w, h, vs, fs, (uint32_t)(vertices.size() / 5), &m, &fp, clear, frames);
 }
 
+Status VulkanBackend::render_clip_mesh_rgba(
+    uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
+    const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
+    const std::vector<uint32_t>& indices, bool depth, const float clear[4],
+    std::vector<uint8_t>* image) {
+  if (!image) return Status::Fail(100, "vulkan", "clip mesh render needs an output image");
+  if (vertices.empty() || vertices.size() % 7 || vertices.size() / 7 > 65536)
+    return Status::Fail(100, "vulkan", "clip mesh vertices must be float4 clip position + float3 colour (multiple of 7 floats, max 65536 vertices)");
+  if (indices.empty() || indices.size() % 3 || indices.size() > 30000)
+    return Status::Fail(100, "vulkan", "mesh indices must be a nonzero multiple of 3 (max 30000)");
+  for (uint32_t i : indices)
+    if (i >= vertices.size() / 7)
+      return Status::Fail(100, "vulkan", "mesh index out of range of the vertex array");
+  MeshInput m;
+  m.vertices = &vertices; m.pos_floats = 4; m.indices = &indices; m.depth = depth;
+  std::vector<std::vector<uint8_t>> frames;
+  auto st = render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, nullptr, clear, &frames);
+  if (!st) return st;
+  if (frames.size() != 1) return Status::Fail(100, "vulkan", "clip mesh render produced an unexpected frame count");
+  *image = std::move(frames[0]);
+  return Status::Ok();
+}
+
 Status VulkanBackend::render_mesh_frames_rgba(
     uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
     const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
@@ -341,7 +364,7 @@ Status VulkanBackend::render_core(
   VkVertexInputBindingDescription vbind{0, vstride, VK_VERTEX_INPUT_RATE_VERTEX};
   using Fmt = decltype(VkVertexInputAttributeDescription::format);
   VkVertexInputAttributeDescription vattr[2] = {
-      {0, 0, static_cast<Fmt>(pos_floats == 3 ? (int32_t)VK_FORMAT_R32G32B32_SFLOAT : (int32_t)VK_FORMAT_R32G32_SFLOAT), 0},
+      {0, 0, static_cast<Fmt>(pos_floats == 4 ? (int32_t)VK_FORMAT_R32G32B32A32_SFLOAT : pos_floats == 3 ? (int32_t)VK_FORMAT_R32G32B32_SFLOAT : (int32_t)VK_FORMAT_R32G32_SFLOAT), 0},
       {1, 0, static_cast<Fmt>((int32_t)VK_FORMAT_R32G32B32_SFLOAT), pos_floats * 4}};
   if (verts) {
     vin.vertexBindingDescriptionCount = 1; vin.pVertexBindingDescriptions = &vbind;
