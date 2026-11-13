@@ -104,6 +104,57 @@ void pnr_loop_tests(int& pass,int& fail) {
       std::filesystem::remove(path);
     }else std::puts("SKIP loop validator (not configured)");
   };
+  // Runtime trip count: provenance is an initial uniform or scalar copy.
+  auto runtime_kernel=[&](uint32_t lanes,bool copy,bool overwrite) {
+    auto code=kernel(lanes,1,1); // delta=s0, count from s1 or its s21 copy
+    const size_t init=lanes==1?11:10;
+    code.erase(code.begin()+init+1);code[init]=copy?0xbe940315:0xbe940301;
+    if(copy)code.insert(code.begin()+init,0xbe950301); // s21=s1
+    if(overwrite)code.insert(code.begin()+init+(copy?1:0),0xbe810381); // s1=1 after copy
+    return code;
+  };
+  {
+    auto code=runtime_kernel(8,false,false);
+    auto t=translate_compute_words(code,base,17,8,2);
+    check(t.ok && t.loop_count_uniform==1,"runtime-loop: declared uniform count provenance tracked");
+    VulkanBackend unopened;
+    for(uint32_t invalid:{0u,65u,0x80000000u,0xffffffffu}) {
+      std::vector<uint32_t> io(17,0xfeedface),before=io;
+      auto result=run_translated_compute(unopened,t,&io,{7,invalid});
+      check(!result && result.error.code==105 && io==before,
+            "runtime-loop: invalid count explicitly rejected before Vulkan and io unchanged");
+    }
+    auto bad=t;bad.loop_count_uniform=17;std::vector<uint32_t> io(17,7);
+    check(!run_translated_compute(unopened,bad,&io,{7,2}),"runtime-loop: malformed count metadata rejected");
+    bad=t;bad.loop_count_uniform=2;
+    check(!run_translated_compute(unopened,bad,&io,{7,2}),"runtime-loop: count metadata outside declared block rejected");
+    bad=t;bad.structured_loop=false;
+    check(!run_translated_compute(unopened,bad,&io,{7,2}),"runtime-loop: count without loop metadata rejected");
+    check(!run_translated_compute(unopened,t,&io,{7}),"runtime-loop: missing count input rejected");
+    check(!run_translated_compute(unopened,t,&io,{7,2,3}),"runtime-loop: extra input rejected");
+    reject(code,"runtime-loop: undeclared trip-count source rejected",8,1);
+    auto dynamic=code;dynamic.insert(dynamic.begin()+10,0x80150100);dynamic[11]=0xbe940315;
+    reject(dynamic,"runtime-loop: computed scalar count without exact input provenance rejected",8,2);
+    dynamic=code;dynamic[10]=0xbe9403fb;
+    reject(dynamic,"runtime-loop: SCC special selector cannot supply count",8,2);
+    dynamic=code;dynamic.insert(dynamic.begin()+10,0x7e2a0500);dynamic[11]=0xbe940315;
+    reject(dynamic,"runtime-loop: lane reduction cannot supply multi-mode count",8,2);
+    // Workgroup-independent SGPR may alias counter destination; old SSA input survives.
+    auto alias=code;alias[10]=0xbe810301;alias[12]=0x80818101;alias[13]=0xbf068001;
+    auto a=translate_compute_words(alias,base,17,8,2);
+    check(a.ok && a.loop_count_uniform==1,"runtime-loop: counter may copy itself with input SSA intact");
+    check(SpirvModule::compute_u32({{U32Op::Constant,0},{U32Op::LoopAddUniform,0,0,0}}).empty(),
+          "runtime-loop: IR missing entry guard rejected");
+    check(SpirvModule::compute_u32({},1,0,1,1,0,1).empty(),"runtime-loop: IR guard index out of input range rejected");
+    check(SpirvModule::compute_u32({},1,0,1,0,0,17).empty(),"runtime-loop: IR invalid guard sentinel rejected");
+    check(SpirvModule::compute_u32({{U32Op::Constant,1},{U32Op::LoopAddUniform,0,0,0}},1,0,1,1,0,0).empty(),
+          "runtime-loop: IR count must directly name matching UniformInput node");
+    check(SpirvModule::compute_u32({{U32Op::UniformInput,0},{U32Op::LoopAddUniform,0,0,0}},1,0,1,2,0,1).empty(),
+          "runtime-loop: IR entry guard/count index mismatch rejected");
+    check(SpirvModule::compute_u32({{U32Op::UniformInput,0},{U32Op::LoopAddUniform,0,0,2}},1,0,1,1,0,0).empty(),
+          "runtime-loop: IR forward trip-count reference rejected");
+  }
+
   VulkanBackend vk;auto st=vk.open();
   if(!st){std::printf("SKIP loop Vulkan: %s\n",st.error.message.c_str());return;}
   st=vk.create_instance("pnr-loop-tests");check(bool(st),"loop: instance created");
@@ -150,4 +201,41 @@ void pnr_loop_tests(int& pass,int& fail) {
       check(t.ok && t.structured_loop && bool(run) && io==expected,"loop: uniform invariant delta, exit counter and post-loop guarded-load composition");
     }
   }
+  for(uint32_t lanes:{1u,8u,64u})for(bool copy:{false,true}) {
+    const auto code=runtime_kernel(lanes,copy,copy);
+    auto t=translate_compute_words(code,base,lanes*2+1,lanes,2);validate(t);
+    check(t.ok && t.structured_loop && t.loop_count_uniform==1,
+          "runtime-loop: same compiled module uses exact copied uniform provenance");
+    for(uint32_t count:{1u,2u,16u,64u})for(uint32_t delta:{0u,1u,0xffffffffu}) {
+      std::vector<uint32_t> io(lanes*2+1,0xa5a5a5a5);for(uint32_t j=0;j<lanes;++j)io[j]=0xffffffffu-j;
+      auto expected=io;for(uint32_t j=0;j<lanes;++j)expected[lanes+j]=uint32_t(io[j]+delta*count);
+      auto run=run_translated_compute(vk,t,&io,{delta,count});
+      check(t.ok && bool(run) && io==expected,
+            "runtime-loop: changing uniform counts/deltas preserve exact lane results and wrap");
+    }
+    for(uint32_t invalid:{0u,65u,0x80000000u,0xffffffffu}) {
+      std::vector<uint32_t> io(lanes*2+1,0x12345678),before=io;
+      auto run=run_translated_compute(vk,t,&io,{7,invalid});
+      check(!run && run.error.code==105 && io==before,"runtime-loop: checked invalid dispatch leaves every word untouched");
+      auto raw=vk.run_compute_words(t.spirv,&io,{7,invalid});
+      check(t.ok && bool(raw) && io==before,
+            "runtime-loop: defensive GPU entry return rejects invalid trip before all SSBO effects");
+    }
+    std::vector<uint8_t> bytes;for(auto word:code)for(unsigned j=0;j<4;++j)bytes.push_back(uint8_t(word>>(j*8)));
+    auto bt=translate_compute_bytes(bytes,base,lanes*2+1,lanes,2);
+    check(bt.ok && bt.loop_count_uniform==1 && bt.spirv==t.spirv,"runtime-loop: byte API preserves count contract");
+  }
+
+  {
+    auto code=runtime_kernel(8,false,false);code[10]=0xbe94030f;
+    auto t=translate_compute_words(code,base,17,8,16);validate(t);
+    for(uint32_t count:{1u,64u}) {
+      std::vector<uint32_t> uniforms(16,0);uniforms[0]=0xffffffff;uniforms[15]=count;
+      std::vector<uint32_t> io(17,7),expected=io;for(uint32_t j=0;j<8;++j)expected[8+j]=uint32_t(7-count);
+      auto run=run_translated_compute(vk,t,&io,uniforms);
+      check(t.ok && t.loop_count_uniform==15 && bool(run) && io==expected,
+            "runtime-loop: highest declared SGPR index count and delta wrap correctly");
+    }
+  }
+
 }
