@@ -1,15 +1,157 @@
 # AnythingPS5 by AK
 
-**PNR — PlayStation Native Runtime.** A research project exploring native
-x86-64 game compatibility on Windows and Linux: a compatibility-layer
-runtime, Vulkan compute backend (rendering planned), and an adaptive performance
-engine for ordinary PCs and laptops, including low-end hardware.
+**PNR - PlayStation Native Runtime.** A research prototype that explores
+running native x86-64 game binaries through a compatibility layer: a loader,
+a PlayStation-style system-call shim, a package and library system, a
+headless launcher, and an offscreen Vulkan graphics path. Written in C++,
+licensed GPL-2.0.
 
-> **Honest status:** PNR cannot run any commercial PS5 game. No Sony
-> firmware, SDK code, keys, or game files are used or distributed, and no
-> DRM is bypassed. What exists today is a real, tested foundation: a core
-> runtime, a native executable loader, a compatibility services layer, a
-> CLI, and a demo application — all building and passing tests on Linux.
+> **Honest status.** PNR cannot run any commercial PS5 game. No Sony
+> firmware, SDK code, keys or game files are used, and no DRM is bypassed.
+> Everything below runs on Linux x86-64, headless, with developer-built demo
+> programs. There is **no GUI yet** and no window or display output. The file
+> "jail" is application-level path routing, **not a security sandbox**.
+
+**Contents:**
+[What it does](#what-it-does) -
+[Rendered output](#rendered-output) -
+[How it works](#how-it-works) -
+[Architecture](#architecture) -
+[Quick start](#quick-start) -
+[Capability table](#what-works-right-now-phase-0--phase-1-prototype) -
+[Captured sessions](#example-output) -
+[Roadmap](#roadmap) -
+[Security honesty](#security-honesty-what-the-jail-is-and-is-not)
+
+## What it does
+
+| Area | Today (all headless) |
+|---|---|
+| Run native programs | Validates an ELF64 binary, classifies every import, and runs it as a supervised child process with its own file jail |
+| PlayStation-style calls | A shim library exports real `sceKernel*` functions (memory, threads, timing, jailed file I/O). Unimplemented calls are reported, never faked |
+| Packages | `.pnrgame` archives (tar plus SHA-256 manifest), built by `pnr_make_package`, verified and installed by a controlled importer |
+| Library | SQLite store of games, installs, launches and compatibility state |
+| Launcher core | `pnr-launcher`: list, show, launch, history, set compatibility, scan, import, remove, verify, doctor, clean, save export and restore |
+| Graphics | Offscreen Vulkan rendering on software Vulkan (lavapipe): triangle, spinning triangle, cube, lit, textured and lit-textured meshes, game-supplied meshes. Hand-authored SPIR-V, plus a restricted RDNA-to-SPIR-V translation path (experimental) |
+| Performance | Rule-based adaptive performance engine and laptop power-mode caps |
+
+Not done: real PS5 binaries, Sony APIs, a window or swapchain, hardware GPU
+testing, audio output, a desktop launcher UI, untrusted-code isolation.
+No benchmarks exist; none are claimed.
+
+Test state: **1671/1671 unit tests, 15/15 CTest suites** on a fresh Linux
+Release `-Werror` build (details in the capability section below).
+
+## Rendered output
+
+These images are frame strips produced by the demo programs on the
+**software Vulkan driver (Mesa lavapipe)** in a headless Linux sandbox. They
+were converted from the demos' PPM frame files to PNG during development.
+Nothing here is hardware GPU output, and nothing is a Sony API: the `pnrGfx*`
+functions are PNR's own extension. Re-run the demos (see Quick start) to
+reproduce them.
+
+**Triangle** - first offscreen draw, hand-authored SPIR-V shaders.
+
+![Triangle](docs/images/1-triangle.png)
+
+**Spinning triangle** - 8 frames, per-frame rotation pushed to the vertex shader.
+
+![Spinning triangle](docs/images/2-spinning-triangle.png)
+
+**Cube** - indexed mesh with a depth buffer, checked against a CPU ray caster.
+
+![Cube](docs/images/3-cube.png)
+
+**Game-driven cube** - `ps_cube_demo` runs its own frame loop under `pnr run` and presents frames into its jail.
+
+![Game cube](docs/images/4-game-cube.png)
+
+**RDNA-translated vertex stage** - the MVP transform is generated as restricted RDNA machine code and translated to SPIR-V compute (experimental).
+
+![RDNA cube](docs/images/5-rdna-cube.png)
+
+**Game-driven RDNA cube** - the same path driven from a game program.
+
+![Game RDNA cube](docs/images/6-game-rdna-cube.png)
+
+**Game-supplied pyramid** - `ps_mesh_demo` uploads its own 5-vertex mesh.
+
+![Pyramid](docs/images/7-pyramid.png)
+
+**Lit cube** - per-vertex normals with a directional light (Lambert diffuse).
+
+![Lit cube](docs/images/8-lit-cube.png)
+
+**Textured** - RGBA8 texture sampled by a hand-authored fragment shader.
+
+![Textured](docs/images/9-textured.png)
+
+**Lit and textured** - texture, tint and light combined.
+
+![Lit textured](docs/images/10-lit-textured.png)
+
+Terminal output from the CLI and launcher is shown as captured text in
+[Captured sessions](#example-output), which is easier to copy and search than
+screenshots.
+
+## How it works
+
+```
+ .pnrgame package            pnr-launcher / pnr CLI
+ (tar + SHA-256) --import--> library (SQLite) --run--> validate ELF
+                                                         |
+                          classify imports (host / PRX / PNR ext / unknown)
+                                                         |
+                    supervised child process, LD_LIBRARY_PATH -> PS-ABI shim
+                                                         |
+          sceKernel* calls -> jailed files, memory, threads, timers
+          pnrGfx* calls   -> offscreen Vulkan (lavapipe) -> frame files
+                                                         |
+                    exit status -> launch history -> compatibility state
+```
+
+1. **Package and import.** A package carries a manifest with SHA-256 sums.
+   The importer verifies checksums, checks the ELF, rejects path traversal
+   and registers the game.
+2. **Launch.** The loader parses and validates the ELF and classifies each
+   import. The binary runs natively in a separate process; the shim library
+   serves the PlayStation-style calls it makes.
+3. **Jail.** File calls resolve inside `jail/<game id>`. This is path routing
+   in the shim, not OS enforcement.
+4. **Graphics.** Games call `pnrGfx*` to upload meshes, textures and lights
+   and to present frames. The renderer draws offscreen with Vulkan and writes
+   frames into the jail.
+5. **Compatibility honesty.** A clean exit moves Untested to Launches Only.
+   Only a person can set Playable states, and nothing claims playability.
+
+## Architecture
+
+Modules (see [docs/architecture.md](docs/architecture.md) and
+[docs/interface-contracts.md](docs/interface-contracts.md)):
+core runtime, loader and PRX layer, compat services, host OS abstraction,
+adaptive performance engine, laptop manager, game services, library,
+package/importer, headless launcher core, graphics. Planned: security
+manager (Module 11), desktop UI.
+
+## Quick start
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+cd build
+./pnr run ./ps_demo          # PS-style demo through the shim
+./pnr run ./ps_cube_demo     # game-driven cube frames
+./pnr_make_package demo.pnrgame demo-game "PNR Demo" 0.1.0 bin/game bin/game=./ps_demo
+./pnr-launcher import demo.pnrgame
+./pnr-launcher list
+./pnr-launcher doctor
+```
+
+Full command reference with real captured output is in
+[Captured sessions](#example-output). Linux x86-64 only; a Windows build
+compiles but cannot run ELF games.
 
 ## What works right now (Phase 0 + Phase 1 prototype)
 
@@ -845,7 +987,7 @@ platform/    MODULE 07 - host OS abstraction, Linux + Windows backends (Windows 
 ape/         MODULE 05 - adaptive performance engine (classification, frame stats, controller)
 laptop/      MODULE 06 - laptop optimization manager (power modes, caps)
 package/     .pnrgame format: ustar, SHA-256, importer
-launcher/    MODULE 10 core - headless launcher core (list, details, launch, history, human compatibility, read-only scan, import/remove/verify, doctor, clean --orphans, saves export/restore, doctor, clean, export, restore-saves)
+launcher/    MODULE 10 core - headless launcher core (list, details, launch, history, human compatibility, read-only scan, import/remove/verify, doctor, clean --orphans, saves export/restore)
 library/     MODULE 09 - SQLite game/installation/compatibility/launch store
 services/    MODULE 08 - virtual filesystem, input, audio backends
 tools/       pnr_make_package - dev package builder
@@ -863,6 +1005,20 @@ Planned (per the master prompt's structure): `graphics/`, `performance/`,
 - [Feasibility report + assumptions + PoC test plan](docs/feasibility-report.md)
 - [Risk register](docs/risk-register.md)
 - [Interface contracts](docs/interface-contracts.md)
+
+## Roadmap
+
+| Item | Status |
+|---|---|
+| Headless launcher core (list, run, library care, install, doctor, saves backup) | Implemented, Tested |
+| Desktop launcher UI | Planned |
+| Security manager with a real isolation boundary (seccomp, namespaces) | Planned (required before any untrusted code) |
+| Hardware GPU testing and a swapchain or window | Planned, untested |
+| Wider RDNA-to-SPIR-V coverage | Experimental, subset only |
+| Audio host backends | Planned |
+| Windows execution path | Blocked (ELF cannot run on Windows) |
+| Prebuilt releases | Parked until the owner asks |
+| Real PS5 software | Blocked (proprietary formats, authorization, DRM) |
 
 ## Security honesty: what the "jail" is and is not
 
