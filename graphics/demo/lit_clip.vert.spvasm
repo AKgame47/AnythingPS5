@@ -1,0 +1,38 @@
+; PNR hand-authored pass-through lit vertex shader: position is already clip
+; space (xyzw), colour and the precomputed Lambert dot d pass through. GPL-2.0.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %inPos %inCol %inD %outCol %outD %glpos
+               OpDecorate %inPos Location 0
+               OpDecorate %inCol Location 1
+               OpDecorate %inD Location 2
+               OpDecorate %outCol Location 0
+               OpDecorate %outD Location 1
+               OpDecorate %glpos BuiltIn Position
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+         %v3 = OpTypeVector %float 3
+         %v4 = OpTypeVector %float 4
+        %pi3 = OpTypePointer Input %v3
+        %pi4 = OpTypePointer Input %v4
+        %pif = OpTypePointer Input %float
+        %po3 = OpTypePointer Output %v3
+        %po4 = OpTypePointer Output %v4
+        %pof = OpTypePointer Output %float
+      %inPos = OpVariable %pi4 Input
+      %inCol = OpVariable %pi3 Input
+        %inD = OpVariable %pif Input
+     %outCol = OpVariable %po3 Output
+       %outD = OpVariable %pof Output
+      %glpos = OpVariable %po4 Output
+       %main = OpFunction %void None %fn
+          %e = OpLabel
+          %p = OpLoad %v4 %inPos
+               OpStore %glpos %p
+          %c = OpLoad %v3 %inCol
+               OpStore %outCol %c
+          %d = OpLoad %float %inD
+               OpStore %outD %d
+               OpReturn
+               OpFunctionEnd
