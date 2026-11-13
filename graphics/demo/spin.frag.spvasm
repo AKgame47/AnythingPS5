@@ -1,0 +1,27 @@
+; PNR hand-authored fragment shader: outputs the interpolated colour, alpha 1. GPL-2.0.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %inCol %outCol
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %inCol Location 0
+               OpDecorate %outCol Location 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+         %v3 = OpTypeVector %float 3
+         %v4 = OpTypeVector %float 4
+         %f1 = OpConstant %float 1
+        %pi3 = OpTypePointer Input %v3
+        %po4 = OpTypePointer Output %v4
+      %inCol = OpVariable %pi3 Input
+     %outCol = OpVariable %po4 Output
+       %main = OpFunction %void None %fn
+          %e = OpLabel
+          %c = OpLoad %v3 %inCol
+          %r = OpCompositeExtract %float %c 0
+          %g = OpCompositeExtract %float %c 1
+          %b = OpCompositeExtract %float %c 2
+        %out = OpCompositeConstruct %v4 %r %g %b %f1
+               OpStore %outCol %out
+               OpReturn
+               OpFunctionEnd
