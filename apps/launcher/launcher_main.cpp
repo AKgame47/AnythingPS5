@@ -12,6 +12,7 @@
 
 #include "launcher/launcher_core.hpp"
 #include "psn/psn_cli.hpp"
+#include "store/store_cli.hpp"
 
 static void usage() {
   std::puts("pnr-launcher (headless launcher core, not a desktop UI)\n"
@@ -31,6 +32,8 @@ static void usage() {
             "  pnr-launcher clean --orphans [--yes] [--json]   (orphan install dirs only; dry run by default)\n"
             "  pnr-launcher export <game-id> <out.tar> [--json]   (back up saves)\n"
             "  pnr-launcher restore-saves <game-id> <in.tar> [--overwrite] [--json]\n"
+            "  pnr-launcher store source add <id> <https-index-url> --rights <statement> | store source remove <id> [--yes] | store source list\n"
+            "  pnr-launcher store refresh [id] | store search [text] [--source id] | store show <source> <package> [--json]   (no downloads yet)\n"
             "  pnr-launcher psn status [--json]   (local state; no network)\n"
             "  pnr-launcher psn set-token [--file PATH]   (token from stdin or a file, never argv)\n"
             "  pnr-launcher psn import-json <file> [--complete] [--json]   (saved purchased-games response)\n"
@@ -46,7 +49,7 @@ int main(int argc, char** argv) {
   bool json = false;
   std::vector<std::string> pos, gameargs;
   bool after = false, complete = false, forget = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
-  std::string note, limit_s = "20", file, platform;
+  std::string note, limit_s = "20", file, platform, rights, source;
   for (size_t i = 1; i < a.size(); ++i) {
     if (after) gameargs.push_back(a[i]);
     else if (a[i] == "--") after = true;
@@ -57,6 +60,8 @@ int main(int argc, char** argv) {
     else if (a[i] == "--complete") complete = true;
     else if (a[i] == "--forget-owned") forget = true;
     else if (a[i] == "--file" && i + 1 < a.size()) file = a[++i];
+    else if (a[i] == "--rights" && i + 1 < a.size()) rights = a[++i];
+    else if (a[i] == "--source" && i + 1 < a.size()) source = a[++i];
     else if (a[i] == "--platform" && i + 1 < a.size()) platform = a[++i];
     else if (a[i] == "--keep-saves") keep = true;
     else if (a[i] == "--note" && i + 1 < a.size()) note = a[++i], have_note = true;
@@ -152,6 +157,21 @@ int main(int argc, char** argv) {
     auto o = core.restore_saves(pos[0], pos[1], overwrite);
     std::fputs((json ? render_saves_json("restore", o) + "\n" : render_saves_text("restore", o)).c_str(), stdout);
     rc = o.ok ? 0 : 1;
+  } else if (a[0] == "store" && !pos.empty()) {
+    pnr::store::Registry reg(pnr::store::store_dir_for(dbp ? dbp : "./pnr_data/library.db"));
+    std::string out;
+    auto ls = reg.load();
+    if (!ls) { std::fprintf(stderr, "store: %s\n", ls.error.message.c_str()); rc = 1; }
+    else {
+      if (pos[0] == "source" && pos.size() == 4 && pos[1] == "add") rc = pnr::store::cmd_source_add(reg, pos[2], pos[3], rights, json, &out);
+      else if (pos[0] == "source" && pos.size() == 3 && pos[1] == "remove") rc = pnr::store::cmd_source_remove(reg, pos[2], yes, json, &out);
+      else if (pos[0] == "source" && pos.size() == 2 && pos[1] == "list") rc = pnr::store::cmd_source_list(reg, json, &out);
+      else if (pos[0] == "refresh" && pos.size() <= 2) rc = pnr::store::cmd_refresh(reg, pos.size() == 2 ? pos[1] : "", json, &out);
+      else if (pos[0] == "search" && pos.size() <= 2) rc = pnr::store::cmd_search(reg, pos.size() == 2 ? pos[1] : "", source, json, &out);
+      else if (pos[0] == "show" && pos.size() == 3) rc = pnr::store::cmd_show(reg, pos[1], pos[2], json, &out);
+      else usage();
+      std::fputs(out.c_str(), stdout);
+    }
   } else if (a[0] == "psn" && !pos.empty()) {
     const std::string tp = pnr::psn::token_path_for(dbp ? dbp : "./pnr_data/library.db");
     std::string out;
