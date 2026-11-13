@@ -229,7 +229,7 @@ void pnr_psn_sync_tests(int& pass, int& fail) {
           "s=http.server.HTTPServer(('127.0.0.1',0),H); print(s.server_address[1],flush=True); s.serve_forever()\n";
       const std::string sp = "/tmp/pnr_psn_srv_" + std::to_string(::getpid()) + ".py";
       { FILE* f = std::fopen(sp.c_str(), "w"); std::fputs(script.c_str(), f); std::fclose(f); }
-      FILE* p = ::popen(("python3 " + sp + " & echo $! 1>&2; wait").c_str(), "r");
+      FILE* p = ::popen(("python3 " + sp + " 2>/dev/null & echo $! 1>&2; wait").c_str(), "r");
       char line[64] = {0};
       int port = (p && std::fgets(line, sizeof line, p)) ? std::atoi(line) : 0;
       if (port <= 0) { std::printf("SKIP curl backend tests: no python3 test server\n"); }
