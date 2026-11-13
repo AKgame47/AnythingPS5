@@ -71,7 +71,8 @@ std::vector<uint32_t> SpirvModule::compute_write_u32(uint32_t value) {
 }
 
 std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes,
-                                                uint32_t buffer_words, uint32_t guest_base_low) {
+                                                uint32_t buffer_words, uint32_t guest_base_low, uint32_t local_size_x) {
+  if (!local_size_x || local_size_x > 64) return {};
   if (!buffer_words || buffer_words > 65536) return {};
   // SPIR-V 1.0 Uniform BufferBlock containing a fixed-size uint array.
   // IDs 1..12 retain the original emitter's meanings; 13=array type,
@@ -87,6 +88,19 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   while (types < m.size() && (m[types] & 0xffffu) != spv::OpTypeVoid)
     types += m[types] >> 16u;
   m.resize(types);
+  // Input %21 is LocalInvocationIndex. Add to the 1.0 entry interface.
+  for (size_t i=5; i<m.size();) {
+    const uint32_t count=m[i]>>16u, op=m[i]&65535u;
+    if (op==spv::OpEntryPoint) {
+      m.insert(m.begin()+i+count,21);
+      m[i]=((count+1)<<16u)|op;
+      i+=count+1;
+    } else {
+      if(op==spv::OpExecutionMode) m[i+3]=local_size_x;
+      i+=count;
+    }
+  }
+  inst(m, spv::OpDecorate, {21, 11, 29}); // BuiltIn LocalInvocationIndex
   inst(m, spv::OpDecorate, {13, 6, 4}); // ArrayStride = 6, uint stride 4
   inst(m, spv::OpTypeVoid, {4});
   inst(m, spv::OpTypeFunction, {5, 4});
@@ -110,7 +124,9 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   inst(m, spv::OpConstant, {6, 17, guest_base_low + (buffer_words-1)*4});
   inst(m, spv::OpConstant, {6, 18, 3});
   inst(m, spv::OpConstant, {6, 19, 2});
-  uint32_t next = 20;
+  inst(m, spv::OpTypePointer, {20, 1, 6}); // Input uint
+  inst(m, spv::OpVariable, {20, 21, 1});
+  uint32_t next = 22;
   std::vector<uint32_t> ids(nodes.size(), 0), indices(nodes.size(), 0);
   for (size_t i = 0; i < nodes.size(); ++i) {
     const auto& n = nodes[i];
@@ -130,6 +146,9 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   for (size_t i = 0; i < nodes.size(); ++i) {
     const auto& n = nodes[i];
     if (n.op == U32Op::Constant) continue;
+    if (n.op == U32Op::InvocationIndex) {
+      ids[i]=next++; inst(m, 61, {6, ids[i], 21}); continue;
+    }
     if (n.op == U32Op::GuardedLoad || n.op == U32Op::GuardedStore) {
       const bool load = n.op == U32Op::GuardedLoad;
       const uint32_t addr_node = load ? n.a : n.b;
