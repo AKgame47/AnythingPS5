@@ -11,6 +11,7 @@ struct ComputeTranslation {
   bool ok = false;
   std::string error;
   std::vector<uint32_t> spirv; // empty on EVERY failure
+  bool conditional_selection = false; // restricted forward SCC0 skip
   uint32_t local_size_x = 1; // one workgroup, explicit test invocation ABI
   bool guarded_memory = false; // invalid runtime loads=0 / stores skipped
   uint32_t required_buffer_words = 0; // host io must contain at least this many
@@ -30,6 +31,10 @@ struct ComputeTranslation {
 // Host must bind at least required_buffer_words words; zero/oversize ranges
 // and base+size overflow fail. Legacy callers default to a single word.
 // Supports v_mov, flat_load/store_dword, uint32 add/sub/and/or/xor.
+// Single-invocation conditional subset: readfirstlane to SGPR, s_mov_b32,
+// s_cmp_eq_u32, one forward s_cbranch_scc0 over v_mov-only body. Registers
+// assigned in body must also be defined on skipped path. Branch/Phi merge;
+// no loops, nesting, branch memory effects or general control flow.
 // No wave/EXEC/asynchronous waitcnt semantics or real-game shader ABI.
 ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
                                            uint64_t ssbo_guest_base,
