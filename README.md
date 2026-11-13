@@ -26,7 +26,8 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | CLI driving the full 10-step launch workflow with honest per-step results | Implemented, Tested |
 | Developer-controlled demo app running only on compat services | Implemented, Tested |
 | Vulkan graphics backend | Blocked in the dev sandbox (no GPU); Planned (Phase 2) |
-| Adaptive Performance Engine | Planned (Phase 4) |
+| Adaptive Performance Engine (deterministic rules, hardware class heuristic, closed-loop controller) | Implemented, Tested |
+| Laptop Optimization Manager (battery/balanced/max-performance caps) | Implemented, Tested |
 | Windows backend | Implemented (hwinfo via Win32; ELF launch Blocked, cross-compile CI-verified) |
 | Rust components | Planned (no Rust toolchain in current sandbox) |
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
@@ -100,6 +101,8 @@ core/        MODULE 01 - runtime, lifecycle, events, config, capabilities
 loader/      MODULE 02 - ELF parser (A), native loader (B), format adapters (C, planned)
 compat/      MODULE 03 - memory, timing, filesystem, thread services
 platform/    MODULE 07 - host OS abstraction, Linux + Windows backends (Windows launch blocked)
+ape/         MODULE 05 - adaptive performance engine (classification, frame stats, controller)
+laptop/      MODULE 06 - laptop optimization manager (power modes, caps)
 package/     .pnrgame format: ustar, SHA-256, importer
 library/     MODULE 09 - SQLite game/installation/compatibility/launch store
 tools/       pnr_make_package - dev package builder
