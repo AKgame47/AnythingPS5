@@ -40,6 +40,18 @@ bool url_allowed(const std::string& url, const std::vector<std::string>& allowed
   return false;
 }
 
+Status HttpClient::download(const HttpRequest&, const BodySink&, HttpResponse*) {
+  return Status::Fail(kErrTransport, "psn", "this HTTP client cannot stream downloads");
+}
+
+Status GuardedHttp::download(const HttpRequest& req, const BodySink& sink, HttpResponse* res) {
+  if (!url_allowed(req.url, allowed_)) {
+    ++blocked;
+    return Status::Fail(kErrBlockedHost, "psn", "request refused by the host allow-list");
+  }
+  return inner_.download(req, sink, res);
+}
+
 Status GuardedHttp::perform(const HttpRequest& req, HttpResponse* res) {
   if (!url_allowed(req.url, allowed_)) {
     ++blocked;
