@@ -22,6 +22,7 @@
 #include "loader/native_loader.hpp"
 #include "loader/nid.hpp"
 #include "prx/prx.hpp"
+#include "loader/import_resolver.hpp"
 #include <atomic>
 #include "package/importer.hpp"
 #include "package/sha256.hpp"
@@ -603,6 +604,35 @@ int main() {
       CHECK(reg.bind("ZZZZZZZZZZZ", &fn, &err) == pnr::prx::SCE_KERNEL_ERROR_UNKNOWN,
             "prx: unknown NID -> UNKNOWN");
     }
+  }
+
+  // --- import resolution wired into the loader (MODULE 02 + PRX) ---
+  {
+    pnr::prx::PrxRegistry reg;
+    pnr::loader::ImportResolution r;
+    CHECK(pnr::loader::resolve_imports(self_exe(), reg, &r),
+          "imports: resolves a real binary");
+    bool have_libc = false;
+    for (const auto& l : r.needed_libs)
+      if (l.find("libc") != std::string::npos) have_libc = true;
+    CHECK(have_libc, "imports: DT_NEEDED includes libc");
+    CHECK(!r.imports.empty(), "imports: undefined symbols found");
+    CHECK(r.host + r.prx_implemented + r.prx_declared + r.unknown ==
+              static_cast<int>(r.imports.size()),
+          "imports: counters add up");
+    // malloc is in our taxonomy as declared-only -> honest PrxDeclared
+    bool saw_declared_malloc = false;
+    for (const auto& e : r.imports)
+      if (e.name == "malloc" && e.klass == pnr::loader::ImportClass::PrxDeclared)
+        saw_declared_malloc = true;
+    CHECK(saw_declared_malloc, "imports: malloc classified prx-declared");
+    // malformed input fails with a specific error, never a crash
+    const std::string junk = "/tmp/pnr_not_elf_ir.txt";
+    { std::ofstream(junk) << "definitely not an executable\n"; }
+    pnr::loader::ImportResolution rj;
+    CHECK(!pnr::loader::resolve_imports(junk, reg, &rj),
+          "imports: non-ELF rejected");
+    std::remove(junk.c_str());
   }
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
