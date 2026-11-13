@@ -313,18 +313,18 @@ touches nothing in the library.
   dispatch environment.
 
 
-## IF-GRAPH-03 Restricted integer-compute translation (v4)
+## IF-GRAPH-03 Restricted integer-compute translation (v5)
 
 Status: Experimental, Implemented (strict subset), Tested.
 
-- `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base, buffer_words=1)` parses
+- `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base, buffer_words=1, local_size_x=1)` parses
   little-endian words without alignment assumptions; partial words fail.
-  `translate_compute_words(words, guest_base, buffer_words=1)` is the word-level entry point.
+  `translate_compute_words(words, guest_base, buffer_words=1, local_size_x=1)` is the word-level entry point.
 - Result: `ok`, diagnostic `error`, `spirv`, `stored_value_known`,
-  `stored_value`, `required_buffer_words`, `guarded_memory`. Every failure returns empty SPIR-V. `stored_value` is
+  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`. Every failure returns empty SPIR-V. `stored_value` is
   meaningful only when `stored_value_known` is true; runtime results are
   never invented by the compiler.
-- Explicit test ABI: one active invocation, one fixed-size uint array SSBO at set 0/binding 0.
+- Explicit test ABI: one workgroup with 1..64 invocations, one fixed-size uint array SSBO at set 0/binding 0.
   Caller supplies the 64-bit guest base and 1..65536-word extent.
   The base maps to word zero; all accesses must stay in this byte range.
   It is not a host pointer, a PS5 ABI, or general GPU address translation.
@@ -346,7 +346,7 @@ Status: Experimental, Implemented (strict subset), Tested.
   no carry into high word is inferred. This is not full 64-bit pointer math.
   FLAT scalar address must be 0x7f, all segment/cache/LDS/reserved
   fields zero (including offset bit 11); load VDATA/store VDST must be zero.
-- `graphics::SpirvModule::compute_u32(nodes, buffer_words=1)` emits the straight-line uint
+- `graphics::SpirvModule::compute_u32(nodes, buffer_words=1, guest_base_low=0, local_size_x=1)` emits the straight-line uint
   IR. Invalid forward references or reads from Store nodes return empty.
   Load.a and Store.b are checked word indices; malformed/out-of-range
   static accesses produce no module. GuardedLoad.a is an earlier runtime
@@ -399,3 +399,34 @@ Status: Experimental, Implemented (strict subset), Tested.
   verify zero/skip policy and that every unrelated word remains unchanged.
 - Dynamic high word, high mismatch, boundary-crossing binding, nonzero
   dynamic offset and malformed SSA address/data references are rejected.
+
+
+### Bounded invocation indexing (Experimental test ABI)
+
+- `local_size_x` is baked into SPIR-V LocalSize, with Y=Z=1. Vulkan backend
+  dispatches exactly one workgroup. Range 1..64 is a PNR restriction, not a
+  claim about hardware limits or PS5 waves.
+- When local_size_x>1, initial v0 is LocalInvocationIndex via an Input uint
+  BuiltIn (decoration verified with spirv-as). Input variable is included
+  in the SPIR-V 1.0 entry-point interface. Default size=1 keeps legacy
+  undefined initial VGPR behavior rather than silently changing that ABI.
+- SSA tracks non-wrapping affine low addresses (origin + stride*index) for
+  moves and supported integer add/sub. Every invocation's address must be
+  provably aligned/in-range. Runtime high words or loaded/bitwise-derived
+  unproven parallel addresses are rejected, even though guarded single-mode
+  addressing allows them. Guards remain emitted for accepted dynamic lows.
+- Exactly one store instruction remains supported. Its address stride must
+  be four bytes, so invocations write disjoint words. Every load range must
+  be disjoint from the whole output range. This conservative proof rejects
+  in-place updates and ambiguous aliasing without inventing barriers.
+  Shared read-only constant inputs are permitted. No atomics, workgroup
+  barriers, shared memory, EXEC masks, subgroup or wave semantics.
+- Tests validate and dispatch sizes 2, 8 and 64. Each input element is
+  incremented into its separate output element, across three runtime input
+  sets per module. Whole-buffer checks include unchanged inputs/sentinel
+  and uint32 wraparound. Byte API retains the same workgroup setting.
+- Negative cases cover size 0/65, overlapping input/output, colliding
+  constant stores, misaligned affine strides, unproven loaded addresses,
+  affine overflow and last-invocation out-of-range. Low-level SSA emitter
+  does not perform the translator's alias proof; use translator and checked
+  dispatch for this ABI. This is not general PS5 shader launch support.
