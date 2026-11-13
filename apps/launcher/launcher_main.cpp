@@ -12,6 +12,7 @@
 
 #include "launcher/launcher_core.hpp"
 #include "sandbox/sandbox.hpp"
+#include "scan/scan.hpp"
 #include "psn/psn_cli.hpp"
 #include "store/store_cli.hpp"
 
@@ -51,7 +52,7 @@ int main(int argc, char** argv) {
   bool json = false;
   std::vector<std::string> pos, gameargs;
   bool after = false, complete = false, forget = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
-  bool sandbox_on = false;
+  bool sandbox_on = false, allow_flagged = false;
   std::string note, limit_s = "20", file, platform, rights, source;
   for (size_t i = 1; i < a.size(); ++i) {
     if (after) gameargs.push_back(a[i]);
@@ -59,6 +60,7 @@ int main(int argc, char** argv) {
     else if (a[i] == "--json") json = true;
     else if (a[i] == "--yes") yes = true;
     else if (a[i] == "--sandbox") sandbox_on = true;
+    else if (a[i] == "--allow-flagged") allow_flagged = true;
     else if (a[i] == "--overwrite") overwrite = true;
     else if (a[i] == "--orphans") orphans = true;
     else if (a[i] == "--complete") complete = true;
@@ -198,11 +200,25 @@ int main(int argc, char** argv) {
         else if ((pos[1] == "pause" || pos[1] == "resume") && pos.size() == 4) rc = pnr::store::cmd_queue_pause(qu, pos[2], pos[3], pos[1] == "pause", json, &out);
         else if (pos[1] == "cancel" && pos.size() == 4) rc = pnr::store::cmd_queue_cancel(qu, pos[2], pos[3], yes, json, &out);
         else usage();
-      } else if (pos[0] == "install" && pos.size() == 3) {
+      } else if (pos[0] == "scan" && pos.size() == 3) {
         pnr::store::Queue qu(reg, reg.dir());
         std::string path, sha;
         auto ps = qu.prepare_install(pos[1], pos[2], &path, &sha);
         if (!ps) { out = "store error: " + ps.error.message + "\n"; rc = 1; }
+        else {
+          pnr::store::Package spk; { pnr::store::Index sx; if (reg.load_index(pos[1], &sx)) for (auto& k : sx.packages) if (k.id == pos[2]) spk = k; }
+          auto srep = pnr::scan::scan_package(path, sha, spk.size, pnr::scan::config_from_env());
+          out = srep.text(); rc = srep.flagged() ? 1 : 0;
+        }
+      } else if (pos[0] == "install" && pos.size() == 3) {
+        pnr::store::Queue qu(reg, reg.dir());
+        std::string path, sha;
+        auto ps = qu.prepare_install(pos[1], pos[2], &path, &sha);
+        pnr::store::Package spk; { pnr::store::Index sx; if (reg.load_index(pos[1], &sx)) for (auto& k : sx.packages) if (k.id == pos[2]) spk = k; }
+        auto srep = pnr::scan::scan_package(path, sha, spk.size, pnr::scan::config_from_env());
+        if (ps) std::fputs(srep.text().c_str(), stdout);
+        if (!ps) { out = "store error: " + ps.error.message + "\n"; rc = 1; }
+        else if (srep.flagged() && !allow_flagged) { out = "install refused: a scan stage flagged this package. Review the scan above; --allow-flagged overrides, at your own risk. A clean scan never proves safety either.\n"; rc = 1; }
         else {
           auto o = core.import_package(path);
           std::fputs((json ? render_import_json(o) + "\n" : render_import_text(o)).c_str(), stdout);
