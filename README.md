@@ -34,6 +34,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Offscreen graphics slice: image + render pass + framebuffer + graphics pipeline, hand-authored SPIR-V vertex/fragment shaders (`graphics/demo/`), draw, copy-to-host; pixel-verified (center, corners, analytic coverage 1152/4096, orientation, determinism). **No swapchain, no window, no display**. Also an animated slice: interleaved vertex buffer + per-frame vertex push constants render an 8-frame spinning RGB triangle sequence; per-frame centroid, coverage and vertex colors verified against the analytic rotation | Implemented, Tested on software Vulkan (lavapipe) via shim and official headers; hardware GPU untested. Frames are rendered and read back sequentially (no frame pacing, no presentation). Also a 3D slice: indexed unit-cube mesh, D32 depth buffer, column-major MVP pushed per frame (`graphics/mat4.hpp`), 8-frame rotating cube checked pixel-by-pixel against an independent CPU ray caster (0 mismatches of 9216 per frame) and depth ON vs OFF shown to differ. Headless offscreen only: flat face colors, no lighting or textures, hand-authored SPIR-V (not translated from RDNA), no swapchain/display; PNR_CUBE_PPM writes a frame strip |
 | Game-driven rendering: `ps_cube_demo` runs under `pnr run`, its frame loop calls `pnrGfx*` (PNR extension, not Sony API) in `libpnr_psabi.so`, including `pnrGfxDrawCubeRdna` which renders through the translated-RDNA compute-as-vertex path and is checked byte-for-byte against the hand-authored reference in the game; frames presented as PPM into the game's jail and read back by the game; CLI step 5 reports the offscreen renderer, step 8 counts frame files | Implemented, Tested on software Vulkan (byte-identical to harness render); headless, no swapchain/display; hardware GPU untested |
 | Game-supplied mesh: `pnrGfxSetMesh` (validated, bounded, copied) + `pnrGfxDrawMesh(yaw,pitch,mode)` (hand-authored VS or translated-RDNA path); `ps_mesh_demo` uploads its own pyramid under `pnr run`, refuses 9 invalid uploads, presents 8 spinning frames | Implemented, Tested on software Vulkan: unit tests match the presented silhouette to a CPU projection (0 mismatched pixels per frame), RDNA vs hand-authored frames 0 differing bytes (1 byte off by one in the ASan build, so the game tolerates +-2). PNR extension, not a Sony API; max 24 vertices (RDNA kernel lanes), flat vertex colours interpolated, no textures/lighting, headless, hardware GPU untested |
+| Per-vertex normals + directional light: `pnrGfxSetLitMesh` / `pnrGfxSetLight` / `pnrGfxDrawLitMesh`, Lambert diffuse with ambient 0.25, computed per vertex by a hand-authored shader (reference) or by translated RDNA kernels (MVP transform + dot3); `ps_lit_demo` runs under `pnr run` with a mid-run light change | Implemented, Tested on software Vulkan: presented pixels match an independent CPU Lambert shading (0 mismatched of 9216 per frame, 8 frames), dot3 kernel equals the CPU float dot (max diff 0), RDNA vs hand-authored frames 0 differing bytes (game tolerates +-3 on 1%). Gouraud (per-vertex) only, one directional light, no specular/textures/shadows; max 24 vertices; max() clamp is in the hand-authored fragment shader; PNR extension, not a Sony API; hardware GPU untested |
 | RDNA-translated vertex stage (compute-as-vertex): `graphics/rdna_vertex.hpp` generates restricted RDNA machine code (v_mul_f32/v_add_f32 with MVP scalars in s0..s15, flat load/store over a 24-lane SSBO), the PNR translator turns it into SPIR-V compute, four dispatches give clip x,y,z,w for the cube's 24 vertices, and those positions are drawn through a pass-through vertex shader (`render_clip_mesh_rgba`, float4 clip + colour). 8 rotating frames compared with the hand-authored MVP vertex shader | Experimental, Tested on software Vulkan: clip positions match a CPU float reference (max diff 0) and 0 of 73728 pixels differ from the hand-authored frames on lavapipe. Not a real RDNA vertex-stage ABI (no VS inputs/exports/parameter cache), only the float ops the translator supports, instruction encodings written by PNR rather than compiled from a game shader, no exact PS5 float rounding guarantee, hardware GPU untested; pixel equality on another driver is not promised |
 | SPIR-V emission: compute write-back module shape, word-level emitter | Implemented (subset), Tested (spirv-val + real dispatch); full shader stages Planned |
 | RDNA shader decoder: all encoding families detected, field extraction for scalar+vector families, named mnemonic subset (scalar/vector partial), literals/64-bit words/truncation handled honestly; taxonomy adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5) (GPL-2.0) | Implemented (subset), Tested (synthetic words); SDWA/DPP + image/memory payload fields Planned |
@@ -352,6 +353,69 @@ ps_mesh_demo: ALL FRAMES RENDERED, PRESENTED TO JAIL AND VERIFIED
 --- game output end ---
 [7-start] SUCCESS   game ran natively in child process, exit code 0
 [8-monitor] SUCCESS   wall time + exit status measured; 16 presented frame file(s), 442576 bytes in the jail (/frames); per-frame times are printed by the game, the runtime has no frame-time telemetry yet
+[9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
+  [event] lifecycle -> STOPPING
+  [event] lifecycle -> TERMINATED
+[10-shutdown] SUCCESS   resources released, 0 errors recorded
+RESULT: RUN OK (real native execution)
+```
+
+### `pnr run ./ps_lit_demo` - per-vertex normals and a directional light
+
+`ps_lit_demo` builds its own 24-vertex cube with per-vertex face normals and
+uploads it with `pnrGfxSetLitMesh` (9 floats per vertex; normals must be unit
+length within 1%, never silently renormalised). `pnrGfxSetLight` sets a
+view-space light direction (the demo changes it half way). Lambert diffuse:
+`rgb = colour * (0.25 + 0.75 * max(d, 0))`, `d = dot(N, L)` per vertex and
+interpolated. Each frame is drawn with a hand-authored lit vertex shader and
+with the translated-RDNA path (transform kernel x4 plus a dot3 kernel for `d`);
+`max()` is outside the translated subset, so a hand-authored fragment shader
+does the clamp and ambient. The unit tests compare the presented pixels with an
+independent CPU ray-cast and Lambert shading. Float rounding of the two vertex
+paths agrees within a small tolerance, not bit-for-bit by contract. Offscreen
+only, no swapchain/display. Captured verbatim:
+
+```text
+ps_lit_demo: uploaded 24-vertex lit cube with face normals; 8 invalid calls refused
+ps_lit_demo: frame 0 yaw=0.300 covered=1239 (reference 1239)
+ps_lit_demo: frame 1 yaw=1.085 covered=1299 (reference 1299)
+ps_lit_demo: frame 2 yaw=1.871 covered=1239 (reference 1239)
+ps_lit_demo: frame 3 yaw=2.656 covered=1299 (reference 1299)
+ps_lit_demo: frame 4 yaw=3.442 covered=1239 (reference 1239)
+ps_lit_demo: frame 5 yaw=4.227 covered=1299 (reference 1299)
+ps_lit_demo: frame 6 yaw=5.012 covered=1239 (reference 1239)
+ps_lit_demo: frame 7 yaw=5.798 covered=1299 (reference 1299)
+ps_lit_demo: 8 lit frames, RDNA path vs reference: 0 differing bytes (tolerance +-3 on 1%)
+ps_lit_demo: ALL FRAMES RENDERED, PRESENTED TO JAIL AND VERIFIED
+[1-validate] SUCCESS   ./ps_lit_demo is a valid x86-64 ELF (13 segments)
+[1-imports] SUCCESS   30 imports: 17 host-resolved, 6 prx-implemented, 0 prx-declared-only, 0 unknown, 7 pnr-extension
+  [import] pnrGfxLitDraws                   pnr-extension
+  [import] pnrGfxPresentToFile              pnr-extension
+  [import] pnrGfxInit                       pnr-extension
+  [import] memset                           prx-implemented
+  [import] pnrGfxSetLight                   pnr-extension
+  [import] pnrGfxLastError                  pnr-extension
+  [import] memcpy                           prx-implemented
+  [import] sceKernelOpen                    prx-implemented
+  [import] sceKernelFstat                   prx-implemented
+  [import] pnrGfxDrawLitMesh                pnr-extension
+  [import] pnrGfxSetLitMesh                 pnr-extension
+  [import] sceKernelClose                   prx-implemented
+  [import] sceKernelRead                    prx-implemented
+[2-analysis] SUCCESS   logical cores=2; gpu=llvmpipe (LLVM 15.0.7, 256 bits) (software Vulkan)
+[3-config] SUCCESS   default profile 'balanced' (no game profile found; defaults used openly)
+  [event] lifecycle -> VALIDATING
+  [event] lifecycle -> INITIALIZING
+  [event] lifecycle -> READY
+[4-runtime] SUCCESS   compat memory/fs/thread services up
+[5-graphics] SUCCESS   game imports 7 pnrGfx* calls; the shim renders OFFSCREEN (headless) in the game process; gpu=llvmpipe (LLVM 15.0.7, 256 bits) (software Vulkan); no swapchain, no display
+[6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
+--- game output begin ---
+  [event] lifecycle -> RUNNING
+  [monitor] wall=0.084s exit=0
+--- game output end ---
+[7-start] SUCCESS   game ran natively in child process, exit code 0
+[8-monitor] SUCCESS   wall time + exit status measured; 24 presented frame file(s), 663864 bytes in the jail (/frames); per-frame times are printed by the game, the runtime has no frame-time telemetry yet
 [9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
   [event] lifecycle -> STOPPING
   [event] lifecycle -> TERMINATED
