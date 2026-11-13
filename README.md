@@ -32,6 +32,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Developer-controlled demo app running only on compat services | Implemented, Tested |
 | Vulkan compute backend: dlopen-loaded (no SDK needed), instance/device/SSBO/pipeline/dispatch/readback; absence of a driver is reported, never faked | Implemented (compute), Tested on software Vulkan (Mesa lavapipe) in the sandbox; hardware GPU untested |
 | Offscreen graphics slice: image + render pass + framebuffer + graphics pipeline, hand-authored SPIR-V vertex/fragment shaders (`graphics/demo/`), draw, copy-to-host; pixel-verified (center, corners, analytic coverage 1152/4096, orientation, determinism). **No swapchain, no window, no display**. Also an animated slice: interleaved vertex buffer + per-frame vertex push constants render an 8-frame spinning RGB triangle sequence; per-frame centroid, coverage and vertex colors verified against the analytic rotation | Implemented, Tested on software Vulkan (lavapipe) via shim and official headers; hardware GPU untested. Frames are rendered and read back sequentially (no frame pacing, no presentation). Also a 3D slice: indexed unit-cube mesh, D32 depth buffer, column-major MVP pushed per frame (`graphics/mat4.hpp`), 8-frame rotating cube checked pixel-by-pixel against an independent CPU ray caster (0 mismatches of 9216 per frame) and depth ON vs OFF shown to differ. Headless offscreen only: flat face colors, no lighting or textures, hand-authored SPIR-V (not translated from RDNA), no swapchain/display; PNR_CUBE_PPM writes a frame strip |
+| Game-driven rendering: `ps_cube_demo` runs under `pnr run`, its frame loop calls `pnrGfx*` (PNR extension, not Sony API) in `libpnr_psabi.so`; frames presented as PPM into the game's jail and read back by the game; CLI step 5 reports the offscreen renderer, step 8 counts frame files | Implemented, Tested on software Vulkan (byte-identical to harness render); headless, no swapchain/display; hardware GPU untested |
 | SPIR-V emission: compute write-back module shape, word-level emitter | Implemented (subset), Tested (spirv-val + real dispatch); full shader stages Planned |
 | RDNA shader decoder: all encoding families detected, field extraction for scalar+vector families, named mnemonic subset (scalar/vector partial), literals/64-bit words/truncation handled honestly; taxonomy adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5) (GPL-2.0) | Implemented (subset), Tested (synthetic words); SDWA/DPP + image/memory payload fields Planned |
 | RDNA bytes to SPIR-V: v_mov, flat_load_dword, uint32 add/sub/and/or/xor, one flat_store_dword + s_endpgm; SSA runtime data, explicit 1..64-invocation workgroup/bounded SSBO ABI (v0=local index in multi-invocation mode, disjoint affine outputs), static offsets plus runtime low-address bounds/alignment guards (invalid load=0/store=skip), checked host buffer length | Experimental, Tested (synthetic bytes, spirv-val, lavapipe readback for constant and runtime inputs); no commercial shaders or wave semantics; full64 pointers limited to one invocation |
@@ -51,7 +52,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**1337/1337 unit tests pass, 5/5 CTest suites pass** (unit, end-to-end native
+**1341/1341 unit tests pass, 6/6 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
 game, plus compact shader fixtures/mutation diagnostics). Clean Release
 build with `-Werror` passes. ASan+UBSan unit/fixture runs pass with leak
@@ -152,14 +153,14 @@ pnr_test_app: ALL OK - exiting 0
   [event] lifecycle -> INITIALIZING
   [event] lifecycle -> READY
 [4-runtime] SUCCESS   compat memory/fs/thread services up
-[5-graphics] SKIPPED   demo app is non-graphical; Vulkan compute backend is implemented (see pnr gpu), render passes are Phase 2 work
+[5-graphics] SKIPPED   game imports no pnrGfx* calls (non-graphical); the offscreen renderer is available to games that do (see ps_cube_demo)
 [6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
 --- game output begin ---
   [event] lifecycle -> RUNNING
   [monitor] wall=0.007s exit=0
 --- game output end ---
 [7-start] SUCCESS   game ran natively in child process, exit code 0
-[8-monitor] SUCCESS   wall time + exit status measured (frame-time telemetry needs the graphics phase)
+[8-monitor] SUCCESS   wall time + exit status measured (non-graphical game: no frame-time telemetry)
 [9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
   [event] lifecycle -> STOPPING
   [event] lifecycle -> TERMINATED
@@ -211,14 +212,14 @@ ps_demo: ALL SCE CALLS DISPATCHED OK
   [event] lifecycle -> INITIALIZING
   [event] lifecycle -> READY
 [4-runtime] SUCCESS   compat memory/fs/thread services up
-[5-graphics] SKIPPED   demo app is non-graphical; Vulkan compute backend is implemented (see pnr gpu), render passes are Phase 2 work
+[5-graphics] SKIPPED   game imports no pnrGfx* calls (non-graphical); the offscreen renderer is available to games that do (see ps_cube_demo)
 [6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
 --- game output begin ---
   [event] lifecycle -> RUNNING
   [monitor] wall=0.023s exit=0
 --- game output end ---
 [7-start] SUCCESS   game ran natively in child process, exit code 0
-[8-monitor] SUCCESS   wall time + exit status measured (frame-time telemetry needs the graphics phase)
+[8-monitor] SUCCESS   wall time + exit status measured (non-graphical game: no frame-time telemetry)
 [9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
   [event] lifecycle -> STOPPING
   [event] lifecycle -> TERMINATED
@@ -230,6 +231,69 @@ Every `sceKernel*` import classifies **prx-implemented** and the calls do
 real work through the shim: heap via `malloc`, anonymous memory via
 `mmap`/`mprotect`, files through the jailed file service (the proof file
 lands inside `./pnr_data/jail`), and a real measured sleep + thread.
+
+### `pnr run ./ps_cube_demo` - a game drives a rotating 3D cube
+
+`ps_cube_demo` is a developer-built native program. Its own frame loop
+advances a rotation, calls the PNR shim's `pnrGfx*` extension (PNR calls,
+**not** Sony APIs), presents each frame as a PPM file inside its jail, then
+reads the files back with `sceKernel*` file calls to verify them. The
+renderer is offscreen Vulkan (software lavapipe here): **no swapchain, no
+window, no display**. `pnr run` classifies the `pnrGfx*` imports as
+`pnr-extension`, reports the graphics step honestly, and counts the frame
+files at monitor time. Captured verbatim:
+
+```text
+ps_cube_demo: offscreen renderer up (96x96, no swapchain/display)
+ps_cube_demo: frame 0 yaw=0.000 covered=1220 frame_ms=9.0
+ps_cube_demo: frame 1 yaw=0.785 covered=1334 frame_ms=1.2
+ps_cube_demo: frame 2 yaw=1.571 covered=1220 frame_ms=1.1
+ps_cube_demo: frame 3 yaw=2.356 covered=1334 frame_ms=1.0
+ps_cube_demo: frame 4 yaw=3.142 covered=1220 frame_ms=1.0
+ps_cube_demo: frame 5 yaw=3.927 covered=1334 frame_ms=1.1
+ps_cube_demo: frame 6 yaw=4.712 covered=1220 frame_ms=1.0
+ps_cube_demo: frame 7 yaw=5.498 covered=1334 frame_ms=1.0
+ps_cube_demo: 8 frames, avg 2.0 ms, worst 9.0 ms (software Vulkan)
+ps_cube_demo: ALL FRAMES RENDERED, PRESENTED TO JAIL AND VERIFIED
+[1-validate] SUCCESS   ./ps_cube_demo is a valid x86-64 ELF (13 segments)
+[1-imports] SUCCESS   28 imports: 17 host-resolved, 6 prx-implemented, 0 prx-declared-only, 0 unknown, 5 pnr-extension
+  [import] pnrGfxPresentToFile              pnr-extension
+  [import] pnrGfxInit                       pnr-extension
+  [import] memset                           prx-implemented
+  [import] pnrGfxLastError                  pnr-extension
+  [import] pnrGfxFramesRendered             pnr-extension
+  [import] sceKernelOpen                    prx-implemented
+  [import] sceKernelFstat                   prx-implemented
+  [import] pnrGfxDrawCube                   pnr-extension
+  [import] sceKernelUsleep                  prx-implemented
+  [import] sceKernelClose                   prx-implemented
+  [import] sceKernelRead                    prx-implemented
+[2-analysis] SUCCESS   logical cores=2; gpu=llvmpipe (LLVM 15.0.7, 256 bits) (software Vulkan)
+[3-config] SUCCESS   default profile 'balanced' (no game profile found; defaults used openly)
+  [event] lifecycle -> VALIDATING
+  [event] lifecycle -> INITIALIZING
+  [event] lifecycle -> READY
+[4-runtime] SUCCESS   compat memory/fs/thread services up
+[5-graphics] SUCCESS   game imports 5 pnrGfx* calls; the shim renders OFFSCREEN (headless) in the game process; gpu=llvmpipe (LLVM 15.0.7, 256 bits) (software Vulkan); no swapchain, no display
+[6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
+--- game output begin ---
+  [event] lifecycle -> RUNNING
+  [monitor] wall=0.176s exit=0
+--- game output end ---
+[7-start] SUCCESS   game ran natively in child process, exit code 0
+[8-monitor] SUCCESS   wall time + exit status measured; 8 presented frame file(s), 221288 bytes in the jail (/frames); per-frame times are printed by the game, the runtime has no frame-time telemetry yet
+[9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
+  [event] lifecycle -> STOPPING
+  [event] lifecycle -> TERMINATED
+[10-shutdown] SUCCESS   resources released, 0 errors recorded
+RESULT: RUN OK (real native execution)
+```
+
+Verified by tests: the PPM files the game wrote are byte-identical to a
+harness render of the same matrices, and every pixel of the rotation
+matches an independent CPU ray caster. Frame times are measured by the game
+itself; the runtime has no frame-time telemetry yet. Per-frame pipeline
+creation makes this a correctness demo, not a performance one.
 
 ### The full game journey, by id
 
@@ -275,14 +339,14 @@ ps_demo: ALL SCE CALLS DISPATCHED OK
   [event] lifecycle -> INITIALIZING
   [event] lifecycle -> READY
 [4-runtime] SUCCESS   compat memory/fs/thread services up
-[5-graphics] SKIPPED   demo app is non-graphical; Vulkan compute backend is implemented (see pnr gpu), render passes are Phase 2 work
+[5-graphics] SKIPPED   game imports no pnrGfx* calls (non-graphical); the offscreen renderer is available to games that do (see ps_cube_demo)
 [6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
 --- game output begin ---
   [event] lifecycle -> RUNNING
   [monitor] wall=0.023s exit=0
 --- game output end ---
 [7-start] SUCCESS   game ran natively in child process, exit code 0
-[8-monitor] SUCCESS   wall time + exit status measured (frame-time telemetry needs the graphics phase)
+[8-monitor] SUCCESS   wall time + exit status measured (non-graphical game: no frame-time telemetry)
 [9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
   [event] lifecycle -> STOPPING
   [event] lifecycle -> TERMINATED
