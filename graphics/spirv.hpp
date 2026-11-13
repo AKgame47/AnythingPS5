@@ -53,11 +53,13 @@ inline constexpr uint32_t DecorBinding = 33;
 // guest registers. Load.a is a word index; Store.a is a value node and
 // Store.b is a word index. Indices must be less than buffer_words. The emitter
 // returns empty for malformed IR instead of emitting invalid SPIR-V.
-enum class U32Op { Constant, Load, Add, Sub, And, Or, Xor, Store, GuardedLoad, GuardedStore, InvocationIndex, SelectEqual, UniformInput, FAdd, FSub, FMul, CarryAdd, BorrowSub, GuardedLoad64, GuardedStore64, LoopAdd };
+enum class U32Op { Constant, Load, Add, Sub, And, Or, Xor, Store, GuardedLoad, GuardedStore, InvocationIndex, SelectEqual, UniformInput, FAdd, FSub, FMul, CarryAdd, BorrowSub, GuardedLoad64, GuardedStore64, LoopAdd, LoopAddUniform };
 // GuardedLoad.a is a runtime guest low-address node. GuardedStore.a is
 // data and .b is the address node. Invalid loads return 0; stores skip.
 // SelectEqual: a==b ? c : d; emits structured branch + uint Phi.
 // LoopAdd: a=initial, b=invariant delta, c=literal count 1..64; structured loop.
+// LoopAddUniform.c is matching UniformInput node; requires loop_count_uniform
+// parameter 0..15 and its entry guard. Sentinel 16 means no runtime-count guard.
 struct U32Node { U32Op op; uint32_t a = 0, b = 0, c = 0, d = 0; };
 class SpirvModule {
 public:
@@ -71,7 +73,8 @@ public:
                                            uint32_t guest_base_low = 0,
                                            uint32_t local_size_x = 1,
                                            uint32_t uniform_words = 0,
-                                           uint32_t guest_base_high = 0);
+                                           uint32_t guest_base_high = 0,
+                                           uint32_t loop_count_uniform = 16);
 };
 
 // Pack a NUL-terminated string into SPIR-V words (little-endian, padded).
