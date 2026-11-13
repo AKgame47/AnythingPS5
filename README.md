@@ -40,7 +40,7 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2030/2030 unit tests, 17/17 CTest suites** on a fresh Linux
+Test state: **2055/2055 unit tests, 17/17 CTest suites** on a fresh Linux
 Release `-Werror` build (details in the capability section below).
 
 ## Rendered output
@@ -200,11 +200,11 @@ compiles but cannot run ELF games.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2030/2030 unit tests pass, 17/17 CTest suites pass** (unit, end-to-end native
+**2055/2055 unit tests pass, 17/17 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
-and on a build against the official Vulkan headers. ASan+UBSan: 2030/2030
+and on a build against the official Vulkan headers. ASan+UBSan: 2055/2055
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -1106,7 +1106,7 @@ Planned (per the master prompt's structure): `graphics/`, `performance/`,
 ### Unofficial store, core (slice A1)
 
 Full details: [docs/store.md](docs/store.md). **Status: Implemented, Tested
-with local fakes and a local Range server (never a real source). Slice A2 adds `store get`, `store queue list|run|pause|resume|cancel` and `store install` (pnr-package only, sha256+size enforced, no signatures, no scanning, no sandbox). No update yet.** The store starts
+with local fakes and a local Range server (never a real source). Slice A2 adds `store get`, `store queue list|run|pause|resume|cancel` and `store install` (pnr-package only, sha256+size enforced, no signatures, no scanning, no sandbox). No update yet. Slice B1 adds optional per-source Ed25519 key pinning (`store source pin`).** The store starts
 with **no sources**; you add your own (https index URL plus a rights
 statement). PNR cannot verify rights statements and you are responsible for
 the sources you add. Real captured session (the host does not resolve here,
@@ -1136,7 +1136,8 @@ STORE REFRESH
 | PSN live transport (`psn sync`: token exchange, paged library fetch, refresh, error mapping) | Implemented, Tested against a fake and a local server; **Untested against real Sony** |
 | Store core: sources, index validation, search | Implemented, Tested on fakes |
 | Store downloads: Range/If-Range resume, queue, sha256+size check, pnr-package install | Implemented, Tested on fakes and a local server |
-| Store signatures, scanning, sandbox | Planned (next: security, research engine, Needle 2 front end) |
+| Store Ed25519 per-source key pinning, signature required at install | Implemented, Tested (RFC 8032 vectors, fakes); not re-checked at run time |
+| Store scanning, sandbox | Planned (B2 sandbox, B3 scan pipeline, then research engine, Needle 2 front end) |
 | Downloading purchased games | Blocked: no authorized mechanism found; PNR will not bypass DRM or licensing |
 | Desktop launcher UI | Planned |
 | Security manager with a real isolation boundary (seccomp, namespaces) | Planned (required before any untrusted code) |
