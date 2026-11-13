@@ -305,8 +305,8 @@ touches nothing in the library.
   `PNR_JAIL_ROOT=<game data dir>/jail` in the environment; the shim resolves
   its jail root from that variable (default `/tmp/pnr_psabi_default_jail`).
 - Shim file calls dispatch through `compat::FileSystemService` + `PsFileTable`,
-  so the guest's sce file calls land inside its jail exactly like an emulated
-  file table. The guest's own direct host calls are NOT contained - see the
+  so the guest's sce file calls land inside its jail exactly like any other
+  virtual file table. (No emulation is involved; the guest runs natively.) The guest's own direct host calls are NOT contained - see the
   FileSystemService contract.
 - The CLI installs the same jail's file table into its classification registry
   before resolving imports, so the printed classification matches the real
