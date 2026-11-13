@@ -39,7 +39,7 @@ struct ComputeTranslation {
 // binary32, emits NoContraction, bitcasts result back. Host Vulkan default
 // FP policy only: no PS5 rounding/denorm/NaN payload/signaling guarantee.
 // Inline float selectors/SDWA/DPP/VOP3 modifiers remain unsupported.
-// Single-invocation conditional subset: readfirstlane to SGPR, s_mov_b32,
+// Conditional subset: readfirstlane to SGPR (single invocation only), s_mov_b32,
 // s_cmp_eq_u32, one forward s_cbranch_scc0 over v_mov-only body. Registers
 // assigned in body must also be defined on skipped path. Branch/Phi merge;
 // no loops, nesting, branch memory effects or general control flow.
