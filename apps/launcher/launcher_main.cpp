@@ -13,7 +13,12 @@ static void usage() {
             "usage:\n"
             "  pnr-launcher list [--json]\n"
             "  pnr-launcher show <game-id> [--json]\n"
-            "  pnr-launcher launch <game-id> [--json] [-- args...]");
+            "  pnr-launcher launch <game-id> [--json] [-- args...]\n"
+            "  pnr-launcher compat states\n"
+            "  pnr-launcher compat show <game-id> [--json]\n"
+            "  pnr-launcher compat set <game-id> <state> [--note TEXT]\n"
+            "  pnr-launcher history <game-id> [--limit N] [--json]\n"
+            "  pnr-launcher scan <dir> [--json]   (read-only; imports and runs nothing)");
 }
 
 int main(int argc, char** argv) {
@@ -21,11 +26,14 @@ int main(int argc, char** argv) {
   if (a.empty()) { usage(); return 64; }
   bool json = false;
   std::vector<std::string> pos, gameargs;
-  bool after = false;
+  bool after = false, have_note = false;
+  std::string note, limit_s = "20";
   for (size_t i = 1; i < a.size(); ++i) {
     if (after) gameargs.push_back(a[i]);
     else if (a[i] == "--") after = true;
     else if (a[i] == "--json") json = true;
+    else if (a[i] == "--note" && i + 1 < a.size()) note = a[++i], have_note = true;
+    else if (a[i] == "--limit" && i + 1 < a.size()) limit_s = a[++i];
     else pos.push_back(a[i]);
   }
   const char* dbp = std::getenv("PNR_LIBRARY_DB");
@@ -48,6 +56,42 @@ int main(int argc, char** argv) {
     else if (!o.error.empty()) std::printf("LAUNCH %s: %s\n", o.attempted ? "RAN, NOT CLEAN" : "NOT STARTED", o.error.c_str());
     else std::printf("LAUNCH OK: exit 0 in %.3fs%s\n", o.wall_seconds, o.compat_advanced ? " (compatibility Untested -> Launches Only)" : "");
     rc = o.error.empty() ? 0 : (o.found ? 1 : 2);
+  } else if (a[0] == "compat" && pos.size() == 1 && pos[0] == "states") {
+    for (const auto& s : compat_states()) std::printf("%s\n", s.c_str());
+    rc = 0;
+  } else if (a[0] == "compat" && pos.size() == 2 && pos[0] == "show") {
+    GameEntry e;
+    if (!core.get(pos[1], &e)) { std::fprintf(stderr, "launcher: no game with id '%s'\n", pos[1].c_str()); rc = 2; }
+    else if (json) {
+      std::printf("{\"game_id\":\"%s\",\"state\":\"%s\",\"human_set\":%s,\"notes\":\"%s\"}\n", json_escape(e.game_id).c_str(),
+                  json_escape(e.compatibility).c_str(), e.compat_human_set ? "true" : "false", json_escape(e.compatibility_notes).c_str());
+      rc = 0;
+    } else {
+      std::printf("%s: %s%s\n", e.game_id.c_str(), e.compatibility.c_str(), e.compat_human_set ? "  (set by a person)" : "  (automatic)");
+      if (!e.compatibility_notes.empty()) std::printf("  notes: %s\n", e.compatibility_notes.c_str());
+      rc = 0;
+    }
+  } else if (a[0] == "compat" && pos.size() == 3 && pos[0] == "set") {
+    auto s = core.set_compat(pos[1], pos[2], have_note ? note : "set by a person");
+    if (!s) {
+      std::fprintf(stderr, "launcher: compat set refused: %s\n", s.error.message.c_str());
+      rc = s.error.message.rfind("no such game", 0) == 0 ? 2 : 64;
+    } else {
+      std::printf("COMPAT SET: %s -> %s (set by a person)\n", pos[1].c_str(), pos[2].c_str());
+      rc = 0;
+    }
+  } else if (a[0] == "history" && pos.size() == 1) {
+    char* end = nullptr;
+    long lim = std::strtol(limit_s.c_str(), &end, 10);
+    GameEntry e; std::vector<pnr::library::LaunchRow> rows;
+    if (limit_s.empty() || *end != 0 || lim < 1 || lim > 1000) { std::fprintf(stderr, "launcher: --limit must be 1..1000\n"); rc = 64; }
+    else if (!core.get(pos[0], &e) || !core.history(pos[0], static_cast<int>(lim), &rows)) { std::fprintf(stderr, "launcher: no game with id '%s'\n", pos[0].c_str()); rc = 2; }
+    else { std::fputs((json ? render_history_json(e, rows) + "\n" : render_history_text(e, rows)).c_str(), stdout); rc = 0; }
+  } else if (a[0] == "scan" && pos.size() == 1) {
+    ScanReport rep;
+    auto s = core.scan(pos[0], &rep);
+    if (!s) { std::fprintf(stderr, "launcher: scan failed: %s\n", s.error.message.c_str()); rc = 2; }
+    else { std::fputs((json ? render_scan_json(rep) + "\n" : render_scan_text(rep)).c_str(), stdout); rc = 0; }
   } else usage();
   core.close();
   return rc;
