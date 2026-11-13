@@ -171,6 +171,14 @@ MISMATCH. Non-packages fail at archive validation.
 
 ## IF-LIB-01 Game Database (v1) — Implemented, Tested
 
+Installations carry the entry point (`executable`) so `pnr run <id>`
+resolves a game without a path; older databases gain the column by an
+automatic migration. Launches of library games are recorded
+(exit code + wall seconds). A clean exit advances compatibility
+`Untested -> Launches Only`; that state asserts only that the game
+started and finished, never playability. Ad-hoc `pnr run <path>`
+touches nothing in the library.
+
 `pnr::library::GameDb` over SQLite (WAL):
 
 - Tables: `games(game_id,title,version,platform)`,
