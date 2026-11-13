@@ -57,11 +57,11 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**1500/1500 unit tests pass, 13/13 CTest suites pass** (unit, end-to-end native
+**1582/1582 unit tests pass, 14/14 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
-game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journey, compact
+game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
-and on a build against the official Vulkan headers. ASan+UBSan: 1500/1500
+and on a build against the official Vulkan headers. ASan+UBSan: 1582/1582
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -703,6 +703,64 @@ $ pnr-launcher compat set ps-demo "Fully Awesome"
 launcher: compat set refused: unknown compatibility state: Fully Awesome
 ```
 
+### Install and remove (third launcher slice)
+
+Status: **Implemented, Tested**, headless, single-user local file management.
+
+- `import <file.pnrgame>` runs the normal importer (every check and checksum)
+  into the launcher's own library directory (the folder holding
+  `PNR_LIBRARY_DB`), not a fixed path. It says whether it was a new install, a
+  reinstall of the same version (files overwritten in place) or a different
+  version. An older version's install tree is left on disk and reported, never
+  deleted. A person-set compatibility state is kept.
+- `remove <id> [--keep-saves] [--yes]` deletes the install tree, the game's
+  jail folder (where its saves live) and its library rows (game, installation,
+  compatibility, launch history). Without `--yes` it only prints what it
+  would delete (exit 3). `--keep-saves` keeps the jail folder. It never
+  touches the source `.pnrgame`.
+- Safety: ids are limited to `[A-Za-z0-9._-]`, never `.` or `..`. The install
+  path from the database must resolve to a direct child of `<library>/games`
+  and the jail path to a direct child of `<library>/jail`. Symlinks, `..`
+  tricks, the library root, its parent and the games folder itself are all
+  refused, and then nothing is deleted. This is checked in tests with hostile
+  database rows and symlinks.
+- `verify <id>` re-checks the installed files: the install folder exists and
+  the entry point is a valid x86-64 ELF inside it. It cannot re-check payload
+  checksums (the manifest is not kept after import). It only ever marks
+  integrity `failed` (which makes the game not runnable). It never restores
+  `verified` and never changes a compatibility state.
+- Limits: removal is only as safe as the paths it checks. This is not a
+  security sandbox and not tamper-proof. No GUI.
+
+Captured session (paths shortened: the library folder is shown as `.`):
+
+```
+$ pnr-launcher import ./demo.pnrgame
+IMPORT OK: ps-demo v1.0.0 (PNR PS Demo)
+  installed at ./lib/games/ps-demo-1.0.0
+  new install
+  compatibility is unchanged by import (new games start Untested; a person-set state is kept)
+$ pnr-launcher verify ps-demo
+VERIFY OK: ps-demo: install directory present, entry point is a valid x86-64 ELF
+  payload checksums are not re-checked (the manifest is not kept after import)
+$ pnr-launcher launch ps-demo
+LAUNCH OK: exit 0 in 0.023s (compatibility Untested -> Launches Only)
+$ pnr-launcher remove ps-demo
+WOULD REMOVE (add --yes to do it) ps-demo
+  install tree:  ./lib/games/ps-demo-1.0.0
+  saves/jail:    ./lib/jail/ps-demo
+  library rows:  game, installation, compatibility and launch history
+$ pnr-launcher remove ps-demo --keep-saves --yes
+REMOVED ps-demo
+  install tree:  ./lib/games/ps-demo-1.0.0
+  saves/jail:    ./lib/jail/ps-demo  (kept: --keep-saves)
+  library rows:  game, installation, compatibility and launch history
+$ pnr-launcher list
+library is empty (import a .pnrgame first)
+$ pnr-launcher remove .. --yes
+REMOVE NOT DONE: not a valid game id
+```
+
 ## Windows build
 
 Cross-compile from Linux with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)
@@ -741,7 +799,7 @@ platform/    MODULE 07 - host OS abstraction, Linux + Windows backends (Windows 
 ape/         MODULE 05 - adaptive performance engine (classification, frame stats, controller)
 laptop/      MODULE 06 - laptop optimization manager (power modes, caps)
 package/     .pnrgame format: ustar, SHA-256, importer
-launcher/    MODULE 10 core - headless launcher core (list, details, launch, history, human compatibility, read-only scan)
+launcher/    MODULE 10 core - headless launcher core (list, details, launch, history, human compatibility, read-only scan, import/remove/verify)
 library/     MODULE 09 - SQLite game/installation/compatibility/launch store
 services/    MODULE 08 - virtual filesystem, input, audio backends
 tools/       pnr_make_package - dev package builder
