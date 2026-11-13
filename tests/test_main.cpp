@@ -831,6 +831,24 @@ int main() {
 #endif
   }
 
+  // --- LIBRARY: installation records carry the executable path ---
+  {
+    const std::string dbp = "/tmp/pnr_libdb_" + std::to_string(::getpid()) +
+                            ".db";
+    pnr::library::GameDb db;
+    CHECK(db.open(dbp), "libdb: opens");
+    CHECK(db.set_installation({"g1", "/x/g1-1.0", "1.0", "verified",
+                               "bin/game"}),
+          "libdb: set_installation with executable");
+    auto inst = db.get_installation("g1");
+    CHECK(inst && inst->executable == "bin/game" && inst->path == "/x/g1-1.0",
+          "libdb: executable round-trips");
+    CHECK(db.record_launch("g1", 0, 0.42) && db.launch_count("g1") == 1,
+          "libdb: launch recorded");
+    db.close();
+    std::filesystem::remove(dbp);
+  }
+
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
