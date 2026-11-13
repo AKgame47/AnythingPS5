@@ -16,8 +16,9 @@ every blocked dependency. Nothing here claims commercial PS5 compatibility.
 | Filesystem jail rejects `..` traversal | unit tests `fs: *` |
 | Full 10-step launch workflow reports per-step SUCCESS/FAILED/BLOCKED/SKIPPED | CLI run log in Phase 1 report |
 
-Test status at Phase 0 exit: 49/49 unit tests pass; 2/2 CTest suites pass
-(unit + end-to-end) on Linux x86-64, g++ 11.4, CMake 3.22.
+Test status (2026-11-13, second increment): 80/80 unit tests pass; 3/3
+CTest suites pass (unit, end-to-end native launch, package workflow) on
+Linux x86-64, g++ 11.4, CMake 3.22.
 
 ## 2. Feasible with public knowledge (no proprietary access needed)
 
@@ -105,9 +106,9 @@ Until unblocked, any commercial PS5 content is reported as
 | Phase | Exit criterion (executable) | Status |
 |---|---|---|
 | 0 | This doc set: what is implementable with public interfaces vs blocked | Done |
-| 1 | `ctest` green: unit + end-to-end native run of `pnr_test_app` via CLI | Done (49/49, 2/2) |
+| 1 | `ctest` green: unit + end-to-end native run of `pnr_test_app` via CLI | Done (80/80, 3/3) |
 | 2 | Render + animate a 3D scene via Vulkan on Windows and Linux, validation layers clean | Blocked in sandbox (no GPU) |
-| 3 | Demo game runs using only compat APIs (no direct host calls) for audio/input/storage/timing | Partially demonstrated (memory/fs/timing/threads) |
+| 3 | Demo game runs using only compat APIs (no direct host calls) for audio/input/storage/timing | Partially demonstrated (memory/fs/timing/threads; imported .pnrgame game installs + runs) |
 | 4 | Measured frame-time improvement from dynamic resolution on ≥1 real GPU, baseline vs adapted, same scene | Planned |
 | 5 | Correct power-profile + hybrid-GPU behavior on a real laptop | Planned (needs hardware) |
 | 6 | Nontechnical tester installs, launches demo, changes settings, exits — no dev tools | Planned |
