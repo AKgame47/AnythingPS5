@@ -1,11 +1,11 @@
-# PSN account connector (unofficial, offline slice 1)
+# PSN account connector (unofficial)
 
-Status: **Implemented + Tested against synthetic fixtures only. Live Sony calls: not implemented, Untested.**
+Status: **Implemented. Tested against synthetic fixtures, a scripted fake server and a local test server. `psn sync` against real Sony: Untested until you run it with your own token.**
 
-This slice contains **no network code**. Nothing in PNR contacts Sony today.
-It stores a token you paste locally and turns a saved "purchased games"
-response into owned-on-PSN rows in the PNR library. A later slice may add
-the live transport (see "What is next").
+Only `pnr-launcher psn sync` talks to the network. Everything else is local.
+It stores a token you paste locally, and turns either a saved "purchased
+games" response (`import-json`) or a live fetch (`sync`) into owned-on-PSN
+rows in the PNR library.
 
 ## Three different things (never mixed up in PNR)
 
@@ -30,7 +30,7 @@ manual and changes nothing about whether the game runs.
 - The token is accepted from stdin or a file (`psn set-token`), never from a command-line argument, so it does not land in shell history or process listings.
 - The token is never printed, logged, put in an error message or written to the library database. Text that comes from Sony (error messages) is scrubbed of any long token-like string before display. Tests check all of this.
 - The repo `.gitignore` excludes `**/psn/npsso.token`, `npsso*`, `*.npsso` and `*.token`.
-- When the live transport exists, the token may be sent **only to Sony's official endpoints**, never to any PNR or third-party server. PNR has no servers.
+- `psn sync` sends the token **only to Sony's official hosts** (see "Live sync"), never to any PNR or third-party server. PNR has no servers.
 - An NPSSO token is a session credential for your whole PSN account. Treat it like a password. PNR cannot revoke it at Sony; if you think it leaked, change your PSN password and review your account security settings.
 - Windows: the token file is written, but the owner-only permission check and hardening are **not implemented** (planned: ACLs). `psn status` says so.
 
@@ -53,6 +53,7 @@ This is the same unofficial route used by trophy-tracker tools. It does not need
 pnr-launcher psn status [--json]
 pnr-launcher psn set-token [--file PATH]          (stdin by default)
 pnr-launcher psn import-json <file> [--complete] [--json]
+pnr-launcher psn sync [--complete] [--json]       (LIVE, contacts Sony)
 pnr-launcher psn owned [--platform PS4|PS5] [--json]
 pnr-launcher psn link <entitlement-id> <game-id>
 pnr-launcher psn unlink <entitlement-id>
@@ -92,7 +93,8 @@ that; that is unresearched and Untested.
 | `sony-errors` | a GraphQL `errors` array and no data | nothing is imported |
 | `library-write` | the local database could not be written | check disk and permissions |
 
-The HTTP mapping is implemented and unit-tested; no HTTP calls exist yet.
+Also: `transport` (could not connect, TLS verification failed, timeout, or libcurl missing) and `blocked-host` (a request to a host outside the allow-list was refused before sending).
+The HTTP mapping is implemented and tested against a fake and a local server, not against Sony.
 
 ## Direct downloads of purchased games: findings
 
@@ -114,15 +116,33 @@ What this is based on (limits stated plainly):
 |---|---|---|
 | JSON reader, parser, database, command logic | Built and tested (3 builds, ASan clean) | Portable code, **not compiled for Windows in this slice** |
 | Owner-only token file | Implemented and tested | Not implemented (planned: ACLs) |
-| Live transport (slice 2) | Planned | Planned |
+| Live sync (libcurl via dlopen) | Built and tested (needs libcurl.so.4 installed) | **Not built or tested.** The loader uses `dlopen`; a Windows loader for libcurl.dll is not written |
 
-## What is next (needs approval)
+## Live sync (slice 2)
 
-Slice 2: a live transport (libcurl loaded at runtime) for the NPSSO to
-token exchange, library fetch, token refresh and 401 handling, written from
-the MIT sources. It would be unverified against Sony until you run it with
-your own token, and it would talk only to Sony's official endpoints.
+`pnr-launcher psn sync [--complete]` does this, following the MIT psn-api sources:
+
+1. `GET https://ca.account.sony.com/api/authz/v3/oauth/authorize?...` with your NPSSO as a `Cookie` header, redirects **not followed**. The authorization code is read from the `Location` header. No code means Sony did not accept the token (`token-rejected`).
+2. `POST .../oauth/token` to exchange the code for an access token and refresh token.
+3. `GET https://web.np.playstation.com/api/graphql/v1/op` with the persisted query `getPurchasedGameList`, 50 per page, until a short page. A page cap of 200 applies.
+4. On a 401/403 it refreshes once with the refresh token and retries once; a second rejection stops with `token-rejected`.
+
+Safety rules, each with a test:
+
+- Exactly two hosts are allowed: `ca.account.sony.com` and `web.np.playstation.com`. https only, port 443 only, exact host match (no user-info tricks, no sub-domains, no trailing dot). Anything else is refused before it is sent and counted.
+- TLS verification (certificate and host name) is always on. A test proves a self-signed server is refused. There is no option to turn it off.
+- Redirects are never followed, so a redirect cannot carry a token to another host.
+- Access and refresh tokens live in memory for the one run and are wiped after. The NPSSO is only ever sent as the cookie on step 1. Nothing logs request or response headers or bodies.
+- A failed or partial fetch changes nothing in the library.
+- Default is **merge**. `--complete` marks rows Sony did not return, but the request asks for active licences only, so inactive ones can be mislabelled; it is ignored if paging hit its cap.
+
+Things to know:
+
+- The sign-in uses the public client ID and secret of Sony's own PlayStation mobile app, as published in the MIT psn-api project. They are not secret and not PNR's; they identify the official app to Sony. This is the same unofficial route trophy tools use and may be against Sony's terms. Your call.
+- libcurl is loaded at run time (`libcurl.so.4`, then `libcurl-gnutls.so.4`). If it is missing, `psn sync` says so and nothing else is affected. There is no build-time curl dependency.
+- libcurl option numbers are declared by hand (no headers were available when this was written). The tests exercise them against a local server: URL, POST body, headers, status, Location capture, no redirect following, TLS failure and the size cap. One real finding: libcurl older than 7.85 ignores the newer protocol-restriction option, so PNR also sets the legacy option and refuses non-https URLs itself.
+- **Not verified:** the whole exchange against real Sony. Sony can change any of it. If the response shape changes you get `schema-change` and no import.
 
 ## Credits
 
-Response shape and sign-in flow from [psn-api](https://github.com/achievements-app/psn-api) (MIT) and [psn-mcp](https://github.com/tmrp/psn-mcp) (MIT). Nothing was copied; PNR's code is original. GPL-2.0.
+Response shape, sign-in flow, public client ID and persisted-query hash from [psn-api](https://github.com/achievements-app/psn-api) (MIT) and [psn-mcp](https://github.com/tmrp/psn-mcp) (MIT). The values are used as data; the code is PNR's own. GPL-2.0.
