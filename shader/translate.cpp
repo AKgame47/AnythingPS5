@@ -6,10 +6,11 @@
 #include <optional>
 namespace pnr::shader {
 ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
-                                           uint64_t base, uint32_t buffer_words, uint32_t local_size_x) {
+                                           uint64_t base, uint32_t buffer_words, uint32_t local_size_x, uint32_t uniform_words) {
   auto fail = [](const std::string& msg) {
     ComputeTranslation r; r.error = msg; return r;
   };
+  if(uniform_words>16) return fail("uniform count limited to 16 SGPR inputs");
   if (!local_size_x || local_size_x > 64) return fail("local size must be 1..64");
   if (!buffer_words || buffer_words > 65536) return fail("buffer word count must be 1..65536");
   const uint64_t size = uint64_t(buffer_words) * 4;
@@ -32,6 +33,10 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   if (local_size_x > 1) {
     nodes.push_back({U32Op::InvocationIndex});
     regs[0]=Reg{0, {}, 0, 1};
+  }
+  for(uint32_t j=0;j<uniform_words;++j) {
+    nodes.push_back({U32Op::UniformInput,j});
+    sregs[j]=Reg{uint32_t(nodes.size()-1),{}};
   }
   struct Range { uint64_t first, last; };
   std::vector<Range> reads;
@@ -198,19 +203,20 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
     if(read.first<=writes->last && writes->first<=read.last)
       return fail("multi-invocation load/output ranges overlap; barriers not supported");
   ComputeTranslation r;
+  r.required_uniform_words=uniform_words;
   r.conditional_selection = conditional;
   r.local_size_x = local_size_x;
   r.guarded_memory = guarded;
   r.required_buffer_words = buffer_words;
   r.stored_value_known = value.has_value();
   r.stored_value = value.value_or(0); // meaningful only when known=true
-  r.spirv = graphics::SpirvModule::compute_u32(nodes, buffer_words, uint32_t(base), local_size_x);
+  r.spirv = graphics::SpirvModule::compute_u32(nodes, buffer_words, uint32_t(base), local_size_x, uniform_words);
   if (r.spirv.empty()) return fail("invalid internal uint IR");
   r.ok = true;
   return r;
 }
 ComputeTranslation translate_compute_bytes(const std::vector<uint8_t>& code,
-                                           uint64_t base, uint32_t buffer_words, uint32_t local_size_x) {
+                                           uint64_t base, uint32_t buffer_words, uint32_t local_size_x, uint32_t uniform_words) {
   if (code.size() % 4) {
     ComputeTranslation r; r.error = "RDNA byte length is not a multiple of four"; return r;
   }
@@ -219,17 +225,20 @@ ComputeTranslation translate_compute_bytes(const std::vector<uint8_t>& code,
   for (size_t i = 0; i < code.size(); i += 4)
     words.push_back(uint32_t(code[i]) | (uint32_t(code[i+1]) << 8u) |
                     (uint32_t(code[i+2]) << 16u) | (uint32_t(code[i+3]) << 24u));
-  return translate_compute_words(words, base, buffer_words, local_size_x);
+  return translate_compute_words(words, base, buffer_words, local_size_x, uniform_words);
 }
 Status run_translated_compute(graphics::VulkanBackend& backend,
                               const ComputeTranslation& translation,
-                              std::vector<uint32_t>* io) {
+                              std::vector<uint32_t>* io,
+                              const std::vector<uint32_t>& uniforms) {
   if (!translation.ok || translation.spirv.empty() ||
       !translation.local_size_x || translation.local_size_x>64 ||
       !translation.required_buffer_words || translation.required_buffer_words > 65536)
     return Status::Fail(101, "shader", "invalid translation for dispatch");
+  if(translation.required_uniform_words>16 || uniforms.size()!=translation.required_uniform_words)
+    return Status::Fail(103,"shader","uniform input count does not match translation");
   if (!io || io->size() < translation.required_buffer_words)
     return Status::Fail(102, "shader", "host buffer shorter than translated SSBO range");
-  return backend.run_compute_words(translation.spirv, io);
+  return backend.run_compute_words(translation.spirv, io, uniforms);
 }
 } // namespace pnr::shader
