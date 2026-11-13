@@ -53,7 +53,7 @@ inline constexpr uint32_t DecorBinding = 33;
 // guest registers. Load.a is a word index; Store.a is a value node and
 // Store.b is a word index. Indices must be less than buffer_words. The emitter
 // returns empty for malformed IR instead of emitting invalid SPIR-V.
-enum class U32Op { Constant, Load, Add, Sub, And, Or, Xor, Store, GuardedLoad, GuardedStore, InvocationIndex, SelectEqual };
+enum class U32Op { Constant, Load, Add, Sub, And, Or, Xor, Store, GuardedLoad, GuardedStore, InvocationIndex, SelectEqual, UniformInput };
 // GuardedLoad.a is a runtime guest low-address node. GuardedStore.a is
 // data and .b is the address node. Invalid loads return 0; stores skip.
 // SelectEqual: a==b ? c : d; emits structured branch + uint Phi.
@@ -68,7 +68,8 @@ public:
   static std::vector<uint32_t> compute_u32(const std::vector<U32Node>& nodes,
                                            uint32_t buffer_words = 1,
                                            uint32_t guest_base_low = 0,
-                                           uint32_t local_size_x = 1);
+                                           uint32_t local_size_x = 1,
+                                           uint32_t uniform_words = 0);
 };
 
 // Pack a NUL-terminated string into SPIR-V words (little-endian, padded).
