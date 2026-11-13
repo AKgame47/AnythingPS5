@@ -65,6 +65,7 @@ enum : VkStructureType {
   VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO = 22,
   VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO = 23,
   VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO = 24,
+  VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO = 25,
   VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO = 26,
   VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO = 28,
   VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO = 37,
@@ -83,6 +84,10 @@ enum : VkStructureType {
 };
 enum : VkFlags {
   VK_QUEUE_GRAPHICS_BIT = 0x1,
+  VK_BUFFER_USAGE_INDEX_BUFFER_BIT = 0x40,
+  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT = 0x20,
+  VK_IMAGE_ASPECT_DEPTH_BIT = 0x2,
+  VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT = 0x200,
   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT = 0x80,
   VK_QUEUE_COMPUTE_BIT = 0x2,
   VK_IMAGE_USAGE_TRANSFER_SRC_BIT = 0x1,
@@ -112,6 +117,10 @@ enum : int32_t {
   VK_COMMAND_BUFFER_LEVEL_PRIMARY = 0,
   VK_SHARING_MODE_EXCLUSIVE = 0,
   VK_PIPELINE_BIND_POINT_GRAPHICS = 0,
+  VK_FORMAT_D32_SFLOAT = 126,
+  VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL = 3,
+  VK_COMPARE_OP_LESS = 1,
+  VK_INDEX_TYPE_UINT32 = 1,
   VK_FORMAT_R32G32_SFLOAT = 103,
   VK_FORMAT_R32G32B32_SFLOAT = 106,
   VK_VERTEX_INPUT_RATE_VERTEX = 0,
@@ -259,6 +268,16 @@ typedef struct VkSubmitInfo {
 } VkSubmitInfo;
 typedef struct VkVertexInputBindingDescription { uint32_t binding, stride; int32_t inputRate; } VkVertexInputBindingDescription;
 typedef struct VkVertexInputAttributeDescription { uint32_t location, binding; int32_t format; uint32_t offset; } VkVertexInputAttributeDescription;
+typedef struct VkFormatProperties { VkFlags linearTilingFeatures, optimalTilingFeatures, bufferFeatures; } VkFormatProperties;
+typedef struct VkStencilOpState {
+  int32_t failOp, passOp, depthFailOp, compareOp; uint32_t compareMask, writeMask, reference;
+} VkStencilOpState;
+typedef struct VkPipelineDepthStencilStateCreateInfo {
+  VkStructureType sType; const void* pNext; VkFlags flags; VkBool32 depthTestEnable;
+  VkBool32 depthWriteEnable; int32_t depthCompareOp; VkBool32 depthBoundsTestEnable;
+  VkBool32 stencilTestEnable; VkStencilOpState front, back;
+  float minDepthBounds, maxDepthBounds;
+} VkPipelineDepthStencilStateCreateInfo;
 typedef struct VkOffset2D { int32_t x, y; } VkOffset2D;
 typedef struct VkOffset3D { int32_t x, y, z; } VkOffset3D;
 typedef struct VkExtent2D { uint32_t width, height; } VkExtent2D;
