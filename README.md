@@ -31,7 +31,8 @@ engine for ordinary PCs and laptops, including low-end hardware.
 
 | CLI driving the full 10-step launch workflow with honest per-step results | Implemented, Tested |
 | Developer-controlled demo app running only on compat services | Implemented, Tested |
-| Vulkan graphics backend | Blocked in the dev sandbox (no GPU); Planned (Phase 2) |
+| Vulkan compute backend: dlopen-loaded (no SDK needed), instance/device/SSBO/pipeline/dispatch/readback; absence of a driver is reported, never faked | Implemented (compute), Tested on software Vulkan (Mesa lavapipe) in the sandbox; hardware GPU untested |
+| SPIR-V emission: compute write-back module shape, word-level emitter | Implemented (subset), Tested (spirv-val + real dispatch); full shader stages Planned |
 | Adaptive Performance Engine (deterministic rules, hardware class heuristic, closed-loop controller) | Implemented, Tested |
 | Laptop Optimization Manager (battery/balanced/max-performance caps) | Implemented, Tested |
 | Game services: virtual filesystem (jailed areas, per-game/user save isolation) | Implemented, Tested |
@@ -42,7 +43,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**198/198 unit tests pass, 4/4 CTest suites pass** (unit, end-to-end native
+**207/207 unit tests pass, 4/4 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
 game). No benchmarks exist yet; none are claimed.
 
@@ -77,6 +78,7 @@ dev sandbox has no GPU or audio device, and that is exactly what the
 output says - nothing is faked):
 
 ```text
+=== $ pnr assess ===
 PNR hardware assessment (heuristic, honest bounds):
 hardware.class=A (budget / ultra low-end) (CPU/RAM only; GPU unknown in this build)
 power.default_mode=balanced (battery state unknown: balanced)
@@ -88,9 +90,13 @@ PNR hardware snapshot (host truth, no estimates):
 host.platform=linux
 cpu.logical_cores=2
 mem.total_mb=1982
-mem.available_mb=1700
+mem.available_mb=1706
 power.on_battery=unknown (no power_supply node on this host)
-gpu.vulkan=UNAVAILABLE in this sandbox (no GPU/Vulkan driver); capability-based detection lands with Phase 2
+gpu[0].name=llvmpipe (LLVM 15.0.7, 256 bits) vendor=0x10005 api=1.3.255 type=software (CPU Vulkan)
+
+=== $ pnr gpu ===
+PNR GPU snapshot (real Vulkan enumeration):
+gpu[0].name=llvmpipe (LLVM 15.0.7, 256 bits) vendor=0x10005 api=1.3.255 type=software (CPU Vulkan)
 
 === $ pnr input ===
 input.backend=evdev
@@ -115,23 +121,27 @@ IMPORT OK: PNR Test App 1.0.0 (x86-64)
 PNR Test App  v1.0.0  [Untested]
     ./pnr_data/games/pnr-test-app-1.0.0
 
-=== $ pnr run pnr_test_app ===
+=== $ pnr run pnr-test-app ===
 pnr_test_app: native x86-64 demo starting
 pnr_test_app: args=0
 pnr_test_app: memory ok (4096 bytes outstanding)
 pnr_test_app: thread result=100000
-pnr_test_app: sleep(5ms) measured 5.066ms
+pnr_test_app: sleep(5ms) measured 5.067ms
 pnr_test_app: save-data write+readback ok
 pnr_test_app: memory released (0 outstanding)
 pnr_test_app: ALL OK - exiting 0
-[1-validate] SUCCESS   ./build-rel/pnr_test_app is a valid x86-64 ELF (13 segments)
-[2-analysis] SUCCESS   logical cores=2; Vulkan=unavailable in sandbox (recorded, not guessed)
+[1-validate] SUCCESS   ./pnr_data/games/pnr-test-app-1.0.0/bin/game is a valid x86-64 ELF (13 segments)
+[1-imports] SUCCESS   70 imports: 67 host-resolved, 3 prx-implemented, 0 prx-declared-only, 0 unknown
+  [import] strlen                           prx-implemented
+  [import] memcpy                           prx-implemented
+  [import] free                             prx-implemented
+[2-analysis] SUCCESS   logical cores=2; gpu=llvmpipe (LLVM 15.0.7, 256 bits) (software Vulkan)
 [3-config] SUCCESS   default profile 'balanced' (no game profile found; defaults used openly)
   [event] lifecycle -> VALIDATING
   [event] lifecycle -> INITIALIZING
   [event] lifecycle -> READY
 [4-runtime] SUCCESS   compat memory/fs/thread services up
-[5-graphics] BLOCKED   no Vulkan device in this environment; demo app is non-graphical. Blocked is reported, not papered over.
+[5-graphics] SKIPPED   demo app is non-graphical; Vulkan compute backend is implemented (see pnr gpu), render passes are Phase 2 work
 [6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
 --- game output begin ---
   [event] lifecycle -> RUNNING
@@ -144,6 +154,7 @@ pnr_test_app: ALL OK - exiting 0
   [event] lifecycle -> TERMINATED
 [10-shutdown] SUCCESS   resources released, 0 errors recorded
 RESULT: RUN OK (real native execution)
+[library] launch recorded; compatibility=Launches Only (exit 0, gameplay unverified)
 ```
 
 Note: this sandbox has the SQLite runtime but no dev headers, so the repo
@@ -157,14 +168,14 @@ reported, never hidden.
 ### `pnr run ./ps_demo` - the PS-style showcase
 
 `ps_demo` imports only `sceKernel*` (plus plain libc) symbols. The CLI
-preloads the PS-ABI shim (`LD_PRELOAD`), sets `PNR_JAIL_ROOT`, classifies
+points the dynamic loader at the PS-ABI shim (`LD_LIBRARY_PATH`), sets `PNR_JAIL_ROOT`, classifies
 the binary's imports, and runs it natively. Captured verbatim:
 
 ```text
 ps_demo: heap alloc/fill/free ok
 ps_demo: map/protect/unmap ok
 ps_demo: jailed file write/stat/seek/read ok
-ps_demo: usleep measured 20066us
+ps_demo: usleep measured 20071us
 ps_demo: thread ran
 ps_demo: ALL SCE CALLS DISPATCHED OK
 [1-validate] SUCCESS   ./ps_demo is a valid x86-64 ELF (13 segments)
@@ -183,13 +194,13 @@ ps_demo: ALL SCE CALLS DISPATCHED OK
   [import] sceKernelClose                   prx-implemented
   [import] sceKernelRead                    prx-implemented
   [import] sceKernelAlloc                   prx-implemented
-[2-analysis] SUCCESS   logical cores=2; Vulkan=unavailable in sandbox (recorded, not guessed)
+[2-analysis] SUCCESS   logical cores=2; gpu=llvmpipe (LLVM 15.0.7, 256 bits) (software Vulkan)
 [3-config] SUCCESS   default profile 'balanced' (no game profile found; defaults used openly)
   [event] lifecycle -> VALIDATING
   [event] lifecycle -> INITIALIZING
   [event] lifecycle -> READY
 [4-runtime] SUCCESS   compat memory/fs/thread services up
-[5-graphics] BLOCKED   no Vulkan device in this environment; demo app is non-graphical. Blocked is reported, not papered over.
+[5-graphics] SKIPPED   demo app is non-graphical; Vulkan compute backend is implemented (see pnr gpu), render passes are Phase 2 work
 [6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
 --- game output begin ---
   [event] lifecycle -> RUNNING
@@ -228,7 +239,7 @@ IMPORT OK: PNR PS Demo 0.1.0 (x86-64)
 ps_demo: heap alloc/fill/free ok
 ps_demo: map/protect/unmap ok
 ps_demo: jailed file write/stat/seek/read ok
-ps_demo: usleep measured 20066us
+ps_demo: usleep measured 20074us
 ps_demo: thread ran
 ps_demo: ALL SCE CALLS DISPATCHED OK
 [1-validate] SUCCESS   ./pnr_data/games/ps-demo-0.1.0/bin/game is a valid x86-64 ELF (13 segments)
@@ -247,13 +258,13 @@ ps_demo: ALL SCE CALLS DISPATCHED OK
   [import] sceKernelClose                   prx-implemented
   [import] sceKernelRead                    prx-implemented
   [import] sceKernelAlloc                   prx-implemented
-[2-analysis] SUCCESS   logical cores=2; Vulkan=unavailable in sandbox (recorded, not guessed)
+[2-analysis] SUCCESS   logical cores=2; gpu=llvmpipe (LLVM 15.0.7, 256 bits) (software Vulkan)
 [3-config] SUCCESS   default profile 'balanced' (no game profile found; defaults used openly)
   [event] lifecycle -> VALIDATING
   [event] lifecycle -> INITIALIZING
   [event] lifecycle -> READY
 [4-runtime] SUCCESS   compat memory/fs/thread services up
-[5-graphics] BLOCKED   no Vulkan device in this environment; demo app is non-graphical. Blocked is reported, not papered over.
+[5-graphics] SKIPPED   demo app is non-graphical; Vulkan compute backend is implemented (see pnr gpu), render passes are Phase 2 work
 [6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
 --- game output begin ---
   [event] lifecycle -> RUNNING
@@ -271,11 +282,13 @@ RESULT: RUN OK (real native execution)
 === $ pnr games ===
 PNR PS Demo  v0.1.0  [Launches Only]
     ./pnr_data/games/ps-demo-0.1.0
+PNR Test App  v1.0.0  [Launches Only]
+    ./pnr_data/games/pnr-test-app-1.0.0
 ```
 
 The run needs no path: `pnr run ps-demo` resolves the installed package
-from the library, jails the game at `./pnr_data/jail/ps-demo`, and records
-the launch. Compatibility moves `Untested -> Launches Only` on a clean
+from the library, routes the game's sce file calls into
+`./pnr_data/jail/ps-demo`, and records the launch. Compatibility moves `Untested -> Launches Only` on a clean
 exit - "it started and finished" and nothing more; playability is never
 claimed. The sce shim itself is provided by the runtime (like firmware
 modules), not shipped inside the package.
@@ -335,6 +348,21 @@ Planned (per the master prompt's structure): `graphics/`, `performance/`,
 - [Feasibility report + assumptions + PoC test plan](docs/feasibility-report.md)
 - [Risk register](docs/risk-register.md)
 - [Interface contracts](docs/interface-contracts.md)
+
+## Security honesty: what the "jail" is and is not
+
+The file jail is **virtual path routing at the application level**: every
+sce file call PNR serves is resolved inside the game's jail root, and
+`..` traversal is rejected. It is **not an OS-enforced security
+sandbox**. A binary that makes direct host syscalls instead of sce calls
+bypasses it completely - nothing stops such a binary from reading the
+host filesystem.
+
+So today `pnr run` is for **trusted, developer-built demo binaries only**.
+Running untrusted third-party code is out of scope until Module 11
+(Security Manager) lands a real boundary (seccomp / namespaces / job
+objects are the planned mechanisms; see docs/risk-register.md T8) with
+adversarial tests. Until then, no document here claims otherwise.
 
 ## Ground rules (from the master prompt)
 
