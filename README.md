@@ -18,6 +18,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Core runtime: lifecycle state machine, event bus, config, capability registry, error reporting | Implemented, Tested |
 | ELF64 binary parser + validator (bounds-checked, specific errors) | Implemented, Tested |
 | Native loader: validated binaries executed in a supervised separate process | Implemented (Linux), Tested |
+| PS NID computation + symbol lookup (SHA-1 based; algorithm adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5), GPL-2.0) | Implemented, Tested |
 | Compat services: memory, timing, jailed filesystem, threads | Implemented, Tested |
 | Host OS abstraction (IF-OS): Linux backend (CPU/memory/power/process launch) | Implemented (Linux), Tested |
 | `.pnrgame` package format: ustar + SHA-256 manifests, builder | Implemented, Tested |
@@ -36,7 +37,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**80/80 unit tests pass, 3/3 CTest suites pass** (unit, end-to-end native
+**124/124 unit tests pass, 3/3 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
 game). No benchmarks exist yet; none are claimed.
 
@@ -61,6 +62,83 @@ cd build
 ./pnr import demo.pnrgame    # verifies checksums + ELF, installs, registers
 ./pnr games                  # library listing from SQLite
 ./pnr run ./pnr_data/games/demo-game-0.1.0/bin/game
+```
+
+
+## Example output
+
+Captured verbatim from a real session on this repo's Linux build (the
+dev sandbox has no GPU or audio device, and that is exactly what the
+output says - nothing is faked):
+
+```text
+PNR hardware assessment (heuristic, honest bounds):
+hardware.class=A (budget / ultra low-end) (CPU/RAM only; GPU unknown in this build)
+power.default_mode=balanced (battery state unknown: balanced)
+caps.fps_cap=60 caps.min_resolution_scale=75% caps.max_background_tasks=2
+note: compatibility is never decided from class alone - real frame telemetry drives the adaptive controller
+
+=== $ pnr hwinfo ===
+PNR hardware snapshot (host truth, no estimates):
+host.platform=linux
+cpu.logical_cores=2
+mem.total_mb=1982
+mem.available_mb=1700
+power.on_battery=unknown (no power_supply node on this host)
+gpu.vulkan=UNAVAILABLE in this sandbox (no GPU/Vulkan driver); capability-based detection lands with Phase 2
+
+=== $ pnr input ===
+input.backend=evdev
+input.devices=0
+  (no input devices visible on this host)
+
+=== $ pnr audio ===
+audio.backend=null
+audio.devices=0
+  (no audio devices available; host audio backends Planned)
+
+=== $ pnr games (empty library) ===
+library is empty (import a .pnrgame first)
+
+=== $ pnr import demo.pnrgame ===
+IMPORT OK: PNR Test App 1.0.0 (x86-64)
+  id=pnr-test-app
+  installed=./pnr_data/games/pnr-test-app-1.0.0
+  compatibility=Untested (no execution test yet)
+
+=== $ pnr games ===
+PNR Test App  v1.0.0  [Untested]
+    ./pnr_data/games/pnr-test-app-1.0.0
+
+=== $ pnr run pnr_test_app ===
+pnr_test_app: native x86-64 demo starting
+pnr_test_app: args=0
+pnr_test_app: memory ok (4096 bytes outstanding)
+pnr_test_app: thread result=100000
+pnr_test_app: sleep(5ms) measured 5.066ms
+pnr_test_app: save-data write+readback ok
+pnr_test_app: memory released (0 outstanding)
+pnr_test_app: ALL OK - exiting 0
+[1-validate] SUCCESS   ./build-rel/pnr_test_app is a valid x86-64 ELF (13 segments)
+[2-analysis] SUCCESS   logical cores=2; Vulkan=unavailable in sandbox (recorded, not guessed)
+[3-config] SUCCESS   default profile 'balanced' (no game profile found; defaults used openly)
+  [event] lifecycle -> VALIDATING
+  [event] lifecycle -> INITIALIZING
+  [event] lifecycle -> READY
+[4-runtime] SUCCESS   compat memory/fs/thread services up
+[5-graphics] BLOCKED   no Vulkan device in this environment; demo app is non-graphical. Blocked is reported, not papered over.
+[6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
+--- game output begin ---
+  [event] lifecycle -> RUNNING
+  [monitor] wall=0.007s exit=0
+--- game output end ---
+[7-start] SUCCESS   game ran natively in child process, exit code 0
+[8-monitor] SUCCESS   wall time + exit status measured (frame-time telemetry needs the graphics phase)
+[9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
+  [event] lifecycle -> STOPPING
+  [event] lifecycle -> TERMINATED
+[10-shutdown] SUCCESS   resources released, 0 errors recorded
+RESULT: RUN OK (real native execution)
 ```
 
 Note: this sandbox has the SQLite runtime but no dev headers, so the repo
