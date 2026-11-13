@@ -11,7 +11,10 @@
 
 #include "compat/services.hpp"
 #include "core/runtime.hpp"
+#include "library/game_db.hpp"
 #include "loader/native_loader.hpp"
+#include "package/importer.hpp"
+#include "platform/os.hpp"
 
 namespace {
 
@@ -21,20 +24,68 @@ void step(const char* name, const char* result, const std::string& detail) {
 
 int cmd_hwinfo() {
   std::puts("PNR hardware snapshot (host truth, no estimates):");
-  const unsigned cores = std::thread::hardware_concurrency();
-  std::printf("cpu.logical_cores=%u\n", cores);
-  std::ifstream mi("/proc/meminfo");
-  std::string key, unit;
-  long value = 0;
-  while (mi >> key >> value >> unit) {
-    if (key == "MemTotal:" || key == "MemAvailable:")
-      std::printf("mem.%s %ld %s\n", key.c_str(), value, unit.c_str());
+  auto host = pnr::platform::make_host_platform();
+  std::printf("host.platform=%s\n", host->name().c_str());
+  std::printf("cpu.logical_cores=%u\n", host->cpu_logical_cores());
+  if (auto mem = host->memory()) {
+    std::printf("mem.total_mb=%llu\n",
+                (unsigned long long)(mem->total_bytes / 1048576));
+    std::printf("mem.available_mb=%llu\n",
+                (unsigned long long)(mem->available_bytes / 1048576));
+  } else {
+    std::puts("mem.info=unavailable on this host (reported, not guessed)");
   }
-  if (!mi && !std::ifstream("/proc/meminfo")) {
-    std::puts("mem.info=unavailable (no /proc/meminfo on this host)");
-  }
+  if (auto batt = host->on_battery())
+    std::printf("power.on_battery=%d\n", *batt ? 1 : 0);
+  else
+    std::puts("power.on_battery=unknown (no power_supply node on this host)");
   std::puts("gpu.vulkan=UNAVAILABLE in this sandbox (no GPU/Vulkan driver); "
             "capability-based detection lands with Phase 2");
+  return 0;
+}
+
+int cmd_import(const std::string& pkg_path) {
+  pnr::library::GameDb db;
+  auto st = db.open("./pnr_data/library.db");
+  if (!st) {
+    std::printf("IMPORT FAILED: %s\n", st.error.message.c_str());
+    return 2;
+  }
+  auto r = pnr::pkg::import_package(pkg_path, "./pnr_data", db);
+  if (!r.status) {
+    std::printf("IMPORT FAILED: %s\n", r.status.error.message.c_str());
+    return 2;
+  }
+  std::printf("IMPORT OK: %s %s (%s)\n  id=%s\n  installed=%s\n  "
+              "compatibility=Untested (no execution test yet)\n",
+              r.manifest.title.c_str(), r.manifest.version.c_str(),
+              r.manifest.arch.c_str(), r.manifest.id.c_str(),
+              r.install_path.c_str());
+  db.close();
+  return 0;
+}
+
+int cmd_games() {
+  pnr::library::GameDb db;
+  auto st = db.open("./pnr_data/library.db");
+  if (!st) {
+    std::printf("LIBRARY FAILED: %s\n", st.error.message.c_str());
+    return 2;
+  }
+  auto games = db.list_games();
+  if (games.empty()) {
+    std::puts("library is empty (import a .pnrgame first)");
+    return 0;
+  }
+  for (const auto& g : games) {
+    auto compat = db.get_compatibility(g.game_id);
+    auto inst = db.get_installation(g.game_id);
+    std::printf("%s  v%s  [%s]\n    %s\n", g.title.c_str(),
+                g.version.c_str(),
+                compat ? compat->state.c_str() : "Untested",
+                inst ? inst->path.c_str() : "(not installed)");
+  }
+  db.close();
   return 0;
 }
 
@@ -170,6 +221,8 @@ void usage() {
             "  pnr run <executable> [args...]   validate + natively run a "
             "developer test app\n"
             "  pnr validate <executable>        ELF/x86-64 validation only\n"
+            "  pnr import <file.pnrgame>        verify + install a dev package\n"
+            "  pnr games                        list the game library\n"
             "  pnr hwinfo                       print detected host hardware");
 }
 
@@ -180,6 +233,9 @@ int main(int argc, char** argv) {
   if (argc >= 2 && std::strcmp(argv[1], "hwinfo") == 0) return cmd_hwinfo();
   if (argc >= 3 && std::strcmp(argv[1], "validate") == 0)
     return cmd_validate(loader, argv[2]);
+  if (argc >= 3 && std::strcmp(argv[1], "import") == 0)
+    return cmd_import(argv[2]);
+  if (argc >= 2 && std::strcmp(argv[1], "games") == 0) return cmd_games();
   if (argc >= 3 && std::strcmp(argv[1], "run") == 0) {
     std::vector<std::string> args(argv + 3, argv + argc);
     return cmd_run(argv[2], args);
