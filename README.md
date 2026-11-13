@@ -33,6 +33,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Developer-controlled demo app running only on compat services | Implemented, Tested |
 | Vulkan compute backend: dlopen-loaded (no SDK needed), instance/device/SSBO/pipeline/dispatch/readback; absence of a driver is reported, never faked | Implemented (compute), Tested on software Vulkan (Mesa lavapipe) in the sandbox; hardware GPU untested |
 | SPIR-V emission: compute write-back module shape, word-level emitter | Implemented (subset), Tested (spirv-val + real dispatch); full shader stages Planned |
+| RDNA shader decoder: all encoding families detected, field extraction for scalar+vector families, named mnemonic subset (scalar complete, vector partial), literals/64-bit words/truncation handled honestly; taxonomy adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5) (GPL-2.0) | Implemented (subset), Tested (synthetic words); SDWA/DPP + image/memory payload fields Planned |
 | Adaptive Performance Engine (deterministic rules, hardware class heuristic, closed-loop controller) | Implemented, Tested |
 | Laptop Optimization Manager (battery/balanced/max-performance caps) | Implemented, Tested |
 | Game services: virtual filesystem (jailed areas, per-game/user save isolation) | Implemented, Tested |
@@ -43,7 +44,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**207/207 unit tests pass, 4/4 CTest suites pass** (unit, end-to-end native
+**230/230 unit tests pass, 4/4 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
 game). No benchmarks exist yet; none are claimed.
 
