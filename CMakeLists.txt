@@ -20,6 +20,9 @@ target_include_directories(pnr_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # MODULE 02 - native executable loader (POSIX today; Windows backend planned)
 add_library(pnr_loader loader/elf_parser.cpp loader/native_loader.cpp loader/nid.cpp)
+
+add_library(pnr_prx prx/prx.cpp)
+target_link_libraries(pnr_prx PUBLIC pnr_loader)
 target_link_libraries(pnr_loader PUBLIC pnr_core)
 
 # MODULE 03 - compatibility services
@@ -96,7 +99,7 @@ target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
 add_executable(pnr_tests tests/test_main.cpp)
-target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services)
+target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx)
 
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
 # End-to-end: the CLI validates and natively runs the demo app.
