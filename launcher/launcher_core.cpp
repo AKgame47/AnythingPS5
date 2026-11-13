@@ -23,7 +23,8 @@ Status LauncherCore::open(const std::string& db_path) {
   if (st) {
     open_ = true;
     auto parent = std::filesystem::path(db_path).parent_path();
-    jail_root_ = (parent.empty() ? std::filesystem::path(".") : parent).string() + "/jail";
+    root_ = (parent.empty() ? std::filesystem::path(".") : parent).string();
+    jail_root_ = root_ + "/jail";
   }
   return st;
 }
@@ -62,6 +63,130 @@ bool LauncherCore::get(const std::string& game_id, GameEntry* out) {
   if (!g) return false;
   *out = build(db_, *g);
   return true;
+}
+
+bool valid_game_id(const std::string& id) {
+  if (id.empty() || id.size() > 128 || id == "." || id == "..") return false;
+  return id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") == std::string::npos;
+}
+
+ImportOutcome LauncherCore::import_package(const std::string& pkg_path) {
+  ImportOutcome o;
+  if (!open_) { o.error = "library is not open"; return o; }
+  // Remember what was installed before so the report can say what changed.
+  std::string prev_ver, prev_path;
+  bool had = false;
+  auto r = pkg::inspect_package(pkg_path);  // read-only pre-check gives the id
+  if (!r.status) { o.error = r.status.error.message; return o; }
+  if (auto i = db_.get_installation(r.manifest.id)) { had = true; prev_ver = i->version; prev_path = i->path; }
+  auto ir = pkg::import_package(pkg_path, root_, db_);
+  if (!ir.status) { o.error = ir.status.error.message; return o; }
+  o.ok = true;
+  o.game_id = ir.manifest.id; o.title = ir.manifest.title; o.version = ir.manifest.version;
+  o.install_path = ir.install_path;
+  if (!had) o.kind = "fresh";
+  else if (prev_ver == o.version) o.kind = "reinstall";
+  else { o.kind = "different-version"; o.previous_version = prev_ver; o.previous_path = prev_path; }
+  if (had) o.previous_version = prev_ver;
+  return o;
+}
+
+static bool is_inside(const std::filesystem::path& base, const std::filesystem::path& p) {
+  // both already canonical/absolute; p must be strictly below base
+  auto b = base.begin(), be = base.end();
+  auto q = p.begin(), qe = p.end();
+  for (; b != be; ++b, ++q) if (q == qe || *q != *b) return false;
+  return q != qe;
+}
+
+RemoveOutcome LauncherCore::remove(const std::string& game_id, bool keep_saves, bool confirmed) {
+  namespace fs = std::filesystem;
+  RemoveOutcome o;
+  o.keep_saves = keep_saves;
+  if (!open_) { o.error = "library is not open"; return o; }
+  if (!valid_game_id(game_id)) { o.error = "not a valid game id"; return o; }
+  if (!db_.get_game(game_id)) { o.error = "no such game id in the library"; return o; }
+  o.found = true;
+  std::error_code ec;
+  const fs::path root = fs::canonical(root_, ec);
+  if (ec) { o.refused = true; o.error = "library directory cannot be resolved"; return o; }
+  const fs::path games_dir = root / "games", jail_dir = root / "jail";
+  // Install tree: only as recorded, and only a direct child of <root>/games.
+  fs::path install;
+  if (auto i = db_.get_installation(game_id)) {
+    o.install_path = i->path;
+    std::error_code e1, e2, e3;
+    const auto sst = fs::symlink_status(i->path, e1);
+    const bool exists = !e1 && fs::exists(sst);
+    if (exists && fs::is_symlink(sst)) { o.refused = true; o.error = "install path is a symlink: refusing to delete"; return o; }
+    // Containment is judged on the resolved path whether or not it exists, so
+    // a hostile row is refused rather than silently treated as "already gone".
+    install = fs::weakly_canonical(i->path, e3);
+    const fs::path gc = fs::canonical(games_dir, e2);
+    const bool contained = !e3 && !e2 && install.parent_path() == gc && !install.filename().empty();
+    if (!contained && (exists || !e2)) {
+      o.refused = true; o.error = "install path is outside the library's games directory: refusing to delete"; return o;
+    }
+    o.install_exists = exists;
+  }
+  fs::path jail;
+  {
+    const fs::path jp = jail_dir / game_id;
+    std::error_code e1;
+    const auto sst = fs::symlink_status(jp, e1);
+    o.jail_path = jp.string();
+    if (!e1 && fs::exists(sst)) {
+      if (fs::is_symlink(sst)) { o.refused = true; o.error = "jail path is a symlink: refusing to delete"; return o; }
+      std::error_code e2; const fs::path jc = fs::canonical(jp, e2);
+      if (e2 || !is_inside(fs::canonical(jail_dir, e2), jc) || jc.parent_path() != fs::canonical(jail_dir, e2)) {
+        o.refused = true; o.error = "jail path is outside the library's jail directory: refusing to delete"; return o;
+      }
+      jail = jc; o.jail_exists = true;
+    }
+  }
+  if (!confirmed) { o.needs_confirmation = true; return o; }
+  if (o.install_exists) {
+    std::error_code e3; fs::remove_all(install, e3);
+    if (e3) { o.error = "could not delete the install tree: " + e3.message(); return o; }
+  }
+  if (o.jail_exists && !keep_saves) {
+    std::error_code e3; fs::remove_all(jail, e3);
+    if (e3) { o.error = "could not delete the jail folder: " + e3.message(); return o; }
+  }
+  auto st = db_.remove_game(game_id);
+  if (!st) { o.error = "files deleted but library records were not: " + st.error.message; return o; }
+  o.removed = true;
+  return o;
+}
+
+VerifyOutcome LauncherCore::verify(const std::string& game_id) {
+  namespace fs = std::filesystem;
+  VerifyOutcome o;
+  if (!open_ || !db_.get_game(game_id)) return o;
+  o.found = true;
+  auto inst = db_.get_installation(game_id);
+  if (!inst) { o.problems.push_back("not installed"); return o; }
+  std::error_code ec;
+  if (!fs::is_directory(inst->path, ec)) o.problems.push_back("install directory is missing: " + inst->path);
+  else if (inst->executable.empty()) o.problems.push_back("installation has no entry point");
+  else {
+    const fs::path base = fs::weakly_canonical(inst->path, ec);
+    const fs::path exe = fs::weakly_canonical(fs::path(inst->path) / inst->executable, ec);
+    if (ec || !is_inside(base, exe)) o.problems.push_back("entry point resolves outside the install directory");
+    else if (!fs::is_regular_file(exe, ec)) o.problems.push_back("entry point file is missing: " + inst->executable);
+    else {
+      auto pr = loader::parse_elf(exe.string());
+      if (!pr.ok) o.problems.push_back("entry point is not a valid ELF: " + pr.error);
+      else if (!loader::is_x86_64(pr.info)) o.problems.push_back("entry point is not an x86-64 ELF");
+      else if (!loader::is_executable_type(pr.info)) o.problems.push_back("entry point is not an executable ELF type");
+    }
+  }
+  o.ok = o.problems.empty();
+  if (!o.ok && inst->integrity != "failed") {
+    auto upd = *inst; upd.integrity = "failed";
+    o.marked_failed = bool(db_.set_installation(upd));
+  }
+  return o;
 }
 
 const std::vector<std::string>& compat_states() {
@@ -331,6 +456,58 @@ std::string render_scan_json(const ScanReport& r) {
   j += "],\"inspected\":" + std::to_string(r.items.size()) + ",\"skipped\":" + std::to_string(r.skipped) +
        std::string(",\"truncated\":") + (r.truncated ? "true" : "false") + "}";
   return j;
+}
+
+std::string render_import_text(const ImportOutcome& o) {
+  if (!o.ok) return "IMPORT REFUSED: " + o.error + "\n";
+  std::string t = "IMPORT OK: " + o.game_id + " v" + o.version + " (" + o.title + ")\n  installed at " + o.install_path + "\n";
+  if (o.kind == "fresh") t += "  new install\n";
+  else if (o.kind == "reinstall") t += "  reinstall of the same version (files overwritten in place)\n";
+  else t += "  replaces v" + o.previous_version + "; the old install tree is left at " + o.previous_path + "\n";
+  return t + "  compatibility is unchanged by import (new games start Untested; a person-set state is kept)\n";
+}
+
+std::string render_import_json(const ImportOutcome& o) {
+  std::string j = std::string("{\"ok\":") + (o.ok ? "true" : "false") + ",\"error\":" + q(o.error) + ",\"game_id\":" + q(o.game_id) +
+                  ",\"title\":" + q(o.title) + ",\"version\":" + q(o.version) + ",\"install_path\":" + q(o.install_path) +
+                  ",\"kind\":" + q(o.kind) + ",\"previous_version\":" + q(o.previous_version) + ",\"previous_path\":" + q(o.previous_path) + "}";
+  return j;
+}
+
+std::string render_remove_text(const std::string& id, const RemoveOutcome& o) {
+  if (!o.found) return "REMOVE NOT DONE: " + o.error + "\n";
+  if (o.refused) return "REMOVE REFUSED: " + o.error + "\n  nothing was deleted\n";
+  std::string t;
+  t += std::string(o.removed ? "REMOVED " : o.needs_confirmation ? "WOULD REMOVE (add --yes to do it) " : "NOT REMOVED ") + id + "\n";
+  t += "  install tree:  " + (o.install_path.empty() ? std::string("none recorded") : o.install_path + (o.install_exists ? "" : "  (already gone)")) + "\n";
+  t += "  saves/jail:    " + o.jail_path + (o.jail_exists ? (o.keep_saves ? "  (kept: --keep-saves)" : "") : "  (none)") + "\n";
+  t += "  library rows:  game, installation, compatibility and launch history\n";
+  if (!o.error.empty()) t += "  error: " + o.error + "\n";
+  return t;
+}
+
+std::string render_remove_json(const std::string& id, const RemoveOutcome& o) {
+  auto b = [](bool v) { return v ? "true" : "false"; };
+  return "{\"game_id\":" + q(id) + ",\"found\":" + b(o.found) + ",\"refused\":" + b(o.refused) +
+         ",\"needs_confirmation\":" + b(o.needs_confirmation) + ",\"removed\":" + b(o.removed) +
+         ",\"install_path\":" + q(o.install_path) + ",\"install_exists\":" + b(o.install_exists) +
+         ",\"jail_path\":" + q(o.jail_path) + ",\"jail_exists\":" + b(o.jail_exists) +
+         ",\"keep_saves\":" + b(o.keep_saves) + ",\"error\":" + q(o.error) + "}";
+}
+
+std::string render_verify_text(const std::string& id, const VerifyOutcome& o) {
+  if (!o.found) return "VERIFY NOT DONE: no such game id in the library\n";
+  if (o.ok) return "VERIFY OK: " + id + ": install directory present, entry point is a valid x86-64 ELF\n  payload checksums are not re-checked (the manifest is not kept after import)\n";
+  std::string t = "VERIFY FAILED: " + id + "\n";
+  for (const auto& p : o.problems) t += "  - " + p + "\n";
+  if (o.marked_failed) t += "  integrity marked failed in the library (the game is no longer runnable)\n";
+  return t;
+}
+
+std::string render_verify_json(const std::string& id, const VerifyOutcome& o) {
+  std::string j = "{\"game_id\":" + q(id) + std::string(",\"found\":") + (o.found ? "true" : "false") + ",\"ok\":" + (o.ok ? "true" : "false") + ",\"problems\":[";
+  for (size_t i = 0; i < o.problems.size(); ++i) { if (i) j += ","; j += q(o.problems[i]); }
+  return j + "],\"marked_failed\":" + (o.marked_failed ? "true" : "false") + ",\"checksums_rechecked\":false}";
 }
 
 std::string render_outcome_json(const std::string& game_id, const LaunchOutcome& o) {
