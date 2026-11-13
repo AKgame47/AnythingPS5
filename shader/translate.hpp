@@ -4,26 +4,36 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "core/runtime.hpp"
+namespace pnr::graphics { class VulkanBackend; }
 namespace pnr::shader {
 struct ComputeTranslation {
   bool ok = false;
   std::string error;
   std::vector<uint32_t> spirv; // empty on EVERY failure
+  uint32_t required_buffer_words = 0; // host io must contain at least this many
   bool stored_value_known = false; // false for runtime-dependent results
   uint32_t stored_value = 0; // inspect only when stored_value_known
 };
-// Explicit test ABI: one active invocation, straight-line VGPR SSA,
-// one flat_store_dword to exactly ssbo_guest_base, final s_endpgm.
-// Guest address base is supplied by the caller, NOT a host pointer. It maps
-// only to uint 0 of descriptor set 0 binding 0. No GPU virtual-memory mapping,
-// wave semantics, resource descriptors, dynamic addressing, or real-game ABI.
-// Supports flat_load_dword, v_add_nc_u32, v_sub_nc_u32, v_and/or/xor_b32.
-// Load values and ALU execute in SPIR-V; only move aliases are folded.
-// Address pairs remain compile-time constants. No async waitcnt semantics.
+// Explicit test ABI: one active invocation, straight-line VGPR SSA.
+// Aligned constant guest addresses plus unsigned FLAT offsets map to the
+// supplied fixed SSBO range (1..65536 words). Every memory access is range
+// checked at translation time. No dynamic addresses or GPU virtual memory.
+// Host must bind at least required_buffer_words words; zero/oversize ranges
+// and base+size overflow fail. Legacy callers default to a single word.
+// Supports v_mov, flat_load/store_dword, uint32 add/sub/and/or/xor.
+// No wave/EXEC/asynchronous waitcnt semantics or real-game shader ABI.
 ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
-                                           uint64_t ssbo_guest_base);
+                                           uint64_t ssbo_guest_base,
+                                           uint32_t buffer_words = 1);
 // Explicit little-endian byte input. Rejects partial words, never casts an
 // unaligned byte buffer to uint32_t*. Same restricted ABI as above.
 ComputeTranslation translate_compute_bytes(const std::vector<uint8_t>& code,
-                                           uint64_t ssbo_guest_base);
+                                           uint64_t ssbo_guest_base,
+                                           uint32_t buffer_words = 1);
+// Checked execution route: refuses failed translations/null/short io before
+// any Vulkan call. Use this instead of raw backend dispatch for translations.
+Status run_translated_compute(graphics::VulkanBackend& backend,
+                              const ComputeTranslation& translation,
+                              std::vector<uint32_t>* io);
 } // namespace pnr::shader
