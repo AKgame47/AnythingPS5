@@ -28,6 +28,9 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Vulkan graphics backend | Blocked in the dev sandbox (no GPU); Planned (Phase 2) |
 | Adaptive Performance Engine (deterministic rules, hardware class heuristic, closed-loop controller) | Implemented, Tested |
 | Laptop Optimization Manager (battery/balanced/max-performance caps) | Implemented, Tested |
+| Game services: virtual filesystem (jailed areas, per-game/user save isolation) | Implemented, Tested |
+| Game services: input (evdev enumeration, mapping profiles, virtual device) | Implemented, Tested |
+| Game services: audio (interface + honest null backend) | Interface Implemented, host backends Planned |
 | Windows backend | Implemented (hwinfo via Win32; ELF launch Blocked, cross-compile CI-verified) |
 | Rust components | Planned (no Rust toolchain in current sandbox) |
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
@@ -105,6 +108,7 @@ ape/         MODULE 05 - adaptive performance engine (classification, frame stat
 laptop/      MODULE 06 - laptop optimization manager (power modes, caps)
 package/     .pnrgame format: ustar, SHA-256, importer
 library/     MODULE 09 - SQLite game/installation/compatibility/launch store
+services/    MODULE 08 - virtual filesystem, input, audio backends
 tools/       pnr_make_package - dev package builder
 examples/    pnr_test_app - developer-controlled native demo "game"
 tests/       unit tests (no framework) + end-to-end CTest + package workflow
@@ -130,3 +134,9 @@ Planned (per the master prompt's structure): `graphics/`, `performance/`,
 4. Execute supported native x86-64 code directly; no emulation, no VMs,
    no streaming.
 5. Report a blocked capability as blocked.
+
+## License
+
+GPL-2.0-only (see LICENSE). Chosen so design and code from
+[boykopovar/AnyPS5](https://github.com/boykopovar/AnyPS5) (GPL-2.0) can be
+reused with attribution where it genuinely helps.
