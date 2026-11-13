@@ -417,7 +417,7 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args,
       db.record_launch(game_id, session.last_exit_code(), wall);
       if (session.last_exit_code() == 0) {
         auto compat = db.get_compatibility(game_id);
-        if (!compat || compat->state == "Untested") {
+        if (!compat || (compat->state == "Untested" && !db.compat_is_human_set(game_id))) {
           db.set_compatibility({game_id, "Launches Only",
                                 "launched natively, exit 0; gameplay not "
                                 "verified"});
