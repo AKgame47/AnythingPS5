@@ -25,6 +25,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
     std::optional<uint32_t> origin = {}, stride = {};
   };
   std::array<std::optional<Reg>, 256> regs{};
+  std::array<std::optional<Reg>, 106> sregs{};
   std::vector<U32Node> nodes;
   // Only multi-invocation mode initializes v0. Legacy single mode keeps
   // undefined-v0 behavior. This is PNR test ABI, not a PS5 launch ABI.
@@ -37,19 +38,61 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   std::optional<Range> writes;
   auto source = [&](const RdnaOperand& o) -> std::optional<Reg> {
     if (o.kind == RdnaOperandKind::VectorReg) return regs[o.reg];
+    if (o.kind == RdnaOperandKind::ScalarReg && o.reg<sregs.size()) return sregs[o.reg];
     if (o.kind != RdnaOperandKind::LiteralConst &&
         o.kind != RdnaOperandKind::InlineIntConst) return {};
     nodes.push_back({U32Op::Constant, o.value});
     return Reg{static_cast<uint32_t>(nodes.size()-1), o.value, o.value, 0};
   };
-  bool ended = false, stored = false, guarded = false;
+  bool ended = false, stored = false, guarded = false, conditional = false;
+  struct Compare { uint32_t a,b; };
+  std::optional<Compare> scc;
+  std::optional<uint32_t> merge_pc;
+  std::array<std::optional<Reg>,256> before_branch{};
+  std::array<bool,256> assigned{};
+  Compare branch_compare{};
   std::optional<uint32_t> value;
   for (const auto& i : d.instructions) {
     const auto at = " at pc=" + std::to_string(i.pc);
     if (ended) return fail("instructions after s_endpgm" + at);
-    if (i.family == RdnaFamily::VOP1 && i.opcode_id == 1) {
+    if (merge_pc && i.pc==*merge_pc) {
+      for (uint32_t reg=0;reg<256;++reg) if(assigned[reg]) {
+        if(!before_branch[reg] || !regs[reg]) return fail("conditional VGPR undefined on skipped path"+at);
+        nodes.push_back({U32Op::SelectEqual,branch_compare.a,branch_compare.b,
+                         regs[reg]->node,before_branch[reg]->node});
+        regs[reg]=Reg{uint32_t(nodes.size()-1),{}};
+      }
+      merge_pc.reset();
+    }
+    if (merge_pc && !(i.family==RdnaFamily::VOP1 && i.opcode_id==1))
+      return fail("conditional body permits only v_mov_b32"+at);
+    if (i.family==RdnaFamily::VOP1 && i.opcode_id==2) {
+      if(local_size_x!=1 || i.dst.kind!=RdnaOperandKind::ScalarReg ||
+         i.src0.kind!=RdnaOperandKind::VectorReg || !regs[i.src0.reg])
+        return fail("readfirstlane requires defined VGPR, ordinary SGPR, single invocation"+at);
+      sregs[i.dst.reg]=regs[i.src0.reg];
+    } else if(i.family==RdnaFamily::SOP1 && i.opcode_id==3) {
+      auto v=source(i.src0);
+      if(i.dst.kind!=RdnaOperandKind::ScalarReg || !v)
+        return fail("unsupported/undefined scalar move"+at);
+      sregs[i.dst.reg]=*v;
+    } else if(i.family==RdnaFamily::SOPC && i.opcode_id==6) {
+      if(local_size_x!=1) return fail("scalar comparison restricted to one invocation"+at);
+      auto a=source(i.src0),b=source(i.src1);
+      if(!a || !b) return fail("undefined compare source"+at);
+      scc=Compare{a->node,b->node};
+    } else if(i.family==RdnaFamily::SOPP && i.opcode_id==4) {
+      if(local_size_x!=1 || conditional || !scc || i.simm<=0)
+        return fail("unsupported branch: needs single forward SCC0 with defined compare"+at);
+      bool boundary=false;
+      for(const auto& target:d.instructions) boundary |= target.pc==i.branch_target;
+      if(!boundary) return fail("branch target is not an instruction boundary"+at);
+      merge_pc=i.branch_target;before_branch=regs;assigned.fill(false);
+      branch_compare=*scc;conditional=true;
+    } else if (i.family == RdnaFamily::VOP1 && i.opcode_id == 1) {
       const auto v = source(i.src0);
       if (!v) return fail("undefined VGPR or unsupported v_mov source" + at);
+      if(merge_pc) assigned[i.dst.reg]=true;
       regs[i.dst.reg] = *v; // SSA alias: later overwrites do not change this value
     } else if (i.family == RdnaFamily::VOP2 &&
                (i.opcode_id == 0x25 || i.opcode_id == 0x26 ||
@@ -147,12 +190,14 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       ended = true;
     } else return fail("unsupported instruction " + std::string(rdna_family_name(i.family)) + at);
   }
+  if (merge_pc) return fail("unresolved conditional merge");
   if (!ended) return fail("missing final s_endpgm");
   if (!stored) return fail("missing flat_store_dword");
   if (local_size_x>1 && writes) for(const auto& read:reads)
     if(read.first<=writes->last && writes->first<=read.last)
       return fail("multi-invocation load/output ranges overlap; barriers not supported");
   ComputeTranslation r;
+  r.conditional_selection = conditional;
   r.local_size_x = local_size_x;
   r.guarded_memory = guarded;
   r.required_buffer_words = buffer_words;
