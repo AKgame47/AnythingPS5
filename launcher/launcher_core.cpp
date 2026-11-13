@@ -13,6 +13,7 @@
 #include "loader/import_resolver.hpp"
 #include "loader/native_loader.hpp"
 #include "package/importer.hpp"
+#include "package/tar.hpp"
 #include "prx/prx.hpp"
 
 namespace pnr::launcher {
@@ -186,6 +187,257 @@ VerifyOutcome LauncherCore::verify(const std::string& game_id) {
     auto upd = *inst; upd.integrity = "failed";
     o.marked_failed = bool(db_.set_installation(upd));
   }
+  return o;
+}
+
+// Bytes under a path, never following symlinks.
+static uint64_t tree_bytes(const std::filesystem::path& p) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const auto st = fs::symlink_status(p, ec);
+  if (ec || fs::is_symlink(st)) return 0;
+  if (fs::is_regular_file(st)) { auto n = fs::file_size(p, ec); return ec ? 0 : n; }
+  if (!fs::is_directory(st)) return 0;
+  uint64_t total = 0;
+  for (fs::recursive_directory_iterator it(p, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end; it.increment(ec)) {
+    std::error_code e2;
+    const auto s2 = it->symlink_status(e2);
+    if (!e2 && fs::is_regular_file(s2)) { auto n = it->file_size(e2); if (!e2) total += n; }
+  }
+  return total;
+}
+
+static std::string entry_kind(const std::filesystem::path& p) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const auto st = fs::symlink_status(p, ec);
+  if (fs::is_symlink(st)) return "symlink";
+  if (fs::is_directory(st)) return "dir";
+  return "file";
+}
+
+// Resolved install paths recorded in the library, as canonical strings where possible.
+static std::vector<std::string> recorded_installs(library::GameDb& db) {
+  std::vector<std::string> out;
+  for (const auto& g : db.list_games())
+    if (auto i = db.get_installation(g.game_id)) {
+      std::error_code ec;
+      out.push_back(std::filesystem::weakly_canonical(i->path, ec).string());
+    }
+  return out;
+}
+
+DoctorReport LauncherCore::doctor() {
+  namespace fs = std::filesystem;
+  DoctorReport r;
+  if (!open_) { r.error = "library is not open"; return r; }
+  std::error_code ec;
+  const fs::path root = fs::canonical(root_, ec);
+  if (ec) { r.error = "library directory cannot be resolved"; return r; }
+  r.ok = true;
+  const fs::path games_dir = root / "games", jail_dir = root / "jail";
+  std::error_code eg;
+  const fs::path games_c = fs::exists(games_dir) ? fs::canonical(games_dir, eg) : games_dir;
+  auto games = db_.list_games();
+  r.games = static_cast<int>(games.size());
+  std::vector<std::string> rec = recorded_installs(db_);
+  for (const auto& g : games) {
+    DoctorUsage u; u.game_id = g.game_id;
+    if (auto i = db_.get_installation(g.game_id)) {
+      std::error_code e1;
+      const fs::path rp = fs::weakly_canonical(i->path, e1);
+      const bool contained = !e1 && rp.parent_path() == games_c && !rp.filename().empty();
+      if (!contained) r.issues.push_back({"install-outside-library", g.game_id, "recorded install path does not resolve to a direct child of the library's games directory: " + i->path});
+      else if (!fs::is_directory(rp, e1)) r.issues.push_back({"install-missing", g.game_id, "install directory is missing: " + i->path});
+      else u.install_bytes = tree_bytes(rp);
+      if (i->integrity == "failed") r.issues.push_back({"integrity-failed", g.game_id, "integrity is marked failed (the game is not runnable)"});
+    }
+    u.saves_bytes = tree_bytes(jail_dir / g.game_id);
+    r.usage.push_back(u);
+  }
+  std::sort(r.usage.begin(), r.usage.end(), [](const DoctorUsage& a, const DoctorUsage& b) { return a.game_id < b.game_id; });
+  std::sort(r.issues.begin(), r.issues.end(), [](const DoctorIssue& a, const DoctorIssue& b) { return a.subject != b.subject ? a.subject < b.subject : a.kind < b.kind; });
+  std::error_code e2;
+  if (fs::is_directory(games_dir, e2))
+    for (fs::directory_iterator it(games_dir, e2), end; !e2 && it != end; it.increment(e2)) {
+      const fs::path p = it->path();
+      std::error_code e3;
+      const fs::path rp = (fs::is_symlink(fs::symlink_status(p, e3)) ? games_c / p.filename() : fs::weakly_canonical(p, e3));
+      if (std::find(rec.begin(), rec.end(), rp.string()) != rec.end()) continue;
+      DoctorOrphan o; o.name = p.filename().string(); o.kind = entry_kind(p); o.bytes = tree_bytes(p);
+      r.orphan_installs.push_back(o);
+    }
+  if (fs::is_directory(jail_dir, e2))
+    for (fs::directory_iterator it(jail_dir, e2), end; !e2 && it != end; it.increment(e2)) {
+      const std::string name = it->path().filename().string();
+      if (db_.get_game(name)) continue;
+      DoctorOrphan o; o.name = name; o.kind = entry_kind(it->path()); o.bytes = tree_bytes(it->path());
+      r.orphan_jails.push_back(o);
+    }
+  auto byname = [](const DoctorOrphan& a, const DoctorOrphan& b) { return a.name < b.name; };
+  std::sort(r.orphan_installs.begin(), r.orphan_installs.end(), byname);
+  std::sort(r.orphan_jails.begin(), r.orphan_jails.end(), byname);
+  return r;
+}
+
+CleanOutcome LauncherCore::clean_orphans(bool confirmed) {
+  namespace fs = std::filesystem;
+  CleanOutcome o;
+  auto rep = doctor();  // recomputed now; nothing from an earlier report is trusted
+  if (!rep.ok) { o.error = rep.error; return o; }
+  o.ok = true;
+  std::error_code ec;
+  const fs::path games_dir = fs::canonical(fs::path(root_), ec) / "games";
+  std::error_code eg;
+  const fs::path gc = fs::exists(games_dir) ? fs::canonical(games_dir, eg) : games_dir;
+  for (const auto& orph : rep.orphan_installs) {
+    if (orph.kind != "dir") { ++o.left_alone; continue; }
+    CleanItem it; it.name = orph.name; it.bytes = orph.bytes;
+    const fs::path p = gc / orph.name;
+    std::error_code e1;
+    const auto st = fs::symlink_status(p, e1);
+    const fs::path rp = fs::weakly_canonical(p, e1);
+    if (e1 || fs::is_symlink(st) || !fs::is_directory(st) || rp.parent_path() != gc || rp.filename().empty() || orph.name.empty() || orph.name == "." || orph.name == "..") {
+      it.error = "refused: not a plain directory directly under the games directory";
+      o.items.push_back(it); continue;
+    }
+    if (confirmed) {
+      std::error_code e2; fs::remove_all(rp, e2);
+      if (e2) it.error = "could not delete: " + e2.message(); else it.removed = true;
+    }
+    o.items.push_back(it);
+  }
+  if (!confirmed && !o.items.empty()) o.needs_confirmation = true;
+  return o;
+}
+
+bool safe_archive_name(const std::string& n) {
+  if (n.empty() || n.size() > 100 || n[0] == '/' || n.back() == '/') return false;
+  if (n.find('\0') != std::string::npos || n.find('\\') != std::string::npos) return false;
+  size_t start = 0;
+  while (start <= n.size()) {
+    size_t end = n.find('/', start);
+    if (end == std::string::npos) end = n.size();
+    const std::string c = n.substr(start, end - start);
+    if (c.empty() || c == "." || c == "..") return false;
+    start = end + 1;
+  }
+  return true;
+}
+
+SavesOutcome LauncherCore::export_saves(const std::string& game_id, const std::string& out_path) {
+  namespace fs = std::filesystem;
+  SavesOutcome o;
+  if (!open_) { o.error = "library is not open"; return o; }
+  if (!valid_game_id(game_id)) { o.error = "not a valid game id"; return o; }
+  if (!db_.get_game(game_id)) { o.error = "no such game id in the library"; return o; }
+  if (out_path.empty()) { o.error = "no output path"; return o; }
+  std::error_code ec;
+  const fs::path jail = fs::path(root_) / "jail" / game_id;
+  const auto jst = fs::symlink_status(jail, ec);
+  if (ec || !fs::exists(jst)) { o.error = "this game has no saves folder"; return o; }
+  if (fs::is_symlink(jst) || !fs::is_directory(jst)) { o.error = "saves folder is not a plain directory: refusing"; return o; }
+  if (fs::exists(fs::symlink_status(out_path, ec))) { o.error = "output file already exists: refusing to overwrite"; return o; }
+  const fs::path outp = fs::weakly_canonical(out_path, ec);
+  const fs::path jailc = fs::canonical(jail, ec);
+  if (is_inside(jailc, outp)) { o.error = "output file is inside the saves folder being exported"; return o; }
+  if (!fs::is_directory(outp.parent_path(), ec)) { o.error = "output directory does not exist"; return o; }
+  std::vector<pkg::TarEntry> entries;
+  std::vector<std::string> names;
+  for (fs::recursive_directory_iterator it(jailc, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end; it.increment(ec)) {
+    std::error_code e2;
+    const auto st = it->symlink_status(e2);
+    if (e2 || !fs::is_regular_file(st)) { if (!fs::is_directory(st)) ++o.skipped; continue; }
+    const std::string rel = fs::relative(it->path(), jailc, e2).generic_string();
+    if (e2 || !safe_archive_name(rel)) { o.error = "a saves path cannot be archived (name over 100 bytes or unsafe): " + rel; return o; }
+    const uint64_t sz = it->file_size(e2);
+    if (e2) { o.error = "cannot read file size: " + rel; return o; }
+    if (entries.size() >= kSavesMaxFiles || o.bytes + sz > kSavesMaxBytes) { o.error = "saves folder is over the export limit (10000 files / 64 MiB)"; return o; }
+    std::ifstream f(it->path(), std::ios::binary);
+    pkg::TarEntry te; te.name = rel;
+    te.data.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    if (te.data.size() != sz) { o.error = "file changed while reading: " + rel; return o; }
+    o.bytes += sz; entries.push_back(std::move(te));
+  }
+  if (ec) { o.error = "cannot read the saves folder"; return o; }
+  std::sort(entries.begin(), entries.end(), [](const pkg::TarEntry& a, const pkg::TarEntry& b) { return a.name < b.name; });
+  auto st = pkg::tar_write(outp.string(), entries);
+  if (!st) { o.error = st.error.message; std::error_code e3; fs::remove(outp, e3); return o; }
+  o.files = static_cast<int>(entries.size());
+  o.ok = true;
+  return o;
+}
+
+SavesOutcome LauncherCore::restore_saves(const std::string& game_id, const std::string& in_path, bool overwrite) {
+  namespace fs = std::filesystem;
+  SavesOutcome o;
+  if (!open_) { o.error = "library is not open"; return o; }
+  if (!valid_game_id(game_id)) { o.error = "not a valid game id"; return o; }
+  if (!db_.get_game(game_id)) { o.error = "no such game id in the library"; return o; }
+  std::error_code ec;
+  if (in_path.empty() || !fs::is_regular_file(in_path, ec)) { o.error = "archive is not a readable file"; return o; }
+  if (fs::file_size(in_path, ec) > kSavesMaxBytes + 512ull * (kSavesMaxFiles * 2 + 2) || ec) { o.error = "archive is over the restore limit"; return o; }
+  std::vector<pkg::TarEntry> entries;
+  auto st = pkg::tar_read(in_path, entries);
+  if (!st) { o.error = "not a valid archive: " + st.error.message; return o; }
+  if (entries.size() > kSavesMaxFiles) { o.error = "archive has too many files (limit 10000)"; return o; }
+  // Preflight: every name, size and target is checked before anything is written.
+  uint64_t total = 0;
+  std::vector<std::string> seen;
+  for (const auto& e : entries) {
+    if (!safe_archive_name(e.name)) { o.error = "unsafe name in archive: " + e.name; return o; }
+    total += e.data.size();
+    if (total > kSavesMaxBytes) { o.error = "archive contents are over the restore limit (64 MiB)"; return o; }
+    seen.push_back(e.name);
+  }
+  std::sort(seen.begin(), seen.end());
+  for (size_t i = 1; i < seen.size(); ++i)
+    if (seen[i] == seen[i - 1]) { o.error = "duplicate name in archive: " + seen[i]; return o; }
+  for (size_t i = 0; i < seen.size(); ++i)  // "a" and "a/b" cannot both be files
+    for (size_t j = i + 1; j < seen.size() && seen[j].compare(0, seen[i].size() + 1, seen[i] + "/") == 0; ++j)
+      { o.error = "archive has a file that is also used as a directory: " + seen[i]; return o; }
+  const fs::path jail_root = fs::path(root_) / "jail";
+  const fs::path jail = jail_root / game_id;
+  {
+    const auto jst = fs::symlink_status(jail, ec);
+    if (!ec && fs::exists(jst) && (fs::is_symlink(jst) || !fs::is_directory(jst))) { o.error = "saves folder is not a plain directory: refusing"; return o; }
+    const auto rst = fs::symlink_status(jail_root, ec);
+    if (!ec && fs::exists(rst) && (fs::is_symlink(rst) || !fs::is_directory(rst))) { o.error = "library jail directory is not a plain directory: refusing"; return o; }
+  }
+  for (const auto& e : entries) {
+    fs::path cur = jail;
+    size_t start = 0;
+    while (true) {  // every existing component below the jail must be a plain dir (or the final file)
+      size_t end = e.name.find('/', start);
+      const bool last = end == std::string::npos;
+      cur /= e.name.substr(start, last ? std::string::npos : end - start);
+      std::error_code e1;
+      const auto cst = fs::symlink_status(cur, e1);
+      if (!e1 && fs::exists(cst)) {
+        if (fs::is_symlink(cst)) { o.error = "a symlink is in the way: " + e.name; return o; }
+        if (last && !fs::is_regular_file(cst)) { o.error = "target exists and is not a plain file: " + e.name; return o; }
+        if (!last && !fs::is_directory(cst)) { o.error = "a file is in the way of a folder: " + e.name; return o; }
+      }
+      if (last) break;
+      start = end + 1;
+    }
+  }
+  // Write.
+  std::error_code e0;
+  fs::create_directories(jail, e0);
+  if (e0) { o.error = "cannot create the saves folder: " + e0.message(); return o; }
+  for (const auto& e : entries) {
+    const fs::path target = jail / e.name;
+    std::error_code e1;
+    if (fs::exists(fs::symlink_status(target, e1)) && !overwrite) { ++o.skipped; continue; }
+    fs::create_directories(target.parent_path(), e1);
+    if (e1) { o.error = "cannot create folder for " + e.name + " (earlier files may already be restored)"; return o; }
+    std::ofstream out(target, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(e.data.data()), static_cast<std::streamsize>(e.data.size()));
+    if (!out) { o.error = "write failed: " + e.name + " (earlier files may already be restored)"; return o; }
+    ++o.files; o.bytes += e.data.size();
+  }
+  o.ok = true;
   return o;
 }
 
@@ -508,6 +760,68 @@ std::string render_verify_json(const std::string& id, const VerifyOutcome& o) {
   std::string j = "{\"game_id\":" + q(id) + std::string(",\"found\":") + (o.found ? "true" : "false") + ",\"ok\":" + (o.ok ? "true" : "false") + ",\"problems\":[";
   for (size_t i = 0; i < o.problems.size(); ++i) { if (i) j += ","; j += q(o.problems[i]); }
   return j + "],\"marked_failed\":" + (o.marked_failed ? "true" : "false") + ",\"checksums_rechecked\":false}";
+}
+
+static std::string mib(uint64_t b) {
+  char s[32];
+  if (b < 1024) std::snprintf(s, sizeof s, "%llu B", (unsigned long long)b);
+  else if (b < 1024 * 1024) std::snprintf(s, sizeof s, "%.1f KiB", b / 1024.0);
+  else std::snprintf(s, sizeof s, "%.1f MiB", b / 1048576.0);
+  return s;
+}
+
+std::string render_doctor_text(const DoctorReport& r) {
+  if (!r.ok) return "DOCTOR NOT DONE: " + r.error + "\n";
+  std::string t = "library readable, " + std::to_string(r.games) + " game(s)\n";
+  if (r.issues.empty()) t += "no row problems found\n";
+  for (const auto& i : r.issues) t += "ISSUE " + i.kind + "  " + i.subject + ": " + i.detail + "\n";
+  for (const auto& o : r.orphan_installs) t += "ORPHAN INSTALL  games/" + o.name + "  [" + o.kind + ", " + mib(o.bytes) + "]  no library row points here\n";
+  for (const auto& o : r.orphan_jails) t += "ORPHAN SAVES  jail/" + o.name + "  [" + o.kind + ", " + mib(o.bytes) + "]  no library row (kept saves from a removed game?)\n";
+  for (const auto& u : r.usage) t += "usage  " + u.game_id + ": install " + mib(u.install_bytes) + ", saves " + mib(u.saves_bytes) + "\n";
+  t += "doctor is read-only: nothing was changed\n";
+  return t;
+}
+
+std::string render_doctor_json(const DoctorReport& r) {
+  auto orph = [](const std::vector<DoctorOrphan>& v) {
+    std::string j = "[";
+    for (size_t i = 0; i < v.size(); ++i) { if (i) j += ","; j += "{\"name\":" + q(v[i].name) + ",\"kind\":" + q(v[i].kind) + ",\"bytes\":" + std::to_string(v[i].bytes) + "}"; }
+    return j + "]";
+  };
+  std::string j = std::string("{\"ok\":") + (r.ok ? "true" : "false") + ",\"error\":" + q(r.error) + ",\"games\":" + std::to_string(r.games) + ",\"issues\":[";
+  for (size_t i = 0; i < r.issues.size(); ++i) { if (i) j += ","; j += "{\"kind\":" + q(r.issues[i].kind) + ",\"game_id\":" + q(r.issues[i].subject) + ",\"detail\":" + q(r.issues[i].detail) + "}"; }
+  j += "],\"orphan_installs\":" + orph(r.orphan_installs) + ",\"orphan_jails\":" + orph(r.orphan_jails) + ",\"usage\":[";
+  for (size_t i = 0; i < r.usage.size(); ++i) { if (i) j += ","; j += "{\"game_id\":" + q(r.usage[i].game_id) + ",\"install_bytes\":" + std::to_string(r.usage[i].install_bytes) + ",\"saves_bytes\":" + std::to_string(r.usage[i].saves_bytes) + "}"; }
+  return j + "]}";
+}
+
+std::string render_clean_text(const CleanOutcome& o) {
+  if (!o.ok) return "CLEAN NOT DONE: " + o.error + "\n";
+  if (o.items.empty()) return "nothing to clean: no orphan install directories" + std::string(o.left_alone ? " (" + std::to_string(o.left_alone) + " orphan file(s)/symlink(s) left alone)" : "") + "\n";
+  std::string t = o.needs_confirmation ? "WOULD DELETE these orphan install directories (add --yes to do it):\n" : "CLEAN RESULT:\n";
+  for (const auto& i : o.items) t += "  games/" + i.name + "  " + mib(i.bytes) + (i.removed ? "  DELETED" : i.error.empty() ? "" : "  " + i.error) + "\n";
+  if (o.left_alone) t += "  " + std::to_string(o.left_alone) + " orphan file(s)/symlink(s) left alone\n";
+  t += "saves (jail folders) and library rows are never touched by clean\n";
+  return t;
+}
+
+std::string render_clean_json(const CleanOutcome& o) {
+  std::string j = std::string("{\"ok\":") + (o.ok ? "true" : "false") + ",\"error\":" + q(o.error) + std::string(",\"needs_confirmation\":") + (o.needs_confirmation ? "true" : "false") + ",\"left_alone\":" + std::to_string(o.left_alone) + ",\"items\":[";
+  for (size_t i = 0; i < o.items.size(); ++i) { if (i) j += ","; j += "{\"name\":" + q(o.items[i].name) + ",\"bytes\":" + std::to_string(o.items[i].bytes) + std::string(",\"removed\":") + (o.items[i].removed ? "true" : "false") + ",\"error\":" + q(o.items[i].error) + "}"; }
+  return j + "]}";
+}
+
+std::string render_saves_text(const char* verb, const SavesOutcome& o) {
+  const std::string v = verb;
+  if (!o.ok) return v + " REFUSED: " + o.error + "\n";
+  std::string t = (v == "export" ? "EXPORT OK: " : "RESTORE OK: ") + std::to_string(o.files) + " file(s), " + mib(o.bytes);
+  if (o.skipped) t += v == "export" ? ", " + std::to_string(o.skipped) + " symlink/special file(s) not followed" : ", " + std::to_string(o.skipped) + " existing file(s) left alone (use --overwrite)";
+  return t + "\n";
+}
+
+std::string render_saves_json(const char* verb, const SavesOutcome& o) {
+  return std::string("{\"action\":") + q(verb) + ",\"ok\":" + (o.ok ? "true" : "false") + ",\"error\":" + q(o.error) + ",\"files\":" + std::to_string(o.files) +
+         ",\"bytes\":" + std::to_string(o.bytes) + ",\"skipped\":" + std::to_string(o.skipped) + "}";
 }
 
 std::string render_outcome_json(const std::string& game_id, const LaunchOutcome& o) {
