@@ -33,7 +33,7 @@ target_link_libraries(pnr_loader PUBLIC pnr_core)
 add_library(pnr_shader shader/rdna.cpp shader/translate.cpp shader/loop_memory.cpp)
 target_include_directories(pnr_shader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_library(pnr_graphics graphics/vulkan.cpp graphics/spirv.cpp)
+add_library(pnr_graphics graphics/vulkan.cpp graphics/render.cpp graphics/spirv.cpp)
 target_include_directories(pnr_graphics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pnr_graphics PUBLIC pnr_core dl)
 target_link_libraries(pnr_shader PUBLIC pnr_graphics)
@@ -115,7 +115,7 @@ set_target_properties(ps_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
-add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp)
+add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp)
 
 # Let the tests launch the real PS-style demo binary.
 target_compile_definitions(pnr_tests PRIVATE
