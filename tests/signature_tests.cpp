@@ -7,7 +7,10 @@
 #include <filesystem>
 #include <string>
 
+#include <fstream>
+
 #include "crypto/ed25519.hpp"
+#include "package/sha256.hpp"
 #include "store/download.hpp"
 #include "store/store_cli.hpp"
 
@@ -84,5 +87,37 @@ void pnr_signature_tests(int& pass, int& fail) {
     check(!r && r.error.code != kErrSignature, "unpinned source falls through to the normal not-verified check"); }
   { std::string bad = idx; bad.replace(bad.find("\"url\""), 0, "\"signature\":\"xyz\","); reg.save_index_text("demo", bad); Index ix;
     check(!reg.load_index("demo", &ix), "index with a malformed signature is rejected"); }
+
+  // ---- launch-time provenance re-check (B1b) ----
+  {
+    const std::string content = "retained package bytes";
+    Package q; q.id = "alpha"; q.version = "1"; q.sha256 = pnr::pkg::sha256_hex(content); q.size = static_cast<long long>(content.size());
+    const std::string m2 = signed_message("demo", q); uint8_t sg2[64];
+    C::ed25519_sign(seed, reinterpret_cast<const uint8_t*>(m2.data()), m2.size(), sg2);
+    const std::string sig2 = C::hex_encode(sg2, 64);
+    fs::create_directories(dir + "/downloads/demo"); fs::create_directories(dir + "/provenance");
+    auto put = [&](const std::string& path, const std::string& t) { std::ofstream f(path, std::ios::trunc | std::ios::binary); f << t; };
+    auto prov = [&](const std::string& pubkey, const std::string& sg) {
+      put(dir + "/provenance/g1.prov", "source=demo\npkg=alpha\nversion=1\nsha256=" + q.sha256 + "\nsize=" + std::to_string(q.size) + "\nsignature=" + sg + "\npubkey=" + pubkey + "\n"); };
+    put(dir + "/downloads/demo/alpha.pnrgame", content);
+    std::string note; reg.set_pubkey("demo", pkhex);
+    check(check_provenance(dir, reg, "not-from-store", &note).ok, "launch check: a game with no provenance is not blocked");
+    prov(pkhex, sig2);
+    check(check_provenance(dir, reg, "g1", &note).ok && note.find("verified again") != std::string::npos, "launch check: signed install re-verifies");
+    put(dir + "/downloads/demo/alpha.pnrgame", content + "x");
+    { pnr::Status r = check_provenance(dir, reg, "g1", &note); check(!r && r.error.code == kErrSignature, "launch check: modified retained package is refused"); }
+    put(dir + "/downloads/demo/alpha.pnrgame", content);
+    { std::string bad = sig2; bad[10] = bad[10] == '0' ? '1' : '0'; prov(pkhex, bad); check(!check_provenance(dir, reg, "g1", &note).ok, "launch check: bad stored signature is refused"); }
+    prov(pkhex, sig2);
+    { uint8_t s2[32] = {7}, p2[32]; C::ed25519_pubkey(s2, p2); reg.set_pubkey("demo", C::hex_encode(p2, 32)); check(!check_provenance(dir, reg, "g1", &note).ok, "launch check: changed pinned key is refused"); }
+    reg.set_pubkey("demo", pkhex);
+    prov("", "");
+    check(!check_provenance(dir, reg, "g1", &note).ok, "launch check: unsigned install from a now-pinned source is refused");
+    reg.set_pubkey("demo", "");
+    check(check_provenance(dir, reg, "g1", &note).ok && note.find("hash only") != std::string::npos, "launch check: unsigned install from an unpinned source runs, labelled hash only");
+    prov(pkhex, sig2); cmd_source_remove(reg, "demo", true, false, &out);
+    check(!check_provenance(dir, reg, "g1", &note).ok, "launch check: removed source is refused");
+    check(check_provenance(dir, reg, "../x", &note).ok, "launch check: path-like ids are not read as files");
+  }
   fs::remove_all(dir);
 }
