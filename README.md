@@ -45,9 +45,12 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**465/465 unit tests pass, 4/4 CTest suites pass** (unit, end-to-end native
+**467/467 unit tests pass, 5/5 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
-game). No benchmarks exist yet; none are claimed.
+game, plus compact shader fixtures/mutation diagnostics). Clean Release
+build with `-Werror` passes. ASan+UBSan unit/fixture runs pass with leak
+detection disabled (no leak-check claim). No benchmarks exist yet; none
+are claimed.
 
 ## Build (Linux)
 
@@ -381,3 +384,12 @@ adversarial tests. Until then, no document here claims otherwise.
 GPL-2.0-only (see LICENSE). Chosen so design and code from
 [boykopovar/AnyPS5](https://github.com/boykopovar/AnyPS5) (GPL-2.0) can be
 reused with attribution where it genuinely helps.
+
+
+## Shader audit diagnostics
+
+`./build/pnr_shader_checks` runs three synthetic shader fixtures with exact
+Vulkan readback (when available) plus 4096 deterministic instruction-mutation
+checks. It prints fixture names, translated sizes, guard status and failures.
+This smoke corpus is not exhaustive fuzzing, ISA certification or a benchmark.
+See `docs/shader-audit.md` for the measured audit and reproducible commands.
