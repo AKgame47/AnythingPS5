@@ -57,11 +57,11 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**1582/1582 unit tests pass, 14/14 CTest suites pass** (unit, end-to-end native
+**1671/1671 unit tests pass, 15/15 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
-and on a build against the official Vulkan headers. ASan+UBSan: 1582/1582
+and on a build against the official Vulkan headers. ASan+UBSan: 1671/1671
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -761,6 +761,52 @@ $ pnr-launcher remove .. --yes
 REMOVE NOT DONE: not a valid game id
 ```
 
+### Diagnostics and saves backup (fourth launcher slice)
+
+Headless commands, not a desktop UI. Real captured output (paths shortened
+to `./`):
+
+- `doctor`: read-only report of row problems, orphan installs under
+  `games/`, orphan jail folders and per-game disk usage.
+- `clean --orphans [--yes]`: dry run by default. Removes only real orphan
+  directories directly under `games/`. Files and symlinks are left alone.
+  Jail folders (saves) and library rows are never touched.
+- `export <id> <out.tar>`: plain ustar archive of the game's save folder.
+  Regular files only, refuses to overwrite, max 10000 files and 64 MiB.
+- `restore-saves <id> <in.tar> [--overwrite]`: checks every entry first
+  (safe names, no duplicates, no symlinks in the way, size caps), writes only
+  inside `jail/<id>`, keeps existing files unless `--overwrite`.
+
+Limits: no encryption or compression, empty folders are not exported, save
+formats are not interpreted, a restore that fails mid-write can leave earlier
+files (the error says so). `tar_read` now rejects entries larger than the
+archive file, which also hardens package import. Local single-user tooling;
+the jail is path routing, not a sandbox.
+
+```
+$ pnr-launcher doctor
+library readable, 1 game(s)
+no row problems found
+ORPHAN INSTALL  games/ps-demo-1.0.0  [dir, 16.3 KiB]  no library row points here
+ORPHAN SAVES  jail/old-ghost  [dir, 2 B]  no library row (kept saves from a removed game?)
+usage  ps-demo: install 16.3 KiB, saves 29 B
+doctor is read-only: nothing was changed
+$ pnr-launcher clean --orphans
+WOULD DELETE these orphan install directories (add --yes to do it):
+  games/ps-demo-1.0.0  16.3 KiB
+saves (jail folders) and library rows are never touched by clean
+$ pnr-launcher clean --orphans --yes
+CLEAN RESULT:
+  games/ps-demo-1.0.0  16.3 KiB  DELETED
+saves (jail folders) and library rows are never touched by clean
+$ pnr-launcher export ps-demo ./saves.tar
+EXPORT OK: 1 file(s), 29 B
+$ pnr-launcher restore-saves ps-demo ./saves.tar
+RESTORE OK: 0 file(s), 0 B, 1 existing file(s) left alone (use --overwrite)
+$ pnr-launcher restore-saves ps-demo ./bad.tar
+restore REFUSED: not a valid archive: truncated header
+```
+
 ## Windows build
 
 Cross-compile from Linux with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)
@@ -799,7 +845,7 @@ platform/    MODULE 07 - host OS abstraction, Linux + Windows backends (Windows 
 ape/         MODULE 05 - adaptive performance engine (classification, frame stats, controller)
 laptop/      MODULE 06 - laptop optimization manager (power modes, caps)
 package/     .pnrgame format: ustar, SHA-256, importer
-launcher/    MODULE 10 core - headless launcher core (list, details, launch, history, human compatibility, read-only scan, import/remove/verify)
+launcher/    MODULE 10 core - headless launcher core (list, details, launch, history, human compatibility, read-only scan, import/remove/verify, doctor, clean --orphans, saves export/restore, doctor, clean, export, restore-saves)
 library/     MODULE 09 - SQLite game/installation/compatibility/launch store
 services/    MODULE 08 - virtual filesystem, input, audio backends
 tools/       pnr_make_package - dev package builder
