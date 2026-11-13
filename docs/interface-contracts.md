@@ -823,3 +823,7 @@ other loop-memory patterns remain rejected.
 ## render_mesh_frames_rgba
 
 `Status render_mesh_frames_rgba(w, h, vert_spirv, frag_spirv, vertices, indices, depth, frame_push, clear[4], &frames)`. `vertices`: float3 position + float3 colour per vertex (multiple of 6 floats, max 65536 vertices), vertex locations 0 and 1 (vec3). `indices`: uint32 triangle list, multiple of 3, max 30000, every index must be < vertex count. `depth` enables a D32_SFLOAT depth buffer (cleared to 1.0, LESS); fails with a named error when the device lacks D32 depth attachments. Push constants and frame rules as render_frames_rgba. Headless only.
+
+## pnrGfx* (PNR extension, in libpnr_psabi.so)
+
+`int pnrGfxInit(w,h)` (1..1024; 0 ok, negative = Blocked with `pnrGfxLastError()`), `int pnrGfxDrawCube(float yaw, float pitch)` returns covered pixel count or a negative error, `int64 pnrGfxPresentToFile(const char* jail_path)` writes a binary PPM through the game's jail and returns bytes written, `uint32 pnrGfxFramesRendered()`. Process-local state, one renderer per game process. Not a Sony ABI.
