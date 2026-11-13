@@ -6,7 +6,12 @@
 #include <string>
 #include <vector>
 
+#include <fstream>
+#include <iostream>
+#include <iterator>
+
 #include "launcher/launcher_core.hpp"
+#include "psn/psn_cli.hpp"
 
 static void usage() {
   std::puts("pnr-launcher (headless launcher core, not a desktop UI)\n"
@@ -25,7 +30,13 @@ static void usage() {
             "  pnr-launcher doctor [--json]   (read-only health report)\n"
             "  pnr-launcher clean --orphans [--yes] [--json]   (orphan install dirs only; dry run by default)\n"
             "  pnr-launcher export <game-id> <out.tar> [--json]   (back up saves)\n"
-            "  pnr-launcher restore-saves <game-id> <in.tar> [--overwrite] [--json]");
+            "  pnr-launcher restore-saves <game-id> <in.tar> [--overwrite] [--json]\n"
+            "  pnr-launcher psn status [--json]   (offline PSN connector: no network code)\n"
+            "  pnr-launcher psn set-token [--file PATH]   (token from stdin or a file, never argv)\n"
+            "  pnr-launcher psn import-json <file> [--complete] [--json]   (saved purchased-games response)\n"
+            "  pnr-launcher psn owned [--platform PS4|PS5] [--json]\n"
+            "  pnr-launcher psn link <entitlement-id> <game-id> | psn unlink <entitlement-id>\n"
+            "  pnr-launcher psn disconnect [--forget-owned] [--yes]");
 }
 
 int main(int argc, char** argv) {
@@ -33,8 +44,8 @@ int main(int argc, char** argv) {
   if (a.empty()) { usage(); return 64; }
   bool json = false;
   std::vector<std::string> pos, gameargs;
-  bool after = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
-  std::string note, limit_s = "20";
+  bool after = false, complete = false, forget = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
+  std::string note, limit_s = "20", file, platform;
   for (size_t i = 1; i < a.size(); ++i) {
     if (after) gameargs.push_back(a[i]);
     else if (a[i] == "--") after = true;
@@ -42,6 +53,10 @@ int main(int argc, char** argv) {
     else if (a[i] == "--yes") yes = true;
     else if (a[i] == "--overwrite") overwrite = true;
     else if (a[i] == "--orphans") orphans = true;
+    else if (a[i] == "--complete") complete = true;
+    else if (a[i] == "--forget-owned") forget = true;
+    else if (a[i] == "--file" && i + 1 < a.size()) file = a[++i];
+    else if (a[i] == "--platform" && i + 1 < a.size()) platform = a[++i];
     else if (a[i] == "--keep-saves") keep = true;
     else if (a[i] == "--note" && i + 1 < a.size()) note = a[++i], have_note = true;
     else if (a[i] == "--limit" && i + 1 < a.size()) limit_s = a[++i];
@@ -136,6 +151,23 @@ int main(int argc, char** argv) {
     auto o = core.restore_saves(pos[0], pos[1], overwrite);
     std::fputs((json ? render_saves_json("restore", o) + "\n" : render_saves_text("restore", o)).c_str(), stdout);
     rc = o.ok ? 0 : 1;
+  } else if (a[0] == "psn" && !pos.empty()) {
+    const std::string tp = pnr::psn::token_path_for(dbp ? dbp : "./pnr_data/library.db");
+    std::string out;
+    if (pos[0] == "status" && pos.size() == 1) rc = pnr::psn::cmd_status(core.db(), tp, json, &out);
+    else if (pos[0] == "set-token" && pos.size() == 1) {
+      std::string in;
+      if (!file.empty()) { std::ifstream f(file, std::ios::binary); in.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()); }
+      else in.assign((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+      rc = pnr::psn::cmd_set_token(tp, in, json, &out);
+    }
+    else if (pos[0] == "import-json" && pos.size() == 2) rc = pnr::psn::cmd_import_json(core.db(), pos[1], complete, json, &out);
+    else if (pos[0] == "owned" && pos.size() == 1) rc = pnr::psn::cmd_owned(core.db(), json, platform, &out);
+    else if (pos[0] == "link" && pos.size() == 3) rc = pnr::psn::cmd_link(core.db(), pos[1], pos[2], json, &out);
+    else if (pos[0] == "unlink" && pos.size() == 2) rc = pnr::psn::cmd_unlink(core.db(), pos[1], json, &out);
+    else if (pos[0] == "disconnect" && pos.size() == 1) rc = pnr::psn::cmd_disconnect(core.db(), tp, forget, yes, json, &out);
+    else usage();
+    std::fputs(out.c_str(), stdout);
   } else usage();
   core.close();
   return rc;
