@@ -21,8 +21,8 @@ target_include_directories(pnr_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # MODULE 02 - native executable loader (POSIX today; Windows backend planned)
 add_library(pnr_loader loader/elf_parser.cpp loader/native_loader.cpp loader/nid.cpp)
 
-add_library(pnr_prx prx/prx.cpp loader/import_resolver.cpp)
-target_link_libraries(pnr_prx PUBLIC pnr_loader)
+add_library(pnr_prx prx/prx.cpp prx/prx_file.cpp loader/import_resolver.cpp)
+target_link_libraries(pnr_prx PUBLIC pnr_loader pnr_compat)
 target_link_libraries(pnr_loader PUBLIC pnr_core)
 
 # MODULE 03 - compatibility services
