@@ -56,6 +56,13 @@ int cmd_source_remove(Registry& r, const std::string& id, bool yes, bool json, s
   return 0;
 }
 
+int cmd_source_pin(Registry& r, const std::string& id, const std::string& hex, bool json, std::string* out) {
+  Status s = r.set_pubkey(id, hex == "none" ? std::string() : hex);
+  if (!s) { *out = fail(s, json); return 2; }
+  *out = json ? "{\"ok\":true}\n" : (hex == "none" ? "unpinned " + id + ": its packages are hash-only again\n" : "pinned Ed25519 key for " + id + ": its packages now must carry a valid signature to install. A signature proves the key holder produced the package, not that it is safe.\n");
+  return 0;
+}
+
 int cmd_source_list(Registry& r, bool json, std::string* out) {
   if (json) {
     *out = "{\"sources\":[";
@@ -67,7 +74,7 @@ int cmd_source_list(Registry& r, bool json, std::string* out) {
   *out = "STORE SOURCES (" + std::to_string(r.sources().size()) + ")\n";
   for (auto& s : r.sources()) {
     Index idx; Status l = r.load_index(s.id, &idx);
-    *out += " " + s.id + "  " + s.index_url + "\n   declared rights: " + s.rights + "\n   index: " + (l ? std::to_string(idx.packages.size()) + " packages (" + idx.name + ")" : "not fetched or invalid: " + l.error.message) + "\n";
+    *out += " " + s.id + "  " + s.index_url + "\n   declared rights: " + s.rights + "\n   signing: " + (s.pubkey.empty() ? "no pinned key (hash only)" : "pinned key " + s.pubkey.substr(0, 16) + "...") + "\n   index: " + (l ? std::to_string(idx.packages.size()) + " packages (" + idx.name + ")" : "not fetched or invalid: " + l.error.message) + "\n";
   }
   *out += kNote;
   return 0;
