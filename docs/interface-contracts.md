@@ -313,15 +313,15 @@ touches nothing in the library.
   dispatch environment.
 
 
-## IF-GRAPH-03 Restricted compute translation (v10)
+## IF-GRAPH-03 Restricted compute translation (v11)
 
 Status: Experimental, Implemented (strict subset), Tested.
 
-- `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base, buffer_words=1, local_size_x=1, uniform_words=0, guest_base_high=0)` parses
+- `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base, buffer_words=1, local_size_x=1, uniform_words=0, guest_base_high=0, loop_count_uniform=16)` parses
   little-endian words without alignment assumptions; partial words fail.
-  `translate_compute_words(words, guest_base, buffer_words=1, local_size_x=1, uniform_words=0, guest_base_high=0)` is the word-level entry point.
+  `translate_compute_words(words, guest_base, buffer_words=1, local_size_x=1, uniform_words=0, guest_base_high=0, loop_count_uniform=16)` is the word-level entry point.
 - Result: `ok`, diagnostic `error`, `spirv`, `stored_value_known`,
-  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`, `required_uniform_words`, `host_float32`, `full64_pointers`, `structured_loop`. Every failure returns empty SPIR-V. `stored_value` is
+  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`, `required_uniform_words`, `host_float32`, `full64_pointers`, `structured_loop`, `loop_count_uniform`. Every failure returns empty SPIR-V. `stored_value` is
   meaningful only when `stored_value_known` is true; runtime results are
   never invented by the compiler.
 - Explicit test ABI: one workgroup with 1..64 invocations, one fixed-size uint array SSBO at set 0/binding 0.
@@ -348,7 +348,7 @@ Status: Experimental, Implemented (strict subset), Tested.
   addc/subb chains below explicitly propagate it.
   FLAT scalar address must be 0x7f, all segment/cache/LDS/reserved
   fields zero (including offset bit 11); load VDATA/store VDST must be zero.
-- `graphics::SpirvModule::compute_u32(nodes, buffer_words=1, guest_base_low=0, local_size_x=1, uniform_words=0, guest_base_high=0)` emits the straight-line uint
+- `graphics::SpirvModule::compute_u32(nodes, buffer_words=1, guest_base_low=0, local_size_x=1, uniform_words=0, guest_base_high=0, loop_count_uniform=16)` emits the straight-line uint
   IR. Invalid forward references or reads from Store nodes return empty.
   Load.a and Store.b are checked word indices; malformed/out-of-range
   static accesses produce no module. GuardedLoad.a is an earlier runtime
@@ -634,8 +634,9 @@ consume one word, with PC/truncation regression checks.
   s_cbranch_scc0 back-to-add. N must be a literal or inline constant 1..64.
   Backedge must name the decoded add's exact byte PC (including literals).
   Zero is rejected: this is a do-while guest pattern, so zero would underflow
-  instead of representing a zero-trip loop. Counts >64 or runtime SGPR
-  counts are rejected, never clamped or silently unrolled.
+  instead of representing a zero-trip loop. Counts >64 are rejected, never
+  clamped or silently unrolled. Runtime uniform counts are now supported by
+  the explicit execution contract below.
 - Accumulator must be defined before the loop. Delta may be an initialized
   VGPR, ordinary SGPR, literal or inline integer, but must not be accumulator
   itself or the changing scalar counter. Delta values may differ by lane;
@@ -673,3 +674,44 @@ consume one word, with PC/truncation regression checks.
 - Scalar decrement/equality/SCC0 meanings follow the AMD RDNA ISA:
   https://gpuopen.com/download/RDNA_Shader_ISA_25September2020.pdf
   No wave/EXEC/divergent loop semantics or commercial-shader ABI is implied.
+
+
+### Runtime uniform loop-count contract
+
+- Count may originate from a declared initial SGPR push-constant input, or
+  unchanged scalar copies of that input. Reg uniform_input provenance is
+  separate from value/constant/affine facts. Overwriting the original SGPR
+  after copying does not change the count SSA/input index. No computed,
+  SSBO-derived, readfirstlane-derived or lane-varying runtime count is
+  accepted. Ordinary scalar-counter destination may alias its source input.
+- loop_count_uniform is the initial input index 0..15, or sentinel 16 for no
+  runtime count. checked run_translated_compute verifies count metadata,
+  exact uniform length, then rejects count zero or >64 with error 105
+  (shader: runtime loop count must be 1..64; dispatch rejected), BEFORE
+  calling Vulkan or changing io. Invalid metadata is error 104. This is an
+  explicit execution failure, not a capped iteration count or guest success.
+- The shader independently reads that input at entry, checks unsigned 1..64
+  and takes an early return on failure BEFORE any guest nodes/SSBO access.
+  The valid path executes real LoopMerge/Phi with runtime bound. This guard
+  prevents unbounded execution even if a caller uses raw backend dispatch.
+  Raw backend bypasses the checked Status contract: invalid count produces
+  no SSBO effects but may return success from Vulkan. Use checked dispatch
+  for an explicit count error. No silent clamping occurs in either path.
+- LoopAddUniform has initial/delta SSA refs in a/b and count UniformInput
+  node in c. Emitter requires the declared guard index to match that direct
+  node, not arbitrary arithmetic/forward/store result. The input node may
+  be shared by scalar aliases. Entry guard works for all invocations, and
+  its branch composes with later load guards and loop header Phi predecessor.
+- Seven additional modules validate for Vulkan 1.0 and execute on lavapipe:
+  direct/copy-and-overwrite counts for 1/8/64 invocations plus s15 input.
+  Each main module reuses compiled SPIR-V for 1/2/16/64 trip counts and
+  zero/one/0xffffffff deltas. Whole buffers match exact wraparound outputs,
+  unchanged inputs and sentinel. Invalid counts 0/65/0x80000000/0xffffffff
+  are rejected before Vulkan on an unopened backend and a ready backend;
+  raw dispatch also proves the GPU guard leaves every word unchanged.
+  Byte API retains count metadata and exact module. Negative checks cover
+  undeclared/computed/special/reduction counts, missing/extra inputs, bad
+  metadata, guard-index mismatch, absent entry guard and malformed count IR.
+- No zero-trip for-loop interpretation, new guest error mechanism, wave
+  semantics, generalized scalar expression evaluator or dynamic unbounded
+  loops are implied. Constant-count tests and restrictions remain in force.
