@@ -39,6 +39,11 @@ ImportResult import_package(const std::string& package_path,
                             const std::string& library_root,
                             pnr::library::GameDb& db);
 
+// Read-only: runs every import validation (structure, manifest, SHA-256
+// checksums, x86-64 ELF entry point) and writes nothing: no extraction, no
+// library change. status.ok means import_package would accept the package.
+ImportResult inspect_package(const std::string& package_path);
+
 // Builds a .pnrgame from a manifest + payload files (dev tooling).
 Status build_package(const std::string& out_path, const Manifest& m,
                      const std::vector<std::pair<std::string, std::string>>&
