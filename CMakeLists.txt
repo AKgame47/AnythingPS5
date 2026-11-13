@@ -2,7 +2,7 @@
 # Research/prototype build. C++20 core; Rust crates are planned but no
 # Rust toolchain exists in the current dev sandbox (documented, not faked).
 cmake_minimum_required(VERSION 3.16)
-project(pnr_runtime VERSION 0.1.0 LANGUAGES CXX)
+project(pnr_runtime VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,8 +26,12 @@ target_link_libraries(pnr_loader PUBLIC pnr_core)
 add_library(pnr_compat compat/services.cpp)
 target_link_libraries(pnr_compat PUBLIC pnr_core)
 
-# MODULE 07 - host OS abstraction (Linux backend; Windows backend planned)
-add_library(pnr_platform platform/host_linux.cpp)
+# MODULE 07 - host OS abstraction (Linux + Windows backends)
+if(WIN32)
+  add_library(pnr_platform platform/host_windows_stub.cpp)
+else()
+  add_library(pnr_platform platform/host_linux.cpp)
+endif()
 target_link_libraries(pnr_platform PUBLIC pnr_core)
 
 # Installer - .pnrgame package format + controlled importer
@@ -37,13 +41,29 @@ target_link_libraries(pnr_package PUBLIC pnr_core pnr_loader)
 # MODULE 09 - game library metadata (SQLite)
 # The dev sandbox ships libsqlite3.so without dev headers; the repo carries
 # a minimal API shim (library/sqlite3_shim.h). With real headers installed,
-# add -DPNR_USE_SYSTEM_SQLITE3 and link the normal way.
-find_library(SQLITE3_LIBRARY NAMES sqlite3 libsqlite3.so.0)
-if(NOT SQLITE3_LIBRARY)
-  message(FATAL_ERROR "libsqlite3 runtime not found; library module cannot build")
+# add -DPNR_USE_SYSTEM_SQLITE3 and link the normal way. On Windows there is
+# no system SQLite, so build the official amalgamation instead:
+#   -DPNR_SQLITE3_AMALGAMATION=<dir containing sqlite3.c/sqlite3.h>
+if(WIN32)
+  set(PNR_SQLITE3_AMALGAMATION "" CACHE PATH "Directory containing sqlite3.c and sqlite3.h")
+  if(NOT PNR_SQLITE3_AMALGAMATION)
+    message(FATAL_ERROR "Windows builds need -DPNR_SQLITE3_AMALGAMATION=<sqlite amalgamation dir>")
+  endif()
+  add_library(pnr_sqlite3 STATIC ${PNR_SQLITE3_AMALGAMATION}/sqlite3.c)
+  target_include_directories(pnr_sqlite3 PUBLIC ${PNR_SQLITE3_AMALGAMATION})
+  set(SQLITE3_LIBRARY pnr_sqlite3)
+  set(PNR_SQLITE3_DEFINE PNR_USE_SYSTEM_SQLITE3)
+else()
+  find_library(SQLITE3_LIBRARY NAMES sqlite3 libsqlite3.so.0)
+  if(NOT SQLITE3_LIBRARY)
+    message(FATAL_ERROR "libsqlite3 runtime not found; library module cannot build")
+  endif()
 endif()
 add_library(pnr_library library/game_db.cpp)
 target_link_libraries(pnr_library PUBLIC pnr_core ${SQLITE3_LIBRARY})
+if(PNR_SQLITE3_DEFINE)
+  target_compile_definitions(pnr_library PUBLIC ${PNR_SQLITE3_DEFINE})
+endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(pnr_compat PUBLIC Threads::Threads)
