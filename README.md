@@ -19,7 +19,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | ELF64 binary parser + validator (bounds-checked, specific errors) | Implemented, Tested |
 | Native loader: validated binaries executed in a supervised separate process | Implemented (Linux), Tested |
 | PS NID computation + symbol lookup (SHA-1 based; algorithm adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5), GPL-2.0) | Implemented, Tested |
-| PRX system-library layer: libkernel (usleep/sleep/alloc/free/thread/mmap/mprotect/munmap/query) + libSceLibcInternal (printf-bounded/malloc/free/memcpy/memset/strlen/strcmp) bound by NID; taxonomy per AnyPS5, original implementations | Implemented, Tested |
+| PRX system-library layer: libkernel (usleep/sleep/alloc/free/thread/mmap/mprotect/munmap/query; jailed file calls open/read/write/close/lseek/fstat) + libSceLibcInternal (printf-bounded/malloc/free/memcpy/memset/strlen/strcmp) bound by NID; taxonomy per AnyPS5, original implementations | Implemented, Tested |
 | Loader import resolution: ELF dynamic imports classified host / prx-implemented / prx-declared / unknown at launch; unimplemented never faked | Implemented, Tested |
 | Compat services: memory, timing, jailed filesystem, threads | Implemented, Tested |
 | Host OS abstraction (IF-OS): Linux backend (CPU/memory/power/process launch) | Implemented (Linux), Tested |
@@ -39,7 +39,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**171/171 unit tests pass, 3/3 CTest suites pass** (unit, end-to-end native
+**189/189 unit tests pass, 3/3 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
 game). No benchmarks exist yet; none are claimed.
 
