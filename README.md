@@ -40,7 +40,7 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2110/2110 unit tests, 17/17 CTest suites** on a fresh Linux
+Test state: **2167/2167 unit tests, 17/17 CTest suites** on a fresh Linux
 Release `-Werror` build (details in the capability section below).
 
 ## Rendered output
@@ -200,11 +200,11 @@ compiles but cannot run ELF games.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2110/2110 unit tests pass, 17/17 CTest suites pass** (unit, end-to-end native
+**2167/2167 unit tests pass, 17/17 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
-and on a build against the official Vulkan headers. ASan+UBSan: 2110/2110
+and on a build against the official Vulkan headers. ASan+UBSan: 2167/2167
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -1139,6 +1139,7 @@ STORE REFRESH
 | Store Ed25519 per-source key pinning, signature required at install | Implemented, Tested (RFC 8032 vectors, fakes); re-checked at launch (retained package + signature) |
 | Linux sandbox for launches (`launch --sandbox`): user/net/PID/IPC/UTS namespaces, seccomp denylist, no silent fallback, label PARTIAL | Implemented, Tested here (see docs/sandbox.md) |
 | Sandbox filesystem isolation (B2b): pivot_root onto a private tmpfs root holding only system dirs (ro), the game dir (ro), its jail (rw) and a private /tmp, /dev, /proc; fails loudly if unavailable | Implemented, Tested here on one Linux host; label stays PARTIAL |
+| Research tools (C1): hash-chained research log, user-supplied-URL resumable fetch with optional enforced SHA-256 (Sony hosts refused), read-only inspect of PNR formats (Sony containers recognised by magic only, never opened) | Implemented, Tested here with a fake HTTP server; no real host tested (see docs/research.md) |
 | Windows sandbox | Planned (notes only) |
 | Store scan pipeline: hash always on, EMBER2024 model stage via external helper (OFF unless model+helper present), ClamAV (OFF unless installed); flagged blocks install; see docs/scan.md | Implemented + Tested with fakes; model stage Experimental, never run against a real model or ClamAV |
 | Research engine, Needle 2 front end, filesystem isolation for the sandbox | Planned |
