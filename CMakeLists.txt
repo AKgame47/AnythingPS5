@@ -113,6 +113,9 @@ add_executable(pnr_test_app examples/test_app.cpp)
 add_executable(ps_demo examples/ps_demo.cpp)
 target_link_libraries(ps_demo PRIVATE pnr_psabi)
 set_target_properties(ps_demo PROPERTIES BUILD_RPATH "$ORIGIN")
+add_executable(ps_mesh_demo examples/ps_mesh_demo.cpp)
+target_link_libraries(ps_mesh_demo PRIVATE pnr_psabi)
+set_target_properties(ps_mesh_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 add_executable(ps_cube_demo examples/ps_cube_demo.cpp)
 target_link_libraries(ps_cube_demo PRIVATE pnr_psabi)
 set_target_properties(ps_cube_demo PROPERTIES BUILD_RPATH "$ORIGIN")
@@ -125,16 +128,22 @@ add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_mem
 target_compile_definitions(pnr_tests PRIVATE
   PNR_PS_DEMO_PATH="$<TARGET_FILE:ps_demo>"
   PNR_PS_CUBE_DEMO_PATH="$<TARGET_FILE:ps_cube_demo>"
+  PNR_PS_MESH_DEMO_PATH="$<TARGET_FILE:ps_mesh_demo>"
   PNR_PSABI_DIR="$<TARGET_FILE_DIR:pnr_psabi>")
 target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics pnr_shader)
 
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
 # The CLI runs a game that renders a rotating 3D cube through pnrGfx* calls.
 add_test(NAME pnr_cube_run COMMAND pnr run $<TARGET_FILE:ps_cube_demo>)
+add_test(NAME pnr_mesh_run COMMAND pnr run $<TARGET_FILE:ps_mesh_demo>)
 set_tests_properties(pnr_cube_run PROPERTIES
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   PASS_REGULAR_EXPRESSION "RESULT: RUN OK"
   FAIL_REGULAR_EXPRESSION "FAILED;BLOCKED;ps_cube_demo: FAIL;SKIPPED   demo app")
+set_tests_properties(pnr_mesh_run PROPERTIES
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  PASS_REGULAR_EXPRESSION "RESULT: RUN OK"
+  FAIL_REGULAR_EXPRESSION "FAILED;BLOCKED;ps_mesh_demo: FAIL;SKIPPED   demo app")
 # End-to-end: the CLI validates and natively runs the demo app.
 add_test(NAME pnr_end_to_end
          COMMAND pnr run $<TARGET_FILE:pnr_test_app>)
