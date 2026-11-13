@@ -6,8 +6,10 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 
 #include "psn/psn.hpp"
+#include "psn/sync.hpp"
 
 namespace pnr::psn {
 namespace {
@@ -68,7 +70,7 @@ int cmd_status(library::GameDb& db, const std::string& tp, bool json, std::strin
            ",\"last_sync\":" + q(when(last)) + "}\n";
     return 0;
   }
-  *out = "PSN CONNECTOR STATUS (offline core: contains no network code, nothing here contacts Sony)\n";
+  *out = "PSN CONNECTOR STATUS (this command is local; only `psn sync` contacts Sony, and that is Untested against real Sony)\n";
   *out += "token file: " + tp + "\n";
   *out += std::string("token: ") + tstate + "\n";
   if (ti.exists && ti.regular && !ti.perms_checked) *out += "permissions: not checked on Windows (owner-only hardening is Planned)\n";
@@ -115,6 +117,48 @@ int cmd_import_json(library::GameDb& db, const std::string& file, bool complete,
   for (auto& n : rep.notes) *out += "  note: " + n + "\n";
   *out += complete ? "  mode: complete (entries absent from this file are marked, never deleted)\n"
                    : "  mode: merge (nothing is marked missing; use --complete when the file is the whole library)\n";
+  *out += kBanner;
+  return 0;
+}
+
+int cmd_sync(library::GameDb& db, const std::string& tp, bool complete, bool json, std::string* out, HttpClient* client) {
+  std::string tok;
+  Status s = token_load(tp, &tok);
+  if (!s) { *out = fail_out(s, json); return 1; }
+  std::unique_ptr<HttpClient> own;
+  if (!client) {
+    Status cs;
+    own = make_curl_client(CurlOptions{}, &cs);
+    if (!own) { *out = fail_out(cs, json); return 1; }
+    client = own.get();
+  }
+  std::vector<library::OwnedRecord> rows;
+  SyncReport rep;
+  s = fetch_purchased_games(*client, tok, SyncOptions{}, &rows, &rep);
+  tok.assign(tok.size(), '\0');
+  if (!s) { *out = fail_out(s, json); if (!json) *out += "nothing was changed; the library is unchanged\n"; return 1; }
+  // A short paging run (page cap) is never treated as the whole library.
+  const bool mark = complete && rep.complete;
+  library::OwnedSyncCounts c;
+  s = db.sync_owned(rows, mark, static_cast<double>(std::time(nullptr)), &c);
+  if (!s) { *out = fail_out(Status::Fail(kErrLibrary, "psn", "library write failed: " + scrub(s.error.message)), json); return 1; }
+  if (json) {
+    *out = "{\"ok\":true,\"live\":true,\"complete_requested\":" + std::string(complete ? "true" : "false") + ",\"complete_applied\":" + (mark ? "true" : "false") +
+           ",\"pages\":" + std::to_string(rep.pages) + ",\"refreshes\":" + std::to_string(rep.refreshes) + ",\"accepted\":" + std::to_string(rep.parse.accepted) +
+           ",\"skipped_invalid\":" + std::to_string(rep.parse.skipped_invalid) + ",\"added\":" + std::to_string(c.added) + ",\"updated\":" + std::to_string(c.updated) +
+           ",\"unchanged\":" + std::to_string(c.unchanged) + ",\"restored\":" + std::to_string(c.restored) + ",\"marked_missing\":" + std::to_string(c.marked_missing) + "}\n";
+    return 0;
+  }
+  *out = "PSN SYNC OK (live request to Sony's official hosts; token kept in memory only)\n";
+  *out += "  pages " + std::to_string(rep.pages) + ", entries accepted " + std::to_string(rep.parse.accepted) + ", skipped invalid " + std::to_string(rep.parse.skipped_invalid) +
+          ", token refreshes " + std::to_string(rep.refreshes) + "\n";
+  *out += "  added " + std::to_string(c.added) + ", updated " + std::to_string(c.updated) + ", unchanged " + std::to_string(c.unchanged) +
+          ", restored " + std::to_string(c.restored) + ", marked not-returned " + std::to_string(c.marked_missing) + "\n";
+  for (auto& n : rep.parse.notes) *out += "  note: " + n + "\n";
+  if (complete && !rep.complete) *out += "  note: paging hit its cap, so --complete was NOT applied\n";
+  *out += mark ? "  mode: complete (absent entries are marked, never deleted)\n"
+               : "  mode: merge (nothing is marked missing; the request asks for active licences only, so --complete can mislabel inactive ones)\n";
+  *out += "  status: Untested against real Sony until you have run this with your own token\n";
   *out += kBanner;
   return 0;
 }
