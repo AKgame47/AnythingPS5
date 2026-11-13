@@ -155,6 +155,9 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
     if (n.op == U32Op::Constant) {
       ids[i] = next++;
       inst(m, spv::OpConstant, {6, ids[i], n.a});
+    } else if(n.op==U32Op::LoopAdd) {
+      if(!n.c || n.c>64)return {};
+      indices[i]=next++;inst(m,spv::OpConstant,{6,indices[i],n.c});
     } else if(n.op==U32Op::GuardedLoad64 || n.op==U32Op::GuardedStore64) {
       if(n.d>2047)return {};
       indices[i]=next++;inst(m,spv::OpConstant,{6,indices[i],n.d});
@@ -195,6 +198,22 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
       ids[i]=next++;
       inst(m,245,{6,ids[i],ids[n.c],yes,ids[n.d],no});
       current_label=merge;
+      continue;
+    }
+    if(n.op==U32Op::LoopAdd) {
+      if(n.a>=i || n.b>=i || !ids[n.a] || !ids[n.b])return {};
+      const uint32_t header=next++,body=next++,cont=next++,merge=next++;
+      const uint32_t acc=next++,count=next++,updated=next++,incremented=next++,cond=next++;
+      inst(m,249,{header});inst(m,spv::OpLabel,{header});
+      inst(m,245,{6,acc,ids[n.a],current_label,updated,cont});
+      inst(m,245,{6,count,10,current_label,incremented,cont});
+      inst(m,176,{15,cond,count,indices[i]});
+      inst(m,246,{merge,cont,0}); // OpLoopMerge, no control hints
+      inst(m,250,{cond,body,merge});
+      inst(m,spv::OpLabel,{body});inst(m,128,{6,updated,acc,ids[n.b]});
+      inst(m,249,{cont});inst(m,spv::OpLabel,{cont});
+      inst(m,128,{6,incremented,count,27});inst(m,249,{header});
+      inst(m,spv::OpLabel,{merge});ids[i]=acc;current_label=merge;
       continue;
     }
     if(n.op==U32Op::CarryAdd || n.op==U32Op::BorrowSub) {
