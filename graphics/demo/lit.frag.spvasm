@@ -1,0 +1,42 @@
+; PNR hand-authored lit fragment shader: rgb = colour * (0.25 + 0.75 * max(d, 0)),
+; alpha 1. d is the interpolated Lambert dot from the vertex stage. GPL-2.0.
+               OpCapability Shader
+          %ext = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %inCol %inD %outCol
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %inCol Location 0
+               OpDecorate %inD Location 1
+               OpDecorate %outCol Location 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+         %v3 = OpTypeVector %float 3
+         %v4 = OpTypeVector %float 4
+         %f0 = OpConstant %float 0
+         %f1 = OpConstant %float 1
+       %famb = OpConstant %float 0.25
+      %fdiff = OpConstant %float 0.75
+        %pi3 = OpTypePointer Input %v3
+        %pif = OpTypePointer Input %float
+        %po4 = OpTypePointer Output %v4
+      %inCol = OpVariable %pi3 Input
+        %inD = OpVariable %pif Input
+     %outCol = OpVariable %po4 Output
+       %main = OpFunction %void None %fn
+          %e = OpLabel
+          %c = OpLoad %v3 %inCol
+          %d = OpLoad %float %inD
+         %dc = OpExtInst %float %ext FMax %d %f0
+         %dm = OpFMul %float %dc %fdiff
+          %k = OpFAdd %float %famb %dm
+         %r0 = OpCompositeExtract %float %c 0
+         %g0 = OpCompositeExtract %float %c 1
+         %b0 = OpCompositeExtract %float %c 2
+          %r = OpFMul %float %r0 %k
+          %g = OpFMul %float %g0 %k
+          %b = OpFMul %float %b0 %k
+        %out = OpCompositeConstruct %v4 %r %g %b %f1
+               OpStore %outCol %out
+               OpReturn
+               OpFunctionEnd
