@@ -1,5 +1,8 @@
 // pnr-launcher: headless launcher front end (text or --json). NOT a desktop UI.
 // Library: ./pnr_data/library.db (override with PNR_LIBRARY_DB). GPL-2.0.
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +16,7 @@
 
 #include "launcher/launcher_core.hpp"
 #include "sandbox/sandbox.hpp"
+#include "ask/ask.hpp"
 #include "research/research.hpp"
 #include "scan/scan.hpp"
 #include "psn/psn_cli.hpp"
@@ -39,6 +43,7 @@ static void usage() {
             "  pnr-launcher store source add <id> <https-index-url> --rights <statement> | store source remove <id> [--yes] | store source list\n"
             "  pnr-launcher store get <source> <package> | store queue list|run [<source> <package>] | store queue pause|resume|cancel <source> <package> [--yes] | store install <source> <package>\n"
             "  pnr-launcher store refresh [id] | store search [text] [--source id] | store show <source> <package> [--json]\n"
+            "  pnr-launcher ask \"<sentence>\" [--threshold 0.8]   (EXPERIMENTAL; needs PNR_NEEDLE; mutating commands always ask you first)\n"
             "  pnr-launcher research log add <text> | log list [--limit N] | log verify   (append-only, hash-chained)\n"
             "  pnr-launcher research fetch <https-url> <out-file> --rights <statement> [--sha256 HEX] [--force]   (user-supplied URL only)\n"
             "  pnr-launcher research inspect <file> [--log]   (read-only; recognises PNR formats, never opens Sony packages)\n"
@@ -58,7 +63,7 @@ int main(int argc, char** argv) {
   std::vector<std::string> pos, gameargs;
   bool after = false, complete = false, forget = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
   bool sandbox_on = false, allow_flagged = false, force = false, log_it = false;
-  std::string sha256_arg;
+  std::string sha256_arg, threshold_s = "0.8";
   std::string note, limit_s = "20", file, platform, rights, source;
   for (size_t i = 1; i < a.size(); ++i) {
     if (after) gameargs.push_back(a[i]);
@@ -68,6 +73,7 @@ int main(int argc, char** argv) {
     else if (a[i] == "--sandbox") sandbox_on = true;
     else if (a[i] == "--allow-flagged") allow_flagged = true;
     else if (a[i] == "--force") force = true;
+    else if (a[i] == "--threshold" && i + 1 < a.size()) threshold_s = a[++i];
     else if (a[i] == "--log") log_it = true;
     else if (a[i] == "--sha256" && i + 1 < a.size()) sha256_arg = a[++i];
     else if (a[i] == "--overwrite") overwrite = true;
@@ -200,6 +206,30 @@ int main(int argc, char** argv) {
   } else if (a[0] == "sandbox" && pos.size() == 1 && pos[0] == "probe") {
     std::fputs(pnr::sandbox::describe(pnr::sandbox::probe()).c_str(), stdout);
     rc = 0;
+  } else if (a[0] == "ask" && pos.size() == 1) {
+    const char* nb = std::getenv("PNR_NEEDLE");
+    pnr::store::Registry areg(pnr::store::store_dir_for(dbp ? dbp : "./pnr_data/library.db"));
+    areg.load();
+    pnr::ask::Lookups lk;
+    lk.game_exists = [&](const std::string& id) { pnr::launcher::GameEntry ge; return core.get(id, &ge); };
+    lk.source_exists = [&](const std::string& id) { return areg.find(id) != nullptr; };
+    lk.package_exists = [&](const std::string& s, const std::string& p) { pnr::store::Index ix; if (!areg.load_index(s, &ix)) return false; for (const auto& k : ix.packages) if (k.id == p) return true; return false; };
+    pnr::ask::AskIO io;
+    io.interactive = ::isatty(0) && ::isatty(1);
+    io.confirm = [](const std::string& cmd) {
+      std::printf("run this? %s  [y/N] ", cmd.c_str()); std::fflush(stdout);
+      char buf[16] = {0}; if (!std::fgets(buf, sizeof buf, stdin)) return false;
+      return (buf[0] == 'y' || buf[0] == 'Y') && (buf[1] == '\n' || buf[1] == 0 || ((buf[1] == 'e' || buf[1] == 'E') && (buf[2] == 's' || buf[2] == 'S'))); };
+    io.runner = [](const std::vector<std::string>& av, std::string*) {  // re-runs this very program, no shell, output goes straight to the terminal
+      char self[4096]; ssize_t n = ::readlink("/proc/self/exe", self, sizeof self - 1); if (n <= 0) return 1; self[n] = 0;
+      std::fflush(stdout);
+      pid_t c = ::fork(); if (c < 0) return 1;
+      if (c == 0) { std::vector<char*> v; v.push_back(self); for (const auto& s : av) v.push_back(const_cast<char*>(s.c_str())); v.push_back(nullptr); ::execv(self, v.data()); _exit(127); }
+      int st = 0; while (::waitpid(c, &st, 0) < 0) {}
+      return WIFEXITED(st) ? WEXITSTATUS(st) : 1; };
+    std::string out;
+    rc = pnr::ask::cmd_ask(pos[0], nb ? nb : "", std::atof(threshold_s.c_str()), lk, io, &out);
+    std::fputs(out.c_str(), stdout);
   } else if (a[0] == "research" && !pos.empty()) {
     pnr::research::CliOptions ro; ro.rights = rights; ro.expect_sha256 = sha256_arg; ro.limit = limit_s; ro.json = json; ro.force = force; ro.log_it = log_it;
     std::string out;
