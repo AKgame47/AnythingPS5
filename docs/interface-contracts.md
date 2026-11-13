@@ -435,7 +435,7 @@ Status: Experimental, Implemented (strict subset), Tested.
   dispatch for this ABI. This is not general PS5 shader launch support.
 
 
-### Strict conditional selection (single-invocation only)
+### Strict conditional selection (uniform workgroup decisions)
 
 - Supports `v_readfirstlane_b32` (defined VGPR to ordinary SGPR) only with
   local_size_x=1; one invocation means no wave reduction is invented.
@@ -453,20 +453,54 @@ Status: Experimental, Implemented (strict subset), Tested.
   This lowers the restricted guest branch into conditional value selection,
   not general CFG structurization. Pure move aliases can be computed before
   selection because they cannot fault or have external effects.
-- Conditional SSA nodes deliberately discard constant/address-affine facts.
-  A selected address can still use single-invocation runtime bounds guards.
+- Conditional SSA preserves constants only when both alternatives have the
+  same constant; affine origin/stride only when BOTH alternatives have the
+  identical proven map. Otherwise it discards those facts. A selected address
+  can still use single-invocation runtime guards; in multi-mode the usual
+  affine/alignment/range/disjoint-address proof must succeed after merging.
   `conditional_selection=true` identifies this path.
 - Rejects backward/zero/out-of-program/non-boundary targets, undefined SCC
   or SGPRs, special scalar destinations, SCC1/other compare kinds, loops,
   nested/repeated branches, conditional loads/stores/ALU/scalar effects,
-  undefined skipped-path VGPRs and all multi-invocation scalar branching.
+  undefined skipped-path VGPRs and multi-mode readfirstlane. Multi-mode
+  compares use only constants/uniform SGPRs, as described below.
 - Validation tests cover four modules: runtime register selection, dependent
   multi-register moves, literal move with exact PC/word count, and selected
   address feeding a guarded load. Each validates for Vulkan 1.0 and runs
   both equality outcomes on lavapipe, with whole-buffer checks for the
   base module and focused output checks for the additional shapes.
-- No general PS5 branch, VCC/EXEC, scalar ALU flags, wave convergence,
-  divergent multi-invocation control flow or commercial shader support.
+- No general PS5 branch, VCC/EXEC, arbitrary scalar ALU flags, wave
+  convergence, divergent multi-invocation control flow or commercial shaders.
+
+### Workgroup-uniform conditional extension
+
+- The same strict forward equality skip now accepts local_size_x=2..64.
+  All SGPRs in multi-mode originate from declared runtime push constants,
+  scalar copies or constants. Scalar-source instruction fields cannot encode
+  VGPR operands. readfirstlane remains rejected, as does carry arithmetic in
+  multi-mode. Thus SCC comparison/decision is uniform across the workgroup.
+  This is scalar SCC semantics, not independent per-lane scalar branching.
+- Move-only bodies may select values which differ by invocation: lane index,
+  SSBO data, or previous pure vector results. Dependent/multiple moves merge
+  independently with Phi nodes. No body loads/stores/barriers or side effects
+  are speculated. Selected address alternatives must retain the identical
+  proven affine map in multi-mode; otherwise translation fails conservatively.
+  The output must still be stride-four and disjoint from every load range.
+- Six modules (2, 8, 64 invocations, two varying-data bodies) validate for
+  Vulkan 1.0 and execute on lavapipe. Each reuses the same compiled module
+  with nine uniform pairs (zero, seven, 0xffffffff) covering both outcomes.
+  Whole-buffer checks verify every selected lane result, inputs and sentinel.
+  One body uses dependent moves from per-lane SSBO input, the other selects
+  invocation index. Both merge identical affine pointer alternatives.
+  Byte API output matches word API with local size and conditional metadata.
+- Negative coverage includes undefined/SCC-special compare sources, missing
+  compare, wave readfirstlane, backward jump/non-boundary literal target,
+  nested region, scalar/body-memory effects, undefined skipped-path values,
+  different/misaligned/data-derived selected pointers, overlapping input and
+  output, colliding stores and undeclared scalar input.
+- Existing one-invocation selected-pointer guard composition is unchanged.
+  No new GPU capability, subgroup/wave operation or divergent guest CFG is
+  implemented by this extension.
 
 
 ## Shader audit fixtures
