@@ -313,7 +313,7 @@ int main() {
     auto g = db.get_game("demo-game");
     CHECK(g && g->title == "PNR Demo Game", "db: get game");
     CHECK(db.set_installation(
-              {"demo-game", "/tmp/wherever", "0.1.0", "verified"}),
+              {"demo-game", "/tmp/wherever", "0.1.0", "verified", ""}),
           "db: set installation");
     auto inst = db.get_installation("demo-game");
     CHECK(inst && inst->integrity == "verified", "db: get installation");
@@ -1647,6 +1647,13 @@ int main() {
     }
   }
 
+  {
+    auto d=pnr::shader::rdna_decode({0x8000ffff,0x12345678,0xbf810000});
+    CHECK(d.ok && d.instructions.size()==2 && d.instructions[0].word_count==2 &&
+          d.instructions[0].src0.value==0x12345678 && d.instructions[0].src1.value==0x12345678 &&
+          d.instructions[1].pc==8,"audit: shared scalar literal consumed exactly once");
+    CHECK(!pnr::shader::rdna_decode({0x8000ffff}).ok,"audit: shared literal truncation rejected");
+  }
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
