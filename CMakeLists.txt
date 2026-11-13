@@ -247,6 +247,8 @@ add_test(NAME pnr_store_workflow
     -DMAKE=$<TARGET_FILE:pnr_make_package>
     -DLAUNCHER=$<TARGET_FILE:pnr-launcher>
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/store_workflow.cmake)
+add_test(NAME pnr_docs_claims
+  COMMAND ${CMAKE_COMMAND} -DREPO=${CMAKE_CURRENT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/docs_claims.cmake)
 set_tests_properties(pnr_store_workflow PROPERTIES
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
