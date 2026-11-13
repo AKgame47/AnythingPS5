@@ -62,4 +62,15 @@ SceInt32 sceKernelFree(void* ptr);
 SceInt32 sceKernelSleep(std::uint32_t seconds);
 SceInt32 sceKernelCreateThread(const char* name, void (*entry)(void*), void* arg);
 
+// Host implementations (libSceLibcInternal subset). printf is a bounded
+// formatter: %d %i %u %x %s %c %% only, at most 8 variadic args - the
+// honest limit of a NID trampoline; anything else prints literally.
+void* sce_libc_memcpy(void* dst, const void* src, std::size_t n);
+void* sce_libc_memset(void* dst, int c, std::size_t n);
+std::size_t sce_libc_strlen(const char* s);
+int sce_libc_strcmp(const char* a, const char* b);
+void* sce_libc_malloc(std::size_t size);
+void sce_libc_free(void* ptr);
+int sce_libc_printf(const char* fmt, const std::vector<std::int64_t>& args);
+
 }  // namespace pnr::prx
