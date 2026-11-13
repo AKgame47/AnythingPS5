@@ -198,3 +198,21 @@ MISMATCH. Non-packages fail at archive validation.
 - `PowerMode`: battery_saver / balanced / max_performance with fixed `Caps{fps_cap, min_resolution_scale_pct, max_background_tasks}` (30/50%/1, 60/75%/2, 120/100%/4).
 - `default_mode(HardwareFacts)`: on battery -> saver; plugged in OR unknown -> balanced (unknown power state is never assumed to be AC).
 - `apply_caps(Caps, QualitySettings&)`: applies caps as bounds to APE quality settings.
+
+## IF-SVC-01 Virtual Filesystem (v1) — Implemented, Tested
+
+- `VirtualFileSystem(root)`: one jailed sub-directory per area (installed content, user config, save data, shader cache, runtime cache, compat metadata, logs).
+- `saves(user_id, game_id)`: per-game, per-user save area; ids are validated (non-empty, no path separators, no `..`, no leading `.`) and invalid ids throw `std::invalid_argument`. Save areas are isolated: one user cannot read another user's saves through the API.
+- All path resolution goes through the Module 03 jailed `FileSystemService`; traversal outside an area root is rejected.
+
+## IF-SVC-02 Audio (v1) — Interface Implemented, host backends Planned
+
+- `IAudioBackend::enumerate() -> vector<AudioDeviceInfo>`: reports what the host actually exposes; empty when no device API is available.
+- `IAudioBackend::open_stream(device_id, out) -> Status`: fails with an explicit error when no backend exists (never a silent dummy).
+- Only the null backend ships today (no audio device API in the dev sandbox). No PS5 audio algorithm is claimed.
+
+## IF-SVC-03 Input (v1) — Implemented, Tested
+
+- `IInputBackend::enumerate() -> vector<InputDeviceInfo>`; the Linux backend scans `/dev/input` read-only.
+- `InputMapper::load(profile_text)`: ini-style `action = control` bindings; malformed lines fail with the line number. `translate(raw)` maps raw control events to actions.
+- `VirtualInputDevice`: scripted device for tests and demos. Advanced controller features are exposed only when a device reports them.
