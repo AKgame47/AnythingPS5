@@ -100,12 +100,17 @@ target_link_libraries(pnr_compat PUBLIC Threads::Threads)
 target_link_libraries(pnr_loader PUBLIC Threads::Threads pnr_platform)
 target_link_libraries(pnr_package PUBLIC pnr_library)
 
+# PSN connector, slice 1 (offline core: no network code)
+add_library(pnr_psn psn/json.cpp psn/psn.cpp psn/psn_cli.cpp)
+target_include_directories(pnr_psn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pnr_psn PUBLIC pnr_library pnr_core)
+
 # CLI launcher (STEP 1-10 workflow driver)
 add_library(pnr_launcher launcher/launcher_core.cpp)
 target_include_directories(pnr_launcher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pnr_launcher PUBLIC pnr_library pnr_loader pnr_core pnr_package pnr_prx)
 add_executable(pnr-launcher apps/launcher/launcher_main.cpp)
-target_link_libraries(pnr-launcher PRIVATE pnr_launcher)
+target_link_libraries(pnr-launcher PRIVATE pnr_launcher pnr_psn)
 add_executable(pnr apps/pnr_cli.cpp)
 target_link_libraries(pnr PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics)
 
@@ -136,7 +141,7 @@ set_target_properties(ps_cube_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
-add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp)
+add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp)
 
 # Let the tests launch the real PS-style demo binary.
 target_compile_definitions(pnr_tests PRIVATE
@@ -147,7 +152,7 @@ target_compile_definitions(pnr_tests PRIVATE
   PNR_PS_TEX_DEMO_PATH="$<TARGET_FILE:ps_tex_demo>"
   PNR_PS_LITTEX_DEMO_PATH="$<TARGET_FILE:ps_littex_demo>"
   PNR_PSABI_DIR="$<TARGET_FILE_DIR:pnr_psabi>")
-target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics pnr_shader pnr_launcher)
+target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics pnr_shader pnr_launcher pnr_psn)
 
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
 # The CLI runs a game that renders a rotating 3D cube through pnrGfx* calls.
@@ -227,6 +232,13 @@ add_test(NAME pnr_launcher_care_workflow
     -DLAUNCHER=$<TARGET_FILE:pnr-launcher>
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_care_workflow.cmake)
 set_tests_properties(pnr_launcher_care_workflow PROPERTIES
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+add_test(NAME pnr_psn_workflow
+  COMMAND ${CMAKE_COMMAND}
+    -DLAUNCHER=$<TARGET_FILE:pnr-launcher>
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/psn_workflow.cmake)
+set_tests_properties(pnr_psn_workflow PROPERTIES
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 # PS-style game journey: package a sce-only binary, import, run BY ID.
