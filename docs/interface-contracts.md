@@ -133,7 +133,9 @@ code ships yet; no Rust toolchain exists in the current dev sandbox.
 
 `pnr::platform::IHostPlatform` (platform/os.hpp):
 
-- `name()` → "linux" (Windows backend Planned).
+- `name()` → "linux" | "windows" (both backends Implemented; the Windows
+  backend reports real Win32 hwinfo and honestly refuses ELF process
+  launch as Blocked - see `platform/host_windows_stub.cpp`).
 - `cpu_logical_cores()`, `memory()` → optional MemoryInfo (absent when the
   host cannot report it), `monotonic_seconds()`.
 - `launch_process(path, args) → ProcessResult` — supervised child process:
