@@ -1100,7 +1100,7 @@ int main() {
     w = program(42); w[8] = 0xbf820000;
     rejected(w, "translate: branch rejected instead of ignored");
     w = program(42); w[6] = 0xdc300000;
-    rejected(w, "translate: load opcode rejected instead of guessed");
+    rejected(w, "translate: malformed load fields rejected");
     // Inline integer source and register copy use the same constant analysis.
     w = program(42); w[4] = 0x7e0402aa; w.erase(w.begin()+5);
     auto inline_r = translate_compute_words(w, base);
@@ -1138,6 +1138,122 @@ int main() {
                       vk.device_name().c_str(), v, io[0]);
         }
       } else CHECK(false, "translate: Vulkan device available");
+    }
+  }
+
+
+  // --- Dynamic integer translation: same module, different runtime data ---
+  {
+    using namespace pnr::shader;
+    using namespace pnr::graphics;
+    constexpr uint64_t base = 0x1234567800ull;
+    auto kernel = [](uint32_t op) {
+      // address v[0:1], load into v2, v3 = literal, ALU v2 = v2 OP v3,
+      // store v2. Destination aliases source: SSA must preserve old reads.
+      return std::vector<uint32_t>{0x7e0002ff, 0x34567800,
+        0x7e0202ff, 0x12, 0xdc300000, 0x027f0000,
+        0x7e0602ff, 0xf0f0aa55u,
+        (op<<25u) | (2u<<17u) | (3u<<9u) | 258u,
+        0xdc700000, 0x007f0200, 0xbf810000};
+    };
+    auto reject = [&](std::vector<uint32_t> w, const char* label) {
+      const auto r = translate_compute_words(w, base);
+      CHECK(!r.ok && !r.error.empty() && r.spirv.empty(), label);
+    };
+    auto w = kernel(0x25); w[5] |= 0x100;
+    reject(w, "dynamic: load VDATA must be zero");
+    w = kernel(0x25); w[5] &= ~0x7f0000u;
+    reject(w, "dynamic: scalar load address rejected");
+    w = kernel(0x25); w[4] |= 0x1000;
+    reject(w, "dynamic: load DLC rejected");
+    w = kernel(0x25); w[8] = (0x25u<<25u) | (2u<<17u) | (9u<<9u) | 258u;
+    reject(w, "dynamic: undefined ALU register rejected");
+    w = kernel(0x25); w[8] = (0x25u<<25u) | (2u<<17u) | (3u<<9u) | 249u;
+    reject(w, "dynamic: ALU SDWA rejected");
+    w = kernel(0x25); w[8] = (0x08u<<25u) | (2u<<17u) | (3u<<9u) | 258u;
+    reject(w, "dynamic: float ALU rejected");
+    w = kernel(0x25); w[5] = 0x007f0000; // load overwrites address v0
+    reject(w, "dynamic: runtime-dependent address rejected");
+    CHECK(SpirvModule::compute_u32({{U32Op::Add,0,0}}).empty(),
+          "dynamic: emitter rejects forward SSA references");
+    CHECK(SpirvModule::compute_u32({{U32Op::Constant,1}, {U32Op::Store,0},
+          {U32Op::Add,1,0}}).empty(), "dynamic: store cannot be read as value");
+    VulkanBackend vk;
+    auto st = vk.open();
+    if (!st) std::printf("    note: dynamic execution skipped: %s\n", st.error.message.c_str());
+    else {
+      st = vk.create_instance("pnr-dynamic-tests");
+      CHECK(st, "dynamic: Vulkan instance created");
+      if (st && !vk.devices().empty()) {
+        st = vk.create_device(0);
+        CHECK(st, "dynamic: compute device created");
+        if (st) for (uint32_t op : {0x25u,0x26u,0x1bu,0x1cu,0x1du}) {
+          auto t = translate_compute_words(kernel(op), base);
+          CHECK(t.ok && !t.stored_value_known, "dynamic: load/ALU emitted, result not invented");
+          // Check emitted opcodes directly, then validate the whole module.
+          bool load=false, alu=false;
+          const uint32_t expect_op = op==0x25 ? 128 : op==0x26 ? 130 :
+                                     op==0x1b ? 199 : op==0x1c ? 197 : 198;
+          for (size_t i=5; i<t.spirv.size();) {
+            load |= (t.spirv[i]&0xffffu)==61;
+            alu |= (t.spirv[i]&0xffffu)==expect_op;
+            if (!(t.spirv[i]>>16u)) break;
+            i += t.spirv[i]>>16u;
+          }
+          CHECK(load && alu, "dynamic: OpLoad and integer ALU present in SPIR-V");
+          const char* val = std::getenv("PNR_SPIRV_VAL");
+          if (val && std::filesystem::exists(val)) {
+            const std::string path = "/tmp/pnr_dynamic_" + std::to_string(::getpid()) + ".spv";
+            { std::ofstream o(path,std::ios::binary);
+              o.write(reinterpret_cast<const char*>(t.spirv.data()),t.spirv.size()*4); }
+            CHECK(std::system((std::string(val)+" --target-env vulkan1.0 "+path).c_str())==0,
+                  "dynamic: translated ALU module validates for Vulkan 1.0");
+            std::filesystem::remove(path);
+          } else std::puts("    note: dynamic spirv-val skipped (not configured)");
+          // No recompilation between runs: the input is genuinely runtime data.
+          for (uint32_t input : {0u,1u,0xffffffffu,0x12345678u}) {
+            constexpr uint32_t k=0xf0f0aa55u;
+            const uint32_t expected = op==0x25 ? input+k : op==0x26 ? input-k :
+                op==0x1b ? input&k : op==0x1c ? input|k : input^k;
+            std::vector<uint32_t> io = {input,0xcafebabe};
+            auto run=vk.run_compute_words(t.spirv,&io);
+            CHECK(run && io[0]==expected && io[1]==0xcafebabe,
+                  "dynamic: runtime input ALU readback matches uint32 semantics");
+            std::printf("    dynamic op=0x%x input=0x%08x readback=0x%08x expected=0x%08x\n",
+                        op,input,io[0],expected);
+          }
+        }
+        if (st) {
+          w = kernel(0x25);
+          // v4 = loaded v2, then overwrite v2 with 7. Store old value v4.
+          w[8] = 0x7e080302; w.insert(w.begin()+9,0x7e040287);
+          w[11]=0x007f0400;
+          auto t=translate_compute_words(w,base);
+          std::vector<uint32_t> io={0x87654321,0xabcdef01};
+          auto run=vk.run_compute_words(t.spirv,&io);
+          CHECK(t.ok && run && io[0]==0x87654321 && io[1]==0xabcdef01,
+                "dynamic: register copy survives later source overwrite");
+          // Chain all five ALUs; each result is a runtime SSA operand.
+          w=kernel(0x25);
+          for (uint32_t op : {0x26u,0x1bu,0x1cu,0x1du})
+            w.insert(w.end()-3,(op<<25u)|(2u<<17u)|(3u<<9u)|258u);
+          t=translate_compute_words(w,base); io={0x12345678,0xabcdef01};
+          uint32_t expect=0x12345678u;
+          expect+=0xf0f0aa55u; expect-=0xf0f0aa55u;
+          expect&=0xf0f0aa55u; expect|=0xf0f0aa55u; expect^=0xf0f0aa55u;
+          run=vk.run_compute_words(t.spirv,&io);
+          CHECK(t.ok && run && io[0]==expect && io[1]==0xabcdef01,
+                "dynamic: five dependent ALU instructions chain correctly");
+          w=kernel(0x25);
+          // VOP2 literal src0: 10 - loaded v2. Literal is an extra word.
+          w[8]=(0x26u<<25u)|(2u<<17u)|(2u<<9u)|255u;
+          w.insert(w.begin()+9,10);
+          t=translate_compute_words(w,base); io={11,0xabcdef01};
+          run=vk.run_compute_words(t.spirv,&io);
+          CHECK(t.ok && run && io[0]==0xffffffff && io[1]==0xabcdef01,
+                "dynamic: literal source and subtraction order preserved");
+        }
+      } else CHECK(false,"dynamic: physical device available");
     }
   }
 
