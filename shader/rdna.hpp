@@ -5,12 +5,12 @@
 // core/shader/recompiler/RdnaDecoder (boykopovar, GPL-2.0) - AnythingPS5 is
 // GPL-2.0, attribution preserved here and in docs.
 //
-// Honest scope: family detection + field extraction work for every RDNA
-// encoding family; MNEMONICS exist for a real named subset (scalar families
-// complete per the adapted tables, vector families partial). Opcodes
+// Honest scope: family detection/word walking cover the listed RDNA
+// encoding families; field extraction is partial; MNEMONICS exist for a real named subset (scalar families
+// partial in both scalar and vector families). Opcodes
 // outside the named subset decode structurally with supported=false -
 // never named, never guessed. SDWA/DPP modifiers and MIMG/MUBUF payload
-// fields are Planned.
+// fields other than the restricted FLAT store shape are Planned.
 // Status: Implemented (named subset), Tested.
 #pragma once
 #include <cstdint>
@@ -41,6 +41,9 @@ struct RdnaOperand {
 };
 
 struct RdnaInstruction {
+  uint32_t raw0 = 0, raw1 = 0;  // retained for strict modifier validation
+  uint32_t memory_offset = 0, memory_segment = 0;
+  uint32_t memory_data = 0, memory_addr = 0, memory_saddr = 0;
   uint32_t pc = 0;             // byte offset in the code stream
   RdnaFamily family = RdnaFamily::Unknown;
   uint32_t opcode_id = 0;      // raw opcode number inside the family
