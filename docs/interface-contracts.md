@@ -819,3 +819,7 @@ other loop-memory patterns remain rejected.
 ## render_frames_rgba
 
 `Status render_frames_rgba(w, h, vert_spirv, frag_spirv, vertices, frame_push, clear[4], &frames)`. `vertices` is interleaved float2 position + float3 colour (5 floats per vertex, count a multiple of 3, max 3000 vertices); vertex shader inputs are location 0 (vec2) and 1 (vec3). `frame_push` has one entry per frame (1..64 frames), each 1..16 words, same size for all, pushed to the vertex stage at offset 0. `frames[i]` is w*h*4 RGBA8 bytes. Same size and error rules as render_offscreen_rgba. Headless only.
+
+## render_mesh_frames_rgba
+
+`Status render_mesh_frames_rgba(w, h, vert_spirv, frag_spirv, vertices, indices, depth, frame_push, clear[4], &frames)`. `vertices`: float3 position + float3 colour per vertex (multiple of 6 floats, max 65536 vertices), vertex locations 0 and 1 (vec3). `indices`: uint32 triangle list, multiple of 3, max 30000, every index must be < vertex count. `depth` enables a D32_SFLOAT depth buffer (cleared to 1.0, LESS); fails with a named error when the device lacks D32 depth attachments. Push constants and frame rules as render_frames_rgba. Headless only.
