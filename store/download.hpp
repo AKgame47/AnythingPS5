@@ -25,6 +25,11 @@ struct DlState {
   long long size = 0, have = 0;  // have = bytes in the .part (or final) file now
 };
 
+// Slice B1b: provenance record written at install, re-checked before every launch.
+// <store>/provenance/<game_id>.prov, lines of key=value. Local file: it does not
+// defend against someone who can already rewrite your store directory.
+Status check_provenance(const std::string& store_dir, Registry& reg, const std::string& game_id, std::string* note);
+
 struct DownloadOptions {
   int max_retries = 3;
   int backoff_ms = 1000;                     // doubled per retry
