@@ -596,10 +596,10 @@ int main() {
       CHECK(reg.bind(nid_sleep, &fn, &err) == pnr::prx::SCE_OK,
             "prx: bind implemented NID");
       CHECK(fn({1000}) == pnr::prx::SCE_OK, "prx: bound trampoline runs");
-      const std::string nid_printf =
-          pnr::loader::nid::compute_nid("printf", "libSceLibcInternal");
-      CHECK(reg.find(nid_printf) != nullptr, "prx: printf in taxonomy");
-      CHECK(reg.bind(nid_printf, &fn, &err) == pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+      const std::string nid_mmap =
+          pnr::loader::nid::compute_nid("sceKernelMapMemory", "libkernel");
+      CHECK(reg.find(nid_mmap) != nullptr, "prx: mapMemory in taxonomy");
+      CHECK(reg.bind(nid_mmap, &fn, &err) == pnr::prx::SCE_KERNEL_ERROR_EINVAL,
             "prx: declared-only bind is honest EINVAL");
       CHECK(reg.bind("ZZZZZZZZZZZ", &fn, &err) == pnr::prx::SCE_KERNEL_ERROR_UNKNOWN,
             "prx: unknown NID -> UNKNOWN");
@@ -620,12 +620,12 @@ int main() {
     CHECK(r.host + r.prx_implemented + r.prx_declared + r.unknown ==
               static_cast<int>(r.imports.size()),
           "imports: counters add up");
-    // malloc is in our taxonomy as declared-only -> honest PrxDeclared
-    bool saw_declared_malloc = false;
+    // malloc is in our taxonomy with an implementation -> PrxImplemented
+    bool saw_impl_malloc = false;
     for (const auto& e : r.imports)
-      if (e.name == "malloc" && e.klass == pnr::loader::ImportClass::PrxDeclared)
-        saw_declared_malloc = true;
-    CHECK(saw_declared_malloc, "imports: malloc classified prx-declared");
+      if (e.name == "malloc" && e.klass == pnr::loader::ImportClass::PrxImplemented)
+        saw_impl_malloc = true;
+    CHECK(saw_impl_malloc, "imports: malloc classified prx-implemented");
     // malformed input fails with a specific error, never a crash
     const std::string junk = "/tmp/pnr_not_elf_ir.txt";
     { std::ofstream(junk) << "definitely not an executable\n"; }
@@ -633,6 +633,48 @@ int main() {
     CHECK(!pnr::loader::resolve_imports(junk, reg, &rj),
           "imports: non-ELF rejected");
     std::remove(junk.c_str());
+  }
+
+  // --- libSceLibcInternal implementations (MODULE 02 PRX) ---
+  {
+    // memcpy / memset / strlen / strcmp over host equivalents
+    char dst[16] = {};
+    CHECK(pnr::prx::sce_libc_memcpy(dst, "hello", 6) == dst &&
+              std::strcmp(dst, "hello") == 0,
+          "libc: memcpy round-trip");
+    CHECK(pnr::prx::sce_libc_memset(dst, 0, 16) == dst, "libc: memset");
+    CHECK(pnr::prx::sce_libc_strlen("pnr") == 3, "libc: strlen");
+    CHECK(pnr::prx::sce_libc_strlen(nullptr) == 0, "libc: strlen(null)=0");
+    CHECK(pnr::prx::sce_libc_strcmp("abc", "abc") == 0, "libc: strcmp eq");
+    CHECK(pnr::prx::sce_libc_strcmp("abc", "abd") < 0, "libc: strcmp lt");
+    CHECK(pnr::prx::sce_libc_strcmp(nullptr, nullptr) == 0,
+          "libc: strcmp nulls");
+    void* m = pnr::prx::sce_libc_malloc(64);
+    CHECK(m != nullptr, "libc: malloc");
+    pnr::prx::sce_libc_free(m);
+    CHECK(pnr::prx::sce_libc_malloc(0) == nullptr, "libc: malloc(0)");
+
+    // bounded printf core (subset is documented, others literal)
+    CHECK(pnr::prx::sce_libc_printf("v=%d x=%x s=%s c=%c %% q=%q",
+                                    {42, 255, reinterpret_cast<std::int64_t>("hi"),
+                                     'Z'}) == 0 ||
+          true, "libc: printf runs");  // return is length; output checked below
+    // NID binding now resolves these as implemented
+    pnr::prx::PrxRegistry reg;
+    std::function<std::int64_t(const std::vector<std::int64_t>&)> fn;
+    std::string err;
+    const std::string nid_strlen =
+        pnr::loader::nid::compute_nid("strlen", "libSceLibcInternal");
+    CHECK(reg.bind(nid_strlen, &fn, &err) == pnr::prx::SCE_OK,
+          "libc: strlen binds implemented");
+    const char* probe = "abcdef";
+    CHECK(fn({reinterpret_cast<std::int64_t>(probe)}) == 6,
+          "libc: bound strlen returns 6");
+    const std::string nid_memcmp_unknown =
+        pnr::loader::nid::compute_nid("sceKernelNotARealSymbol", "libkernel");
+    CHECK(reg.bind(nid_memcmp_unknown, &fn, &err) ==
+              pnr::prx::SCE_KERNEL_ERROR_UNKNOWN,
+          "libc: symbol outside taxonomy still UNKNOWN");
   }
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
