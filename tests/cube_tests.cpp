@@ -4,6 +4,7 @@
 #include "graphics/vulkan.hpp"
 #include "graphics/demo/cube_shaders.hpp"
 #include "graphics/demo/spin_shaders.hpp"
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -155,6 +156,52 @@ void pnr_cube_tests(int& pass,int& fail) {
     check(rendered&&all_same,"cube game: presented frames (RDNA-translated vertex path) are byte-identical to the harness hand-authored-VS render of the same MVPs");
     pnr::prx::PrxRegistry reg;pnr::loader::ImportResolution ir;
     check(pnr::loader::resolve_imports(PNR_PS_CUBE_DEMO_PATH,reg,&ir)&&ir.pnr_extension==7&&ir.unknown==0,"cube game: pnrGfx* imports classify as pnr-extension (not host, not sce)");
+    std::filesystem::remove_all(jail);
+  }
+#endif
+#ifdef PNR_PS_MESH_DEMO_PATH
+  // ---- a game uploads its own mesh (pnrGfxSetMesh) ----
+  {
+    const std::string jail="/tmp/pnr_meshdemo_jail_"+std::to_string(::getpid());
+    std::filesystem::remove_all(jail);
+    pnr::loader::NativeLoader loader;
+    auto lr=loader.launch(PNR_PS_MESH_DEMO_PATH,{},{"PNR_JAIL_ROOT="+jail,std::string("LD_LIBRARY_PATH=")+PNR_PSABI_DIR});
+    check(lr.validated&&lr.started&&lr.finished&&!lr.signaled&&lr.exit_code==0,"mesh game: ps_mesh_demo launched, exit 0 (9 invalid uploads refused, RDNA vs reference compared inside the game)");
+    const float py[5][3]={{0,0.6f,0},{-0.5f,-0.4f,-0.5f},{0.5f,-0.4f,-0.5f},{0.5f,-0.4f,0.5f},{-0.5f,-0.4f,0.5f}};
+    const int tri[6][3]={{0,1,2},{0,2,3},{0,3,4},{0,4,1},{1,3,2},{1,4,3}};
+    constexpr uint32_t N=8;bool all_ok=true;uint32_t found=0,worst=0;
+    for(uint32_t k=0;k<N;++k){
+      char name[64];std::snprintf(name,sizeof name,"/frames/mesh_%02u.ppm",k);
+      std::ifstream f(jail+name,std::ios::binary);
+      if(!f){all_ok=false;continue;}
+      ++found;std::stringstream ss;ss<<f.rdbuf();std::string d=ss.str();
+      const std::string hdr="P6\n96 96\n255\n";
+      if(d.size()!=hdr.size()+W*H*3){all_ok=false;continue;}
+      Mat4 M=mat4_mul(mat4_rotate_x(0.4f),mat4_rotate_y(k*2.0f*(float)M_PI/N));
+      Mat4 mvp=mat4_mul(P,mat4_mul(T,M));
+      std::array<float,4> c[5];for(int i=0;i<5;++i)c[i]=mat4_apply(mvp,py[i][0],py[i][1],py[i][2]);
+      uint32_t mism=0,cov=0;
+      for(uint32_t y=0;y<H;++y)for(uint32_t x=0;x<W;++x){
+        const double px_=(x+0.5)/W*2-1,py_=(y+0.5)/H*2-1;bool in=false;
+        for(auto& tr:tri){
+          double X[3],Y[3];for(int j=0;j<3;++j){X[j]=c[tr[j]][0]/c[tr[j]][3];Y[j]=c[tr[j]][1]/c[tr[j]][3];}
+          double e0=(X[1]-X[0])*(py_-Y[0])-(Y[1]-Y[0])*(px_-X[0]);
+          double e1=(X[2]-X[1])*(py_-Y[1])-(Y[2]-Y[1])*(px_-X[1]);
+          double e2=(X[0]-X[2])*(py_-Y[2])-(Y[0]-Y[2])*(px_-X[2]);
+          if((e0>=0&&e1>=0&&e2>=0)||(e0<=0&&e1<=0&&e2<=0)){in=true;break;}
+        }
+        const unsigned char* q=reinterpret_cast<const unsigned char*>(&d[hdr.size()+(y*W+x)*3]);
+        const bool lit=(q[0]|q[1]|q[2])!=0;if(lit)++cov;
+        if(lit!=in)++mism;
+      }
+      worst=std::max(worst,mism);
+      std::printf("  mesh game frame %u: CPU-projected mask vs presented pixels: %u mismatched, %u lit\n",k,mism,cov);
+      if(mism>W*H/100)all_ok=false;
+    }
+    check(found==N,"mesh game: all 8 presented PPM files exist inside the game's jail");
+    check(all_ok,"mesh game: presented silhouette matches an independent CPU projection of the uploaded triangles within 1% of pixels");
+    pnr::prx::PrxRegistry reg;pnr::loader::ImportResolution ir;
+    check(pnr::loader::resolve_imports(PNR_PS_MESH_DEMO_PATH,reg,&ir)&&ir.pnr_extension==6&&ir.unknown==0,"mesh game: pnrGfx* imports classify as pnr-extension");
     std::filesystem::remove_all(jail);
   }
 #endif
