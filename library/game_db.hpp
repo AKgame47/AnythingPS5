@@ -66,6 +66,11 @@ public:
   // Newest first, at most `limit` rows (1..1000).
   std::vector<LaunchRow> launch_history(const std::string& game_id, int limit);
 
+  // Deletes the game's rows in every table (game, installation,
+  // compatibility, launch history) in one transaction. Files on disk are
+  // not touched here. Removing an unknown id is a no-op that succeeds.
+  Status remove_game(const std::string& game_id);
+
   Status record_launch(const std::string& game_id, int exit_code,
                        double wall_seconds);
   int64_t launch_count(const std::string& game_id);
