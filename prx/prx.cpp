@@ -102,6 +102,12 @@ const PrxSymbol* PrxRegistry::find(const std::string& nid) const {
   return nullptr;
 }
 
+const PrxSymbol* PrxRegistry::find_name(const std::string& name) const {
+  for (const auto& s : symbols_)
+    if (s.name == name) return &s;
+  return nullptr;
+}
+
 SceInt32 PrxRegistry::bind(
     const std::string& nid,
     std::function<std::int64_t(const std::vector<std::int64_t>&)>* fn,
