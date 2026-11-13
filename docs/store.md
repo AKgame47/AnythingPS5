@@ -91,7 +91,8 @@ Commands: `store get <src> <pkg>` (queue), `store queue list|run|pause|resume|ca
 - Unpinned sources stay hash-only and are labelled "unsigned (hash only)".
 - The verifier is in-tree (`crypto/ed25519.*`, RFC 8032 pure Ed25519, SHA-512), tested with the RFC 8032 section 7.1 vectors, bit-flip, wrong-key and non-canonical-S cases. It is not constant-time, which is fine because it only handles public data. PNR holds no signing keys; `ed25519_sign` exists for tests and publisher tooling.
 - What a signature means: the holder of the pinned key produced this package entry. It says nothing about whether the package is safe, and trust in the key is your decision.
-- Limits: checked at install time only. `pnr run` does not re-check signatures yet, and there is no key rotation or revocation yet. Tested against fakes only.
+- Launch-time re-check (B1b): `store install` writes `<store>/provenance/<game id>.prov` (source, package, version, sha256, size, signature, pinned key). `launch` re-verifies the signature and re-hashes the retained `.pnrgame` in `<store>/downloads/`. It refuses to start the game if the signature or retained hash fails, the source was removed, the pinned key changed, or the source now pins a key but the game was installed unsigned. Games not installed from the store are not affected. Unsigned installs from unpinned sources still run, labelled hash only.
+- Limits: the launch check covers the retained package file and the signature, NOT the extracted install directory, and the provenance file is a local file, so someone who can already rewrite your store directory can edit it. There is no key rotation or revocation yet. Tested against fakes only.
 
 ## What is NOT done (honest list)
 
