@@ -3,6 +3,7 @@
 #pragma once
 #include <string>
 
+#include "store/download.hpp"
 #include "store/store.hpp"
 
 namespace pnr::store {
@@ -15,5 +16,13 @@ int cmd_refresh(Registry& r, const std::string& id_or_empty, bool json, std::str
 // text empty = list all. Searches id, name, description, category (case-insensitive).
 int cmd_search(Registry& r, const std::string& text, const std::string& source, bool json, std::string* out);
 int cmd_show(Registry& r, const std::string& source, const std::string& pkg, bool json, std::string* out);
+
+// Download queue. `get` only queues; `queue run` transfers (resuming any .part).
+int cmd_get(Queue& q, const std::string& source, const std::string& pkg, bool json, std::string* out);
+int cmd_queue_list(Queue& q, bool json, std::string* out);
+// pkg empty = every queued/partial item. `client` null = libcurl; tests inject a fake and options.
+int cmd_queue_run(Queue& q, const std::string& source, const std::string& pkg, bool json, std::string* out, psn::HttpClient* client = nullptr, const DownloadOptions* opt = nullptr);
+int cmd_queue_pause(Queue& q, const std::string& source, const std::string& pkg, bool pause, bool json, std::string* out);  // pause=false resumes
+int cmd_queue_cancel(Queue& q, const std::string& source, const std::string& pkg, bool yes, bool json, std::string* out);
 
 }  // namespace pnr::store
