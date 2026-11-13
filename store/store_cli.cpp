@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <csignal>
 #include <memory>
 
 namespace pnr::store {
 namespace {
+volatile std::sig_atomic_t g_stop = 0;
+extern "C" void on_sigint(int) { g_stop = 1; }
 std::string esc(const std::string& s) {
   std::string o;
   for (unsigned char c : s) {
@@ -114,7 +117,7 @@ int cmd_search(Registry& r, const std::string& text, const std::string& source, 
     *out += " [" + label_for(p) + "] " + p.source_id + "/" + p.id + "  " + p.name + " " + p.version + "  " + size_text(p.size) + "  license: " + p.license + "\n";
   if (!problems.empty()) *out += "sources without a usable index:\n" + problems;
   *out += "labels: supported = a PNR package PNR can install; experimental = same, marked so by the source; unsupported = listed only, PNR cannot install it\n";
-  *out += "nothing here can be downloaded yet (download manager is the next slice)\n";
+  *out += "download with: store get <source> <package>, then store queue run\n";
   return 0;
 }
 
@@ -132,6 +135,77 @@ int cmd_show(Registry& r, const std::string& source, const std::string& pkg, boo
   }
   *out = fail(Status::Fail(kErrNoSource, "store", "no such package in that source"), json);
   return 2;
+}
+
+
+namespace {
+std::string state_json(const DlState& s) {
+  return "{\"source\":" + q(s.source) + ",\"package\":" + q(s.pkg) + ",\"status\":" + q(s.status) + ",\"bytes\":" + std::to_string(s.have) + ",\"size\":" + std::to_string(s.size) + ",\"error\":" + q(s.error) + "}";
+}
+std::string state_line(const DlState& s) {
+  const int pct = s.size > 0 ? static_cast<int>(s.have * 100 / s.size) : 0;
+  return " " + s.source + "/" + s.pkg + "  " + s.status + "  " + size_text(s.have) + " of " + size_text(s.size) + " (" + std::to_string(pct) + "%)" + (s.error.empty() ? "" : "  [" + s.error + "]") + "\n";
+}
+}  // namespace
+
+int cmd_get(Queue& qu, const std::string& source, const std::string& pkg, bool json, std::string* out) {
+  DlState st;
+  Status s = qu.enqueue(source, pkg, &st);
+  if (!s) { *out = fail(s, json); return s.error.code == kErrNoSource ? 2 : 1; }
+  *out = json ? state_json(st) + "\n" : "QUEUED: " + source + "/" + pkg + " (" + size_text(st.size) + ")\n  nothing was downloaded yet: run 'store queue run'\n  it will be checked against the source's size and sha256 before it can be installed\n";
+  return 0;
+}
+
+int cmd_queue_list(Queue& qu, bool json, std::string* out) {
+  std::vector<DlState> v;
+  Status s = qu.list(&v);
+  if (!s) { *out = fail(s, json); return 1; }
+  if (json) { *out = "{\"queue\":["; for (size_t i = 0; i < v.size(); ++i) *out += std::string(i ? "," : "") + state_json(v[i]); *out += "]}\n"; return 0; }
+  *out = "STORE QUEUE (" + std::to_string(v.size()) + ")\n";
+  for (auto& s2 : v) *out += state_line(s2);
+  *out += "status: queued/partial = will run; paused = skipped; verified = size and sha256 match the index, ready to install; failed = see the note; installed\n";
+  return 0;
+}
+
+int cmd_queue_run(Queue& qu, const std::string& source, const std::string& pkg, bool json, std::string* out, psn::HttpClient* client, const DownloadOptions* optp) {
+  std::vector<DlState> todo;
+  if (!pkg.empty()) { DlState st; Status e = qu.enqueue(source, pkg, &st); if (!e) { *out = fail(e, json); return e.error.code == kErrNoSource ? 2 : 1; } todo.push_back(st); }
+  else { std::vector<DlState> all; qu.list(&all); for (auto& s : all) if (s.status == "queued" || s.status == "partial") todo.push_back(s); }
+  if (todo.empty()) { *out = json ? "{\"ok\":true,\"ran\":[]}\n" : "nothing to download (queue empty or everything paused/complete)\n"; return 0; }
+  std::unique_ptr<psn::HttpClient> own;
+  if (!client) {
+    Status cs; own = psn::make_curl_client(psn::CurlOptions{}, &cs);
+    if (!own) { *out = fail(cs, json); return 1; }
+    client = own.get();
+    g_stop = 0;
+    std::signal(SIGINT, on_sigint);
+  }
+  DownloadOptions opt = optp ? *optp : DownloadOptions{};
+  if (!optp) opt.cancel = [] { return g_stop != 0; };
+  int rc = 0; std::string txt, js;
+  for (auto& t : todo) {
+    DlState st;
+    Status s = qu.run(*client, t.source, t.pkg, opt, &st);
+    if (!s) { rc = 1; txt += " " + t.source + "/" + t.pkg + ": " + s.error.message + "\n"; js += std::string(js.empty() ? "" : ",") + "{\"source\":" + q(t.source) + ",\"package\":" + q(t.pkg) + ",\"ok\":false,\"message\":" + q(s.error.message) + "}"; if (s.error.code == kErrInterrupted) break; }
+    else { txt += " " + t.source + "/" + t.pkg + ": " + st.status + ", " + size_text(st.have) + ", size and sha256 match the index\n"; js += std::string(js.empty() ? "" : ",") + "{\"source\":" + q(t.source) + ",\"package\":" + q(t.pkg) + ",\"ok\":true,\"status\":" + q(st.status) + "}"; }
+  }
+  *out = json ? "{\"ok\":" + std::string(rc ? "false" : "true") + ",\"ran\":[" + js + "]}\n" : "STORE QUEUE RUN\n" + txt + "(a verified file is not installed yet: use 'store install')\n";
+  return rc;
+}
+
+int cmd_queue_pause(Queue& qu, const std::string& source, const std::string& pkg, bool pause, bool json, std::string* out) {
+  Status s = qu.set_paused(source, pkg, pause);
+  if (!s) { *out = fail(s, json); return s.error.code == kErrNoSource ? 2 : 1; }
+  *out = json ? "{\"ok\":true}\n" : std::string(pause ? "PAUSED: " : "RESUMED: ") + source + "/" + pkg + "\n";
+  return 0;
+}
+
+int cmd_queue_cancel(Queue& qu, const std::string& source, const std::string& pkg, bool yes, bool json, std::string* out) {
+  if (!yes) { *out = json ? "{\"ok\":false,\"needs_confirmation\":true}\n" : "WOULD DELETE the partial download and queue entry for " + source + "/" + pkg + " (add --yes). Installed games are never touched.\n"; return 3; }
+  Status s = qu.cancel(source, pkg);
+  if (!s) { *out = fail(s, json); return s.error.code == kErrNoSource ? 2 : 1; }
+  *out = json ? "{\"ok\":true}\n" : "CANCELED: " + source + "/" + pkg + " (partial file and entry deleted)\n";
+  return 0;
 }
 
 }  // namespace pnr::store
