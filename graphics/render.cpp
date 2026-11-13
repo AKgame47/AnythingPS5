@@ -68,6 +68,52 @@ Status VulkanBackend::render_clip_mesh_rgba(
   return Status::Ok();
 }
 
+Status VulkanBackend::render_lit_mesh_frames_rgba(
+    uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
+    const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
+    const std::vector<uint32_t>& indices, bool depth,
+    const std::vector<std::vector<uint32_t>>& fp, const float clear[4],
+    std::vector<std::vector<uint8_t>>* frames) {
+  if (vertices.empty() || vertices.size() % 9 || vertices.size() / 9 > 65536)
+    return Status::Fail(100, "vulkan", "lit mesh vertices must be float3 position + float3 colour + float3 normal (multiple of 9 floats, max 65536 vertices)");
+  if (indices.empty() || indices.size() % 3 || indices.size() > 30000)
+    return Status::Fail(100, "vulkan", "mesh indices must be a nonzero multiple of 3 (max 30000)");
+  for (uint32_t i : indices)
+    if (i >= vertices.size() / 9)
+      return Status::Fail(100, "vulkan", "mesh index out of range of the vertex array");
+  if (fp.empty() || fp.size() > 64)
+    return Status::Fail(100, "vulkan", "frame count must be 1..64");
+  for (auto& p : fp)
+    if (p.empty() || p.size() > 32 || p.size() != fp[0].size())
+      return Status::Fail(100, "vulkan", "lit push constants must be 1..32 words, same size every frame");
+  MeshInput m;
+  m.vertices = &vertices; m.pos_floats = 3; m.extra_floats = 3; m.indices = &indices; m.depth = depth;
+  return render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, &fp, clear, frames);
+}
+
+Status VulkanBackend::render_lit_clip_mesh_rgba(
+    uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
+    const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
+    const std::vector<uint32_t>& indices, bool depth, const float clear[4],
+    std::vector<uint8_t>* image) {
+  if (!image) return Status::Fail(100, "vulkan", "lit clip mesh render needs an output image");
+  if (vertices.empty() || vertices.size() % 8 || vertices.size() / 8 > 65536)
+    return Status::Fail(100, "vulkan", "lit clip vertices must be float4 clip position + float3 colour + float lighting scalar (multiple of 8 floats, max 65536 vertices)");
+  if (indices.empty() || indices.size() % 3 || indices.size() > 30000)
+    return Status::Fail(100, "vulkan", "mesh indices must be a nonzero multiple of 3 (max 30000)");
+  for (uint32_t i : indices)
+    if (i >= vertices.size() / 8)
+      return Status::Fail(100, "vulkan", "mesh index out of range of the vertex array");
+  MeshInput m;
+  m.vertices = &vertices; m.pos_floats = 4; m.extra_floats = 1; m.indices = &indices; m.depth = depth;
+  std::vector<std::vector<uint8_t>> frames;
+  auto st = render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, nullptr, clear, &frames);
+  if (!st) return st;
+  if (frames.size() != 1) return Status::Fail(100, "vulkan", "lit clip render produced an unexpected frame count");
+  *image = std::move(frames[0]);
+  return Status::Ok();
+}
+
 Status VulkanBackend::render_mesh_frames_rgba(
     uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
     const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
@@ -100,7 +146,8 @@ Status VulkanBackend::render_core(
   const std::vector<uint32_t>* idx = mesh ? mesh->indices : nullptr;
   const bool depth = mesh && mesh->depth;
   const uint32_t pos_floats = mesh ? mesh->pos_floats : 2;
-  const uint32_t vstride = (pos_floats + 3) * 4;
+  const uint32_t extra_floats = mesh ? mesh->extra_floats : 0;
+  const uint32_t vstride = (pos_floats + 3 + extra_floats) * 4;
   const uint32_t nframes = fp ? (uint32_t)fp->size() : 1;
   const uint32_t push_words = fp ? (uint32_t)(*fp)[0].size() : 0;
   if (!device_ || !out) return Status::Fail(100, "vulkan", "render needs a device and an output buffer");
@@ -363,12 +410,13 @@ Status VulkanBackend::render_core(
   vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
   VkVertexInputBindingDescription vbind{0, vstride, VK_VERTEX_INPUT_RATE_VERTEX};
   using Fmt = decltype(VkVertexInputAttributeDescription::format);
-  VkVertexInputAttributeDescription vattr[2] = {
+  VkVertexInputAttributeDescription vattr[3] = {
       {0, 0, static_cast<Fmt>(pos_floats == 4 ? (int32_t)VK_FORMAT_R32G32B32A32_SFLOAT : pos_floats == 3 ? (int32_t)VK_FORMAT_R32G32B32_SFLOAT : (int32_t)VK_FORMAT_R32G32_SFLOAT), 0},
-      {1, 0, static_cast<Fmt>((int32_t)VK_FORMAT_R32G32B32_SFLOAT), pos_floats * 4}};
+      {1, 0, static_cast<Fmt>((int32_t)VK_FORMAT_R32G32B32_SFLOAT), pos_floats * 4},
+      {2, 0, static_cast<Fmt>(extra_floats == 3 ? (int32_t)VK_FORMAT_R32G32B32_SFLOAT : (int32_t)VK_FORMAT_R32_SFLOAT), (pos_floats + 3) * 4}};
   if (verts) {
     vin.vertexBindingDescriptionCount = 1; vin.pVertexBindingDescriptions = &vbind;
-    vin.vertexAttributeDescriptionCount = 2; vin.pVertexAttributeDescriptions = vattr;
+    vin.vertexAttributeDescriptionCount = extra_floats ? 3 : 2; vin.pVertexAttributeDescriptions = vattr;
   }
   VkPipelineInputAssemblyStateCreateInfo ia{};
   ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
