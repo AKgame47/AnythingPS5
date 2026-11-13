@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "loader/nid.hpp"
+#include "prx/prx_file.hpp"
 
 namespace pnr::prx {
 
@@ -243,6 +244,12 @@ PrxRegistry::PrxRegistry() {
         return sceKernelCreateThread("pnr-prx-thread", entry, arg);
       }));
   // Declared-only taxonomy entries (honest: no host implementation yet).
+  symbols_.push_back(decl_only("libkernel", "sceKernelOpen"));
+  symbols_.push_back(decl_only("libkernel", "sceKernelRead"));
+  symbols_.push_back(decl_only("libkernel", "sceKernelWrite"));
+  symbols_.push_back(decl_only("libkernel", "sceKernelClose"));
+  symbols_.push_back(decl_only("libkernel", "sceKernelLseek"));
+  symbols_.push_back(decl_only("libkernel", "sceKernelFstat"));
   symbols_.push_back(decl_only("libkernel", "sceKernelReserveVirtualRange"));
   symbols_.push_back(decl_only("libkernel", "sceKernelAvailableFlexibleMemorySize"));
   // libkernel memory management (over POSIX mmap/mprotect/munmap).
@@ -321,6 +328,41 @@ PrxRegistry::PrxRegistry() {
         return sce_libc_strcmp(reinterpret_cast<const char*>(a[0]),
                                reinterpret_cast<const char*>(a[1]));
       }));
+}
+
+void PrxRegistry::install_file_calls(PsFileTable* t) {
+  if (t == nullptr) return;
+  auto set_impl = [this, t](const char* name,
+      std::function<std::int64_t(const std::vector<std::int64_t>&)> fn) {
+    for (auto& s : symbols_)
+      if (s.name == name) { s.implemented = true; s.invoke = std::move(fn); }
+  };
+  set_impl("sceKernelOpen", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
+    if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
+    return t->open(reinterpret_cast<const char*>(a[0]), a[1]);
+  });
+  set_impl("sceKernelRead", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
+    if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
+    return t->read(a[0], reinterpret_cast<void*>(a[1]),
+                   static_cast<std::size_t>(a[2]));
+  });
+  set_impl("sceKernelWrite", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
+    if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
+    return t->write(a[0], reinterpret_cast<const void*>(a[1]),
+                    static_cast<std::size_t>(a[2]));
+  });
+  set_impl("sceKernelClose", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
+    if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
+    return t->close(a[0]);
+  });
+  set_impl("sceKernelLseek", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
+    if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
+    return t->lseek(a[0], a[1], a[2]);
+  });
+  set_impl("sceKernelFstat", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
+    if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
+    return t->fstat(a[0], reinterpret_cast<SceKernelStat*>(a[1]));
+  });
 }
 
 const PrxSymbol* PrxRegistry::find(const std::string& nid) const {
