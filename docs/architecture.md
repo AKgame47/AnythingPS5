@@ -55,7 +55,7 @@ developer-controlled test application and no graphics.
 | 08 | Game Services | `services/` | Implemented: virtual filesystem (jailed areas, per-game/user saves), input (evdev enumeration, mapping profiles, virtual device), audio (interface + null backend), Tested; host audio backends Planned |
 | 07 | Host OS Abstraction | `platform/` | Implemented (Linux backend: CPU/memory/power/process, Tested; Windows backend: Win32 hwinfo, ELF launch Blocked) |
 | 08 | Game Services (audio/input/storage) | `services/` | Planned (save-data storage exists inside `compat`) |
-| 09 | Game Manager (library) | `library/` | SQLite data layer Implemented, Tested; UI Planned |
+| 09 | Game Manager (library) | `library/` | SQLite data layer Implemented, Tested; UI Planned | Run-by-id (`pnr run <id>`) resolves installed games with per-game jails, launch history, and honest compatibility advancement (Untested -> Launches Only); UI Planned.
 | 10 | Desktop Launcher UI | `apps/launcher` | Planned (CLI exists: `apps/pnr_cli.cpp`) |
 | 11 | Security Manager | `security/` | Partial (process isolation, fs jail, package traversal/checksum rejection implemented; sandboxing Planned) |
 | - | Installer (.pnrgame) | `package/` | Implemented (tar+SHA-256, importer, registration), Tested |
