@@ -28,6 +28,7 @@ struct VulkanDeviceInfo {
 struct MeshInput {
   const std::vector<float>* vertices = nullptr;
   uint32_t pos_floats = 2;
+  uint32_t extra_floats = 0;  // optional location-2 attribute after colour: 1 (float) or 3 (vec3)
   const std::vector<uint32_t>* indices = nullptr;
   bool depth = false;
 };
@@ -106,6 +107,25 @@ public:
                                const std::vector<float>& vertices,
                                const std::vector<uint32_t>& indices, bool depth,
                                const float clear[4], std::vector<uint8_t>* image);
+
+  // Lit variants: one extra attribute at location 2 after the colour.
+  // Hand-authored path: float3 position + float3 colour + float3 normal (9
+  // floats), push constants 1..32 words per frame. Clip path: float4 clip
+  // position + float3 colour + float lighting scalar (8 floats), one frame.
+  Status render_lit_mesh_frames_rgba(uint32_t width, uint32_t height,
+                                     const std::vector<uint32_t>& vert_spirv,
+                                     const std::vector<uint32_t>& frag_spirv,
+                                     const std::vector<float>& vertices,
+                                     const std::vector<uint32_t>& indices, bool depth,
+                                     const std::vector<std::vector<uint32_t>>& frame_push,
+                                     const float clear[4],
+                                     std::vector<std::vector<uint8_t>>* frames);
+  Status render_lit_clip_mesh_rgba(uint32_t width, uint32_t height,
+                                   const std::vector<uint32_t>& vert_spirv,
+                                   const std::vector<uint32_t>& frag_spirv,
+                                   const std::vector<float>& vertices,
+                                   const std::vector<uint32_t>& indices, bool depth,
+                                   const float clear[4], std::vector<uint8_t>* image);
 
   void shutdown();
 
