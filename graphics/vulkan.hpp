@@ -44,9 +44,11 @@ public:
 
   // Run a compute shader (SPIR-V words) with a single SSBO (set 0,
   // binding 0) holding io (words in, words out). Returns an honest error
-  // naming the exact stage that failed.
+  // naming the exact stage that failed. Optional uniforms (max 16 uints)
+  // are pushed at offset zero for compute; caller must match shader layout.
   Status run_compute_words(const std::vector<uint32_t>& spirv,
-                           std::vector<uint32_t>* io);
+                           std::vector<uint32_t>* io,
+                           const std::vector<uint32_t>& uniforms = {});
 
   void shutdown();
 
@@ -79,7 +81,7 @@ private:
   X(vkFreeCommandBuffers) X(vkBeginCommandBuffer) X(vkCmdBindPipeline) \
   X(vkCmdBindDescriptorSets) X(vkCmdDispatch) X(vkEndCommandBuffer) \
   X(vkCreateFence) X(vkWaitForFences) X(vkDestroyFence) X(vkQueueSubmit) \
-  X(vkQueueWaitIdle)
+  X(vkQueueWaitIdle) X(vkCmdPushConstants)
 #define PNR_VK_MEMBER(name) void* name = nullptr;
   PNR_VK_LIST(PNR_VK_MEMBER)
 #undef PNR_VK_MEMBER
