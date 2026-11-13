@@ -26,6 +26,26 @@ Without `PNR_NEEDLE`: "ask is not configured", exit code 2.
   (14,888,896 bytes, model baked in). It ran on the test host using about
   22 MB RAM and about 0.7 s per prompt.
 
+## The model runs inside PNR's sandbox (slice D2)
+
+By default the model program runs in the same namespace + pivot_root sandbox
+as `launch --sandbox` (see docs/sandbox.md): no network (loopback only), a
+private PID namespace, system directories read-only, and a seccomp denylist.
+It sees only a private 0700 temp directory holding a COPY of the executable
+and the generated tools file. Your home directory and library are not visible.
+The temp directory is removed afterwards.
+
+- No silent fallback: if the sandbox is unusable the model is not run, and
+  the output says so. `--no-model-sandbox` is the explicit opt-out and the
+  output then says "NOT sandboxed".
+- Tested with a probe script (user file hidden, /etc read-only, tools file
+  readable, only `lo`, PID 1) and a control run without the sandbox that does
+  see the user file. The real binary also ran sandboxed on the test host.
+- Still PARTIAL, like the game sandbox: it is namespaces plus a denylist, not
+  a proof of escape-proofing, and it needs unprivileged user namespaces.
+- On a timeout the sandbox parent is killed; PNR removes its leftover empty
+  mountpoint dir in /tmp on a best-effort basis.
+
 ## Why external executable only
 
 PNR is GPL-2.0. Apache-2.0 is not compatible with GPLv2-only. To stay
@@ -72,45 +92,30 @@ Observed with the real binary:
 
 ## Limits
 
-- Needle runs outside the sandbox in D1.
+- The model is sandboxed by default (D2) but the sandbox is partial; with `--no-model-sandbox` it is not.
 - One host, one binary version, few prompts.
 - English only was tried.
 
 ## Real captured output
 
-Library holds the PNR demo game. Real Needle binary, run on 2026-11-14.
+Library holds the PNR demo game. Real Needle binary, sandboxed, run on 2026-11-14.
 
 ```
 $ pnr-launcher ask "what games do I have"
 PNR Demo Game  v0.1.0  [Untested]  runnable  id=demo-game
-model (experimental, uncalibrated): list_games, confidence 0.96, threshold 0.80
+model (experimental, uncalibrated, sandboxed): list_games, confidence 0.96, threshold 0.80
 parsed command: pnr-launcher list
 
-$ pnr-launcher ask "start the game demo-game"
-model (experimental, uncalibrated): launch_game, confidence 0.94, threshold 0.80
-parsed command: pnr-launcher launch demo-game
-NOT RUN: this command changes things or starts a game, and confirmation needs an interactive terminal. Run it yourself if it is what you meant.
-
 $ pnr-launcher ask "find me something with racing"
-model (experimental, uncalibrated): store_search, confidence 0.07, threshold 0.80
+model (experimental, uncalibrated, sandboxed): store_search, confidence 0.07, threshold 0.80
 NOT RUN: confidence below threshold: confidence is below your threshold
 closest guess (not run): pnr-launcher store search racing
 
-$ pnr-launcher ask "do not launch demo-game"
-model (experimental, uncalibrated): no command, confidence 0.76, threshold 0.80
-NOT RUN: negation detected: the sentence contains a negation, so PNR will not guess the opposite
-
-$ pnr-launcher ask "launch demo-game; rm -rf /"
-model (experimental, uncalibrated): no command, confidence 0.07, threshold 0.80
-NOT RUN: more than one call: the model chose several commands; ask for one thing at a time
-
-$ pnr-launcher ask "launch the game called nonexistent"
-model (experimental, uncalibrated): launch_game, confidence 0.97, threshold 0.80
-NOT RUN: arguments rejected: no installed game with that exact id
-
-$ (in a terminal) pnr-launcher ask "start the game demo-game"  -> answer n
-n
-run this? pnr-launcher launch demo-game  [y/N] model (experimental, uncalibrated): launch_game, confidence 0.94, threshold 0.80
-parsed command: pnr-launcher launch demo-game
-not run (you declined)
+$ pnr-launcher ask "what games do I have" --no-model-sandbox
+PNR Demo Game  v0.1.0  [Untested]  runnable  id=demo-game
+model (experimental, uncalibrated, NOT sandboxed): list_games, confidence 0.96, threshold 0.80
+parsed command: pnr-launcher list
 ```
+
+More real runs (launch refused non-interactively, TTY decline, injection
+attempt, unknown game) were captured in D1; the verdicts are unchanged.
