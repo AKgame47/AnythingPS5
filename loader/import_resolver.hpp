@@ -19,6 +19,7 @@ enum class ImportClass {
   PrxImplemented, // in the PRX taxonomy with a working host implementation
   PrxDeclared,    // in the PRX taxonomy but NOT implemented (honest)
   Unknown,        // PS-style name (sce*) outside the taxonomy
+  PnrExtension,   // pnr* call provided by the PNR shim (not a Sony API)
 };
 
 struct ImportEntry {
@@ -29,7 +30,8 @@ struct ImportEntry {
 struct ImportResolution {
   std::vector<std::string> needed_libs;  // DT_NEEDED entries
   std::vector<ImportEntry> imports;      // undefined dynamic symbols
-  int host = 0, prx_implemented = 0, prx_declared = 0, unknown = 0;
+  int host = 0, prx_implemented = 0, prx_declared = 0, unknown = 0,
+      pnr_extension = 0;
 };
 
 // Parses the ELF's dynamic section/symbol table (bounds-checked) and
