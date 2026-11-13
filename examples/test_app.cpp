@@ -6,7 +6,7 @@
 
 #include "compat/services.hpp"
 
-int main(int argc, char** argv) {
+int main(int argc, char**) {
   std::puts("pnr_test_app: native x86-64 demo starting");
   std::printf("pnr_test_app: args=%d\n", argc - 1);
 
