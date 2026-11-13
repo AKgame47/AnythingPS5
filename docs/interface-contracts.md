@@ -660,7 +660,7 @@ consume one word, with PC/truncation regression checks.
   counts fail emission. The translator accepts one loop only; the low-level
   emitter is not itself a guest CFG verifier or an alias-proof interface.
 - 21 modules validate for Vulkan 1.0 and run on lavapipe: sixteen combinations
-  of local size/count 1,2,8,16,64 (local sizes 1/2/8/64, counts 1/2/16/64),
+  of local sizes 1/2/8/64 and counts 1/2/16/64,
   plus inline/literal operand forms, runtime uniform delta, exit counter and
   post-loop guarded-load composition. Whole-buffer tests compare every lane,
   inputs and sentinel with wraparound seeds. Byte API retains exact SPIR-V
