@@ -313,15 +313,15 @@ touches nothing in the library.
   dispatch environment.
 
 
-## IF-GRAPH-03 Restricted compute translation (v8)
+## IF-GRAPH-03 Restricted compute translation (v9)
 
 Status: Experimental, Implemented (strict subset), Tested.
 
-- `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base, buffer_words=1, local_size_x=1, uniform_words=0)` parses
+- `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base, buffer_words=1, local_size_x=1, uniform_words=0, guest_base_high=0)` parses
   little-endian words without alignment assumptions; partial words fail.
-  `translate_compute_words(words, guest_base, buffer_words=1, local_size_x=1, uniform_words=0)` is the word-level entry point.
+  `translate_compute_words(words, guest_base, buffer_words=1, local_size_x=1, uniform_words=0, guest_base_high=0)` is the word-level entry point.
 - Result: `ok`, diagnostic `error`, `spirv`, `stored_value_known`,
-  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`, `required_uniform_words`, `host_float32`. Every failure returns empty SPIR-V. `stored_value` is
+  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`, `required_uniform_words`, `host_float32`, `full64_pointers`. Every failure returns empty SPIR-V. `stored_value` is
   meaningful only when `stored_value_known` is true; runtime results are
   never invented by the compiler.
 - Explicit test ABI: one workgroup with 1..64 invocations, one fixed-size uint array SSBO at set 0/binding 0.
@@ -339,14 +339,16 @@ Status: Experimental, Implemented (strict subset), Tested.
   11-bit FLAT byte offset, then check addition overflow, lower/upper bounds
   and four-byte alignment before generating an array index. Guest base must
   be aligned; zero/oversized extent and base+range overflow are rejected.
-  Runtime low-word addresses are accepted when high word is constant and
+  The fast low-word guard is used when high word is constant and
   matches binding base, binding does not cross a 32-bit boundary, and FLAT
-  immediate is zero. Undefined or runtime high words fail at translation.
+  immediate is zero. Other runtime pairs use full64 guards below (single
+  invocation only). Undefined words still fail at translation.
   ALU results can supply low addresses, with uint32 modular semantics:
-  no carry into high word is inferred. This is not full 64-bit pointer math.
+  no carry into high word is inferred for v_add_nc/v_sub_nc. Scalar
+  addc/subb chains below explicitly propagate it.
   FLAT scalar address must be 0x7f, all segment/cache/LDS/reserved
   fields zero (including offset bit 11); load VDATA/store VDST must be zero.
-- `graphics::SpirvModule::compute_u32(nodes, buffer_words=1, guest_base_low=0, local_size_x=1, uniform_words=0)` emits the straight-line uint
+- `graphics::SpirvModule::compute_u32(nodes, buffer_words=1, guest_base_low=0, local_size_x=1, uniform_words=0, guest_base_high=0)` emits the straight-line uint
   IR. Invalid forward references or reads from Store nodes return empty.
   Load.a and Store.b are checked word indices; malformed/out-of-range
   static accesses produce no module. GuardedLoad.a is an earlier runtime
@@ -362,7 +364,7 @@ Status: Experimental, Implemented (strict subset), Tested.
 - Rejects undefined registers, unsupported sources/instructions/modifiers,
   other addresses, additional stores, missing termination and trailing code.
   No wave/EXEC, asynchronous waitcnt, general barriers, resource descriptors,
-  full 64-bit dynamic addresses or real-game shader ABI. Full shader compilation Planned.
+  unbounded virtual addresses or real-game shader ABI. Full shader compilation Planned.
 - FLAT layouts/opcodes and ALU opcode numbers follow AnyPS5's attributed
   GPL-2.0 decoder taxonomy. Tests contain only synthetic instructions.
 - Tests use spirv-val for Vulkan 1.0 when `PNR_SPIRV_VAL` is set, check emitted
@@ -397,8 +399,9 @@ Status: Experimental, Implemented (strict subset), Tested.
   addresses each. Cases include first/middle/last words, lower bound, one
   past the end, misalignment, zero and 0xffffffff. Whole-buffer comparisons
   verify zero/skip policy and that every unrelated word remains unchanged.
-- Dynamic high word, high mismatch, boundary-crossing binding, nonzero
-  dynamic offset and malformed SSA address/data references are rejected.
+- Malformed SSA address/data references are rejected. Dynamic high words,
+  high mismatch, crossing bindings and nonzero offsets now use the full64
+  single-invocation guards documented below.
 
 
 ### Bounded invocation indexing (Experimental test ABI)
@@ -542,3 +545,48 @@ consume one word, with PC/truncation regression checks.
   Float ALU remains forbidden in conditional move-only branch bodies.
   Multi-invocation memory affine/race checks remain unchanged; float-derived
   addresses lack a valid affine proof. No commercial shader compatibility.
+
+
+### Full64 runtime pointer pairs (single invocation)
+
+- Scalar SOP2 s_add_u32/addc_u32/sub_u32/subb_u32 (0/4/1/5) implement
+  unsigned arithmetic with carry/borrow-out. addc/subb require a defined
+  arithmetic SCC; ordinary add/sub start with carry-in zero. Compare SCC
+  cannot be reused as arithmetic carry in this restricted implementation;
+  arithmetic SCC cannot drive the compare-only branch subset. Neither
+  stale SCC nor unknown flag modes are guessed. Scalar carry arithmetic
+  is restricted to one invocation and ordinary SGPR destinations.
+- Per-word results are modulo 2^32. Addition carry is overflow of either
+  a+b or (a+b)+carry-in. Borrow is (a<b) OR ((a-b)<borrow-in).
+  Pair add/sub therefore implements modulo-2^64 arithmetic. Pointer wrap
+  in the guest arithmetic itself follows those instructions; subsequent
+  FLAT-offset overflow is separately checked and suppresses the access.
+  Scalar semantics/opcodes grounded in AMD RDNA ISA section 12.1:
+  https://gpuopen.com/download/RDNA_Shader_ISA_25September2020.pdf
+- Runtime low/high VGPR pairs may come from SSBO loads, uniform SGPR moves
+  or scalar pair arithmetic. Unsigned FLAT offset (0..2047) is added to low,
+  carry added to high; high overflow invalidates access. Full unsigned
+  lower/upper 64-bit comparisons are lexicographic (high then low), plus
+  four-byte alignment. The bounded binding itself must not overflow uint64.
+- Pointer/index construction and load/store remain inside the valid branch.
+  Since binding size is at most 256KiB, guarded low-word modular subtraction
+  gives the exact byte delta even when the binding crosses 0xffffffff.
+  No shaderInt64 capability or device Int64 feature is required: only uint32
+  comparisons/arithmetic and structured SPIR-V. Invalid loads=0/stores=skip.
+- IR GuardedLoad64 has a=low node, b=high node, d=literal offset.
+  GuardedStore64 adds c=data node. CarryAdd/BorrowSub a,b,c are operand and
+  incoming flag nodes. Invalid refs and offset>2047 fail emission.
+  full64_pointers identifies the wide guard route. Low-level IR expects
+  carry inputs 0/1 as constructed by the translator, not arbitrary data.
+- Workgroup affine addressing restrictions are unchanged. Wide dynamic
+  pointers are not accepted in multi-invocation mode; no virtual mapping,
+  multiple resources, atomics, VCC/vector carry, arbitrary scalar flags,
+  cross-workgroup synchronization or commercial shader ABI is implied.
+- Tests validate five full64 modules and execute add/carry, sub/borrow,
+  cross-low-word binding, runtime mismatched high, low/high SSBO-loaded
+  pointers, misalignment, below/above range, wraparound and FLAT-offset
+  high overflow on lavapipe. Whole-buffer comparisons verify zero/skip and
+  unrelated words. Negative tests cover undefined carry/borrow/sources,
+  special destinations, compare/carry SCC mismatch, workgroup mode and
+  malformed IR. Existing guard tests now accept formerly rejected full64
+  shapes but test actual runtime policy in this corpus.
