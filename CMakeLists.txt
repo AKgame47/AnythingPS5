@@ -115,7 +115,7 @@ set_target_properties(ps_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
-add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp)
+add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp)
 
 # Let the tests launch the real PS-style demo binary.
 target_compile_definitions(pnr_tests PRIVATE
