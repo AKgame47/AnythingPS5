@@ -33,6 +33,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Vulkan compute backend: dlopen-loaded (no SDK needed), instance/device/SSBO/pipeline/dispatch/readback; absence of a driver is reported, never faked | Implemented (compute), Tested on software Vulkan (Mesa lavapipe) in the sandbox; hardware GPU untested |
 | Offscreen graphics slice: image + render pass + framebuffer + graphics pipeline, hand-authored SPIR-V vertex/fragment shaders (`graphics/demo/`), draw, copy-to-host; pixel-verified (center, corners, analytic coverage 1152/4096, orientation, determinism). **No swapchain, no window, no display**. Also an animated slice: interleaved vertex buffer + per-frame vertex push constants render an 8-frame spinning RGB triangle sequence; per-frame centroid, coverage and vertex colors verified against the analytic rotation | Implemented, Tested on software Vulkan (lavapipe) via shim and official headers; hardware GPU untested. Frames are rendered and read back sequentially (no frame pacing, no presentation). Also a 3D slice: indexed unit-cube mesh, D32 depth buffer, column-major MVP pushed per frame (`graphics/mat4.hpp`), 8-frame rotating cube checked pixel-by-pixel against an independent CPU ray caster (0 mismatches of 9216 per frame) and depth ON vs OFF shown to differ. Headless offscreen only: flat face colors, no lighting or textures, hand-authored SPIR-V (not translated from RDNA), no swapchain/display; PNR_CUBE_PPM writes a frame strip |
 | Game-driven rendering: `ps_cube_demo` runs under `pnr run`, its frame loop calls `pnrGfx*` (PNR extension, not Sony API) in `libpnr_psabi.so`, including `pnrGfxDrawCubeRdna` which renders through the translated-RDNA compute-as-vertex path and is checked byte-for-byte against the hand-authored reference in the game; frames presented as PPM into the game's jail and read back by the game; CLI step 5 reports the offscreen renderer, step 8 counts frame files | Implemented, Tested on software Vulkan (byte-identical to harness render); headless, no swapchain/display; hardware GPU untested |
+| Game-supplied mesh: `pnrGfxSetMesh` (validated, bounded, copied) + `pnrGfxDrawMesh(yaw,pitch,mode)` (hand-authored VS or translated-RDNA path); `ps_mesh_demo` uploads its own pyramid under `pnr run`, refuses 9 invalid uploads, presents 8 spinning frames | Implemented, Tested on software Vulkan: unit tests match the presented silhouette to a CPU projection (0 mismatched pixels per frame), RDNA vs hand-authored frames 0 differing bytes (1 byte off by one in the ASan build, so the game tolerates +-2). PNR extension, not a Sony API; max 24 vertices (RDNA kernel lanes), flat vertex colours interpolated, no textures/lighting, headless, hardware GPU untested |
 | RDNA-translated vertex stage (compute-as-vertex): `graphics/rdna_vertex.hpp` generates restricted RDNA machine code (v_mul_f32/v_add_f32 with MVP scalars in s0..s15, flat load/store over a 24-lane SSBO), the PNR translator turns it into SPIR-V compute, four dispatches give clip x,y,z,w for the cube's 24 vertices, and those positions are drawn through a pass-through vertex shader (`render_clip_mesh_rgba`, float4 clip + colour). 8 rotating frames compared with the hand-authored MVP vertex shader | Experimental, Tested on software Vulkan: clip positions match a CPU float reference (max diff 0) and 0 of 73728 pixels differ from the hand-authored frames on lavapipe. Not a real RDNA vertex-stage ABI (no VS inputs/exports/parameter cache), only the float ops the translator supports, instruction encodings written by PNR rather than compiled from a game shader, no exact PS5 float rounding guarantee, hardware GPU untested; pixel equality on another driver is not promised |
 | SPIR-V emission: compute write-back module shape, word-level emitter | Implemented (subset), Tested (spirv-val + real dispatch); full shader stages Planned |
 | RDNA shader decoder: all encoding families detected, field extraction for scalar+vector families, named mnemonic subset (scalar/vector partial), literals/64-bit words/truncation handled honestly; taxonomy adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5) (GPL-2.0) | Implemented (subset), Tested (synthetic words); SDWA/DPP + image/memory payload fields Planned |
@@ -291,6 +292,66 @@ ps_cube_demo: ALL FRAMES RENDERED, PRESENTED TO JAIL AND VERIFIED
 --- game output end ---
 [7-start] SUCCESS   game ran natively in child process, exit code 0
 [8-monitor] SUCCESS   wall time + exit status measured; 8 presented frame file(s), 221288 bytes in the jail (/frames); per-frame times are printed by the game, the runtime has no frame-time telemetry yet
+[9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
+  [event] lifecycle -> STOPPING
+  [event] lifecycle -> TERMINATED
+[10-shutdown] SUCCESS   resources released, 0 errors recorded
+RESULT: RUN OK (real native execution)
+```
+
+### `pnr run ./ps_mesh_demo` - a game uploads its own mesh
+
+`ps_mesh_demo` supplies its own vertices and indices (a 5-vertex pyramid)
+through `pnrGfxSetMesh` (PNR extension, **not** a Sony API; bounded to 1..24
+vertices, 3..384 indices, finite floats, indices in range, data copied). It
+first proves 9 invalid uploads are refused and that a failed upload leaves no
+mesh behind, then spins the mesh with `pnrGfxDrawMesh`, once per frame with
+the hand-authored vertex shader (reference) and once through the translated-
+RDNA compute-as-vertex path, presents both into its jail, and compares them
+(tolerance +-2 on 0.5% of bytes; fused vs unfused float rounding). The unit
+tests also check the presented silhouette against an independent CPU
+projection of the uploaded triangles. Offscreen only, no swapchain/display.
+Captured verbatim:
+
+```text
+ps_mesh_demo: uploaded 5-vertex 6-triangle pyramid; 9 invalid uploads refused
+ps_mesh_demo: frame 0 yaw=0.000 covered=588 (reference 588)
+ps_mesh_demo: frame 1 yaw=0.785 covered=706 (reference 706)
+ps_mesh_demo: frame 2 yaw=1.571 covered=588 (reference 588)
+ps_mesh_demo: frame 3 yaw=2.356 covered=706 (reference 706)
+ps_mesh_demo: frame 4 yaw=3.142 covered=588 (reference 588)
+ps_mesh_demo: frame 5 yaw=3.927 covered=706 (reference 706)
+ps_mesh_demo: frame 6 yaw=4.712 covered=588 (reference 588)
+ps_mesh_demo: frame 7 yaw=5.498 covered=706 (reference 706)
+ps_mesh_demo: 8 frames of the game's own mesh, RDNA path vs reference: 0 differing bytes (tolerance +-2 on 0.5%)
+ps_mesh_demo: ALL FRAMES RENDERED, PRESENTED TO JAIL AND VERIFIED
+[1-validate] SUCCESS   ./ps_mesh_demo is a valid x86-64 ELF (13 segments)
+[1-imports] SUCCESS   27 imports: 16 host-resolved, 5 prx-implemented, 0 prx-declared-only, 0 unknown, 6 pnr-extension
+  [import] pnrGfxMeshDraws                  pnr-extension
+  [import] pnrGfxDrawMesh                   pnr-extension
+  [import] pnrGfxPresentToFile              pnr-extension
+  [import] pnrGfxInit                       pnr-extension
+  [import] pnrGfxSetMesh                    pnr-extension
+  [import] memset                           prx-implemented
+  [import] pnrGfxLastError                  pnr-extension
+  [import] sceKernelOpen                    prx-implemented
+  [import] sceKernelFstat                   prx-implemented
+  [import] sceKernelClose                   prx-implemented
+  [import] sceKernelRead                    prx-implemented
+[2-analysis] SUCCESS   logical cores=2; gpu=llvmpipe (LLVM 15.0.7, 256 bits) (software Vulkan)
+[3-config] SUCCESS   default profile 'balanced' (no game profile found; defaults used openly)
+  [event] lifecycle -> VALIDATING
+  [event] lifecycle -> INITIALIZING
+  [event] lifecycle -> READY
+[4-runtime] SUCCESS   compat memory/fs/thread services up
+[5-graphics] SUCCESS   game imports 6 pnrGfx* calls; the shim renders OFFSCREEN (headless) in the game process; gpu=llvmpipe (LLVM 15.0.7, 256 bits) (software Vulkan); no swapchain, no display
+[6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
+--- game output begin ---
+  [event] lifecycle -> RUNNING
+  [monitor] wall=0.072s exit=0
+--- game output end ---
+[7-start] SUCCESS   game ran natively in child process, exit code 0
+[8-monitor] SUCCESS   wall time + exit status measured; 16 presented frame file(s), 442576 bytes in the jail (/frames); per-frame times are printed by the game, the runtime has no frame-time telemetry yet
 [9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
   [event] lifecycle -> STOPPING
   [event] lifecycle -> TERMINATED
