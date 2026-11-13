@@ -33,13 +33,14 @@ licensed GPL-2.0.
 | Library | SQLite store of games, installs, launches and compatibility state |
 | Launcher core | `pnr-launcher`: list, show, launch, history, set compatibility, scan, import, remove, verify, doctor, clean, save export and restore |
 | Graphics | Offscreen Vulkan rendering on software Vulkan (lavapipe): triangle, spinning triangle, cube, lit, textured and lit-textured meshes, game-supplied meshes. Hand-authored SPIR-V, plus a restricted RDNA-to-SPIR-V translation path (experimental) |
+| PSN purchases (offline) | Unofficial NPSSO connector, first slice: local token store, saved-response import, owned-on-PSN rows kept separate from installed games, manual linking to compatibility. **No network code and no download feature** |
 | Performance | Rule-based adaptive performance engine and laptop power-mode caps |
 
-Not done: real PS5 binaries, Sony APIs, a window or swapchain, hardware GPU
+Not done: live PSN sync (Untested), game downloads (no authorized mechanism found), real PS5 binaries, Sony APIs, a window or swapchain, hardware GPU
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **1671/1671 unit tests, 15/15 CTest suites** on a fresh Linux
+Test state: **1819/1819 unit tests, 16/16 CTest suites** on a fresh Linux
 Release `-Werror` build (details in the capability section below).
 
 ## Rendered output
@@ -199,11 +200,11 @@ compiles but cannot run ELF games.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**1671/1671 unit tests pass, 15/15 CTest suites pass** (unit, end-to-end native
+**1819/1819 unit tests pass, 16/16 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
-and on a build against the official Vulkan headers. ASan+UBSan: 1671/1671
+and on a build against the official Vulkan headers. ASan+UBSan: 1819/1819
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -949,6 +950,100 @@ $ pnr-launcher restore-saves ps-demo ./bad.tar
 restore REFUSED: not a valid archive: truncated header
 ```
 
+### PSN account connector (unofficial, offline first slice)
+
+Full details: [docs/psn.md](docs/psn.md). **Status: Implemented, Tested
+against synthetic fixtures only. Live Sony calls: not implemented, Untested.
+This slice contains no network code.**
+
+Three different things, kept apart everywhere in PNR:
+
+- **Access:** your PSN account owns a license. PNR records it as an "owned on PSN" row (names, ids, platform, artwork URL, Sony's flags). Never installed, never runnable, never in `list`.
+- **Download permission:** **PNR has no download feature.** No authorized download mechanism was found; PNR will not bypass DRM, encryption or licensing. Sony's `isDownloadable` flag is shown as Sony's metadata only.
+- **PC compatibility:** only applies to a PNR game that is actually installed. A person can link an owned row to such a game; the row then shows that game's compatibility state. Linking changes nothing about whether it runs.
+
+Credentials: no password is ever collected. You paste your own NPSSO token
+(how to get it: [docs/psn.md](docs/psn.md)) via stdin or a file, never as an
+argument. It is stored locally in a 0600 file, never printed, logged,
+committed or put in the database, and is meant to go only to Sony's official
+endpoints once a live transport exists. Windows file hardening is not done.
+
+Real captured session, using a **synthetic** response file
+(`examples/psn/synthetic_purchased_games.json`, hand-written, not from Sony)
+and a dummy token. Paths shortened; `<library>` is the library folder:
+
+```
+$ pnr-launcher psn status
+PSN CONNECTOR STATUS (offline core: contains no network code, nothing here contacts Sony)
+token file: <library>/psn/npsso.token
+token: absent
+owned entries: 0 (0 linked to a PNR game, 0 not in the last complete sync)
+last sync: never
+the token value is never printed
+
+$ pnr-launcher psn set-token < token.txt
+TOKEN STORED locally at <library>/psn/npsso.token (owner-only). It is never printed, logged or committed.
+
+$ pnr-launcher psn import-json examples/psn/synthetic_purchased_games.json --complete
+PSN IMPORT OK (from a saved response file; nothing contacted Sony)
+  entries accepted: 2 of 2
+  added 2, updated 0, unchanged 0, restored 0, marked not-returned 0
+  mode: complete (entries absent from this file are marked, never deleted)
+owned on PSN = purchase access only: not installed, not runnable, not a download
+
+$ pnr-launcher psn owned
+OWNED ON PSN: purchase access only - not installed, not runnable, not a download
+1. Synthetic Alpha  [PS5]
+   entitlement EP0001-PPSA00001_00-SYNTHALPHA, title PPSA00001_00, product EP0001-PPSA00001_00-SYNTHALPHA
+   Sony flags: active yes, downloadable yes, pre-order no, membership NONE
+   state: Owned on PSN (no PC build linked)
+2. Synthetic Beta  [PS4]
+   entitlement EP0001-CUSA00002_00-SYNTHBETA, title CUSA00002_00, product EP0001-CUSA00002_00-SYNTHBETA
+   Sony flags: active yes, downloadable no, pre-order no, membership PS_PLUS
+   state: Owned on PSN (no PC build linked)
+'downloadable' is Sony's flag for the entitlement. PNR has no download feature and cannot install PS4/PS5 content.
+
+$ pnr-launcher list
+Synthetic Alpha (PNR demo build)  v0.1.0  [Untested]  runnable  id=synth-alpha
+
+$ pnr-launcher psn link EP0001-PPSA00001_00-SYNTHALPHA synth-alpha
+LINKED: EP0001-PPSA00001_00-SYNTHALPHA -> PNR game synth-alpha (set by a person; this does not make the game runnable or change its compatibility state)
+
+$ pnr-launcher psn owned --platform ps5
+OWNED ON PSN: purchase access only - not installed, not runnable, not a download
+1. Synthetic Alpha  [PS5]
+   entitlement EP0001-PPSA00001_00-SYNTHALPHA, title PPSA00001_00, product EP0001-PPSA00001_00-SYNTHALPHA
+   Sony flags: active yes, downloadable yes, pre-order no, membership NONE
+   state: Untested  (linked to PNR game synth-alpha, linked by a person)
+'downloadable' is Sony's flag for the entitlement. PNR has no download feature and cannot install PS4/PS5 content.
+
+$ pnr-launcher psn import-json ./changed.json --complete
+schema-change: missing data.purchasedTitlesRetrieve.games array
+  next step: the response is not the expected shape: Sony may have changed the API, nothing was imported
+nothing was imported; the library is unchanged
+
+$ pnr-launcher psn import-json ./expired.json
+sony-errors: Sony reported errors and no data: Access token expired
+  next step: Sony reported errors and returned no data: nothing was imported
+nothing was imported; the library is unchanged
+
+$ pnr-launcher psn disconnect
+DISCONNECTED: local token file removed (zeroed, then deleted). Owned-on-PSN entries were kept (use --forget-owned --yes to delete them).
+PNR cannot revoke the token at Sony. If you think it leaked, change your PSN password and check your account security settings.
+
+$ pnr-launcher psn status
+PSN CONNECTOR STATUS (offline core: contains no network code, nothing here contacts Sony)
+token file: <library>/psn/npsso.token
+token: absent
+owned entries: 2 (1 linked to a PNR game, 0 not in the last complete sync)
+last sync: 2026-11-13 19:58:45 UTC
+the token value is never printed
+```
+
+Not provided by the response shape PNR parses: DLC and edition details,
+prices, purchase dates, download URLs. They are not guessed. The response
+shape comes from the MIT psn-api types and is unchecked against live Sony.
+
 ## Windows build
 
 Cross-compile from Linux with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)
@@ -988,6 +1083,7 @@ ape/         MODULE 05 - adaptive performance engine (classification, frame stat
 laptop/      MODULE 06 - laptop optimization manager (power modes, caps)
 package/     .pnrgame format: ustar, SHA-256, importer
 launcher/    MODULE 10 core - headless launcher core (list, details, launch, history, human compatibility, read-only scan, import/remove/verify, doctor, clean --orphans, saves export/restore)
+psn/         unofficial PSN connector, offline slice (token store, parser, owned-entitlement commands; no network code)
 library/     MODULE 09 - SQLite game/installation/compatibility/launch store
 services/    MODULE 08 - virtual filesystem, input, audio backends
 tools/       pnr_make_package - dev package builder
@@ -1011,6 +1107,9 @@ Planned (per the master prompt's structure): `graphics/`, `performance/`,
 | Item | Status |
 |---|---|
 | Headless launcher core (list, run, library care, install, doctor, saves backup) | Implemented, Tested |
+| PSN connector, offline slice (token store, saved-response import, owned rows, linking) | Implemented, Tested on synthetic fixtures |
+| PSN live transport (token exchange, library fetch, refresh) | Planned, needs approval; Untested against Sony |
+| Downloading purchased games | Blocked: no authorized mechanism found; PNR will not bypass DRM or licensing |
 | Desktop launcher UI | Planned |
 | Security manager with a real isolation boundary (seccomp, namespaces) | Planned (required before any untrusted code) |
 | Hardware GPU testing and a swapchain or window | Planned, untested |
