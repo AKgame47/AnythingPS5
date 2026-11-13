@@ -222,3 +222,10 @@ MISMATCH. Non-packages fail at archive validation.
 - `nid::sha1(data) -> array<uint8_t,20>`: SHA-1 digest, validated against a reference vector.
 - `nid::compute_nid(symbol_name, library_name) -> string`: the 11-character PS-style NID; throws `std::invalid_argument` on an empty symbol name. Algorithm adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5) (GPL-2.0); AnythingPS5 is GPL-2.0.
 - `nid::resolve_nid(nid) -> string`: seed lookup table over common libkernel/libSceLibcInternal symbols; returns empty for unknown NIDs. The table grows with the PRX system-library layer (taxonomy per AnyPS5's core/libs/prx structure; we document the structure, we do not copy its 6000+ definition files wholesale).
+
+## IF-PRX-01 PRX System Libraries (v1) — Implemented, Tested
+
+- `PrxRegistry`: taxonomy of PS-style system-library symbols. Library/symbol organization follows AnyPS5 (GPL-2.0) core/libs/prx; host implementations are original PNR code.
+- `bind(nid, &fn, &error) -> SCE_OK` for implemented symbols; `SCE_KERNEL_ERROR_EINVAL` for declared-only symbols (known but not implemented); `SCE_KERNEL_ERROR_UNKNOWN` for NIDs outside the taxonomy. Never silently substitutes.
+- Implemented today (libkernel): `sceKernelUsleep`, `sceKernelSleep`, `sceKernelAlloc`, `sceKernelFree`, `sceKernelCreateThread` (detached host thread; handle/join API is Planned).
+- Declared-only (honest, no host implementation): `sceKernelAlloc` family extensions and `libSceLibcInternal` (printf, malloc, free, memcpy, memset, strlen, strcmp).
