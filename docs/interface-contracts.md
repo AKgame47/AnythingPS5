@@ -141,6 +141,25 @@ share one core.
 - Planned, not built: render passes, swapchains, vertex/fragment stages,
   texture/sampler objects.
 
+## IF-GRAPH-02 RDNA decoder (v1) — Implemented (subset), Tested
+
+- `rdna_family_of(word)` classifies any first word into its RDNA encoding
+  family; unrecognized patterns return `Unknown`, never a guess.
+- `rdna_decode(code)` walks a word stream into `RdnaInstruction` records
+  (pc, family, opcode id, mnemonic, operands, immediates, branch target,
+  word count). Truncation and unknown families are honest errors.
+- Mnemonics exist only for the named subset: scalar families complete per
+  the adapted tables, vector families partial. Other opcodes decode
+  structurally with `supported=false` and no invented name.
+- 64-bit families (VOP3/memory/image) consume two words so program
+  walking stays aligned even where payload fields are not decoded yet.
+- Encoding taxonomy, field layouts, operand numbering and opcode numbers
+  are adapted from AnyPS5's RdnaDecoder (boykopovar, GPL-2.0); the
+  implementation is original. Test corpus is synthetic instruction words,
+  like AnyPS5's own decoder tests - no commercial shader content.
+- Planned: SDWA/DPP modifiers, MIMG/MUBUF payload fields, VOP3 named
+  table, control-flow structurization, decode-to-SPIR-V translation.
+
 
 Game Rendering Interface → Graphics Compatibility Adapter → Intermediate
 Rendering Commands → Shader/Resource Translator → Vulkan Backend.
