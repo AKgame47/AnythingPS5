@@ -69,6 +69,20 @@ if(NOT out MATCHES "no verified download")
   message(FATAL_ERROR "unverified reason missing: ${out}")
 endif()
 
+# scan gate: a flagging (fake) clamscan blocks install unless overridden; nothing is installed on refusal
+file(WRITE ${WS}/fake_clamscan.sh "#!/bin/sh\necho 'sample: Fake.Sig FOUND'\nexit 1\n")
+execute_process(COMMAND chmod 755 ${WS}/fake_clamscan.sh)
+set(ENV{PNR_SCAN_CLAMSCAN} ${WS}/fake_clamscan.sh)
+run_launcher(out rc store scan demo good)
+if(rc EQUAL 0 OR NOT out MATCHES "clamav: flagged" OR NOT out MATCHES "model: off")
+  message(FATAL_ERROR "store scan should flag via fake clamscan and show model off: ${rc} ${out}")
+endif()
+run_launcher(out rc store install demo good)
+if(rc EQUAL 0 OR NOT out MATCHES "install refused" OR EXISTS ${WS}/lib/games/st-game-1.0.0)
+  message(FATAL_ERROR "a flagged package must not install without --allow-flagged: ${rc} ${out}")
+endif()
+unset(ENV{PNR_SCAN_CLAMSCAN})
+
 # the good one installs through the real importer
 run_launcher(out rc store install demo good)
 if(NOT rc EQUAL 0 OR NOT out MATCHES "IMPORT OK: st-game" OR NOT out MATCHES "installed from source 'demo'" OR NOT out MATCHES "${GOODSHA}")
