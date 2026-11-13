@@ -561,6 +561,7 @@ LaunchOutcome LauncherCore::launch(const std::string& game_id,
     if (!ec) full.push_back("LD_LIBRARY_PATH=" + self.parent_path().string());
   }
   loader::NativeLoader loader;
+  loader.child_setup = child_setup_;
   auto r = loader.launch(exe, args, full);
   o.attempted = r.started;
   o.finished = r.finished;
