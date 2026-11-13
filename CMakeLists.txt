@@ -136,7 +136,7 @@ set_target_properties(ps_cube_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
-add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp)
+add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp)
 
 # Let the tests launch the real PS-style demo binary.
 target_compile_definitions(pnr_tests PRIVATE
@@ -209,6 +209,15 @@ add_test(NAME pnr_launcher_workflow
     -DLAUNCHER=$<TARGET_FILE:pnr-launcher>
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_workflow.cmake)
 set_tests_properties(pnr_launcher_workflow PROPERTIES
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+add_test(NAME pnr_launcher_install_workflow
+  COMMAND ${CMAKE_COMMAND}
+    -DPS_DEMO=$<TARGET_FILE:ps_demo>
+    -DMAKE=$<TARGET_FILE:pnr_make_package>
+    -DLAUNCHER=$<TARGET_FILE:pnr-launcher>
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_install_workflow.cmake)
+set_tests_properties(pnr_launcher_install_workflow PROPERTIES
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 # PS-style game journey: package a sce-only binary, import, run BY ID.
