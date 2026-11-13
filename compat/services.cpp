@@ -9,6 +9,8 @@
 
 #if defined(__unix__) || defined(__APPLE__)
   #include <stdlib.h>  // posix_memalign
+#elif defined(_WIN32)
+  #include <malloc.h>  // _aligned_malloc/_aligned_free
 #endif
 
 namespace pnr::compat {
