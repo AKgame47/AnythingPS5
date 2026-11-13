@@ -98,7 +98,7 @@ void pnr_store_tests(int& pass, int& fail) {
     cmd_source_add(r, "demo", url, "Author's own games", false, &out);
     Fake f; f.body = index_of(pkg("alpha") + "," + pkg("beta", ",\"category\":\"racing\""));
     check(cmd_refresh(r, "demo", false, &out, &f) == 0 && has(out, "2 packages") && f.urls.size() == 1 && f.urls[0] == url, "refresh: fetches the source's own index URL");
-    check(cmd_search(r, "", "", false, &out) == 0 && has(out, "2 package(s)") && has(out, "[supported] demo/alpha") && has(out, "nothing here can be downloaded yet"), "search: lists packages with labels and the no-download note");
+    check(cmd_search(r, "", "", false, &out) == 0 && has(out, "2 package(s)") && has(out, "[supported] demo/alpha") && has(out, "store get <source> <package>"), "search: lists packages with labels and the no-download note");
     check(cmd_search(r, "alph", "", true, &out) == 0 && has(out, "\"id\":\"alpha\"") && !has(out, "\"id\":\"beta\""), "search: substring filter (json)");
     check(cmd_search(r, "GAME", "", false, &out) == 0 && has(out, "2 package(s)"), "search: case-insensitive");
     check(cmd_search(r, "zzz", "", false, &out) == 0 && has(out, "0 package(s)"), "search: no match is not an error");
