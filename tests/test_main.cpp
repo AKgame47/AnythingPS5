@@ -597,8 +597,8 @@ int main() {
             "prx: bind implemented NID");
       CHECK(fn({1000}) == pnr::prx::SCE_OK, "prx: bound trampoline runs");
       const std::string nid_mmap =
-          pnr::loader::nid::compute_nid("sceKernelMapMemory", "libkernel");
-      CHECK(reg.find(nid_mmap) != nullptr, "prx: mapMemory in taxonomy");
+          pnr::loader::nid::compute_nid("sceKernelReserveVirtualRange", "libkernel");
+      CHECK(reg.find(nid_mmap) != nullptr, "prx: reserveVirtualRange in taxonomy");
       CHECK(reg.bind(nid_mmap, &fn, &err) == pnr::prx::SCE_KERNEL_ERROR_EINVAL,
             "prx: declared-only bind is honest EINVAL");
       CHECK(reg.bind("ZZZZZZZZZZZ", &fn, &err) == pnr::prx::SCE_KERNEL_ERROR_UNKNOWN,
@@ -675,6 +675,58 @@ int main() {
     CHECK(reg.bind(nid_memcmp_unknown, &fn, &err) ==
               pnr::prx::SCE_KERNEL_ERROR_UNKNOWN,
           "libc: symbol outside taxonomy still UNKNOWN");
+  }
+
+  // --- libkernel memory management (mmap-backed) ---
+  {
+    // map RW, write through it, query, protect RO, unmap
+    void* p = pnr::prx::sceKernelMapMemory(
+        4096, pnr::prx::SCE_KERNEL_PROT_READ | pnr::prx::SCE_KERNEL_PROT_WRITE);
+    CHECK(p != nullptr, "mm: map RW");
+    std::memset(p, 0x5A, 4096);
+    void* qs = nullptr; void* qe = nullptr; std::int64_t qp = 0;
+    CHECK(pnr::prx::sceKernelQueryMemoryProtection(p, &qs, &qe, &qp) ==
+              pnr::prx::SCE_OK,
+          "mm: query ours");
+    CHECK(qs == p && qe == static_cast<char*>(p) + 4096 &&
+              qp == (pnr::prx::SCE_KERNEL_PROT_READ |
+                     pnr::prx::SCE_KERNEL_PROT_WRITE),
+          "mm: query range+prot");
+    CHECK(pnr::prx::sceKernelMTypeprotect(p, 4096,
+                                          pnr::prx::SCE_KERNEL_PROT_READ) ==
+              pnr::prx::SCE_OK,
+          "mm: protect RO");
+    CHECK(pnr::prx::sceKernelMunmap(p, 4096) == pnr::prx::SCE_OK,
+          "mm: unmap");
+    // honest failures
+    CHECK(pnr::prx::sceKernelMapMemory(0, pnr::prx::SCE_KERNEL_PROT_READ) ==
+              nullptr,
+          "mm: map(0) nullptr");
+    CHECK(pnr::prx::sceKernelMapMemory(4096, 99) == nullptr,
+          "mm: bad prot nullptr");
+    int dummy = 0;
+    CHECK(pnr::prx::sceKernelMunmap(&dummy, 16) ==
+              pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+          "mm: unmap foreign EINVAL");
+    CHECK(pnr::prx::sceKernelQueryMemoryProtection(&dummy, nullptr, nullptr,
+                                                   nullptr) ==
+              pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+          "mm: query foreign EINVAL");
+    // NID-bound path
+    pnr::prx::PrxRegistry reg;
+    std::function<std::int64_t(const std::vector<std::int64_t>&)> fn;
+    std::string err;
+    CHECK(reg.bind(pnr::loader::nid::compute_nid("sceKernelMapMemory",
+                                                 "libkernel"),
+                   &fn, &err) == pnr::prx::SCE_OK,
+          "mm: mapMemory binds implemented");
+    const std::int64_t mapped = fn({4096, pnr::prx::SCE_KERNEL_PROT_READ |
+                                            pnr::prx::SCE_KERNEL_PROT_WRITE});
+    CHECK(mapped != 0, "mm: bound map works");
+    CHECK(reg.bind(pnr::loader::nid::compute_nid("sceKernelMunmap", "libkernel"),
+                   &fn, &err) == pnr::prx::SCE_OK,
+          "mm: munmap binds");
+    CHECK(fn({mapped, 4096}) == pnr::prx::SCE_OK, "mm: bound unmap works");
   }
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
