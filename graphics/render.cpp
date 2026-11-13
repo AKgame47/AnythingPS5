@@ -40,14 +40,44 @@ Status VulkanBackend::render_frames_rgba(
   for (auto& p : fp)
     if (p.empty() || p.size() > 16 || p.size() != fp[0].size())
       return Status::Fail(100, "vulkan", "push constants must be 1..16 words, same size every frame");
-  return render_core(w, h, vs, fs, (uint32_t)(vertices.size() / 5), &vertices, &fp, clear, frames);
+  MeshInput m;
+  m.vertices = &vertices;
+  return render_core(w, h, vs, fs, (uint32_t)(vertices.size() / 5), &m, &fp, clear, frames);
+}
+
+Status VulkanBackend::render_mesh_frames_rgba(
+    uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
+    const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
+    const std::vector<uint32_t>& indices, bool depth,
+    const std::vector<std::vector<uint32_t>>& fp, const float clear[4],
+    std::vector<std::vector<uint8_t>>* frames) {
+  if (vertices.empty() || vertices.size() % 6 || vertices.size() / 6 > 65536)
+    return Status::Fail(100, "vulkan", "mesh vertices must be float3 position + float3 colour (multiple of 6 floats, max 65536 vertices)");
+  if (indices.empty() || indices.size() % 3 || indices.size() > 30000)
+    return Status::Fail(100, "vulkan", "mesh indices must be a nonzero multiple of 3 (max 30000)");
+  for (uint32_t i : indices)
+    if (i >= vertices.size() / 6)
+      return Status::Fail(100, "vulkan", "mesh index out of range of the vertex array");
+  if (fp.empty() || fp.size() > 64)
+    return Status::Fail(100, "vulkan", "frame count must be 1..64");
+  for (auto& p : fp)
+    if (p.empty() || p.size() > 16 || p.size() != fp[0].size())
+      return Status::Fail(100, "vulkan", "push constants must be 1..16 words, same size every frame");
+  MeshInput m;
+  m.vertices = &vertices; m.pos_floats = 3; m.indices = &indices; m.depth = depth;
+  return render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, &fp, clear, frames);
 }
 
 Status VulkanBackend::render_core(
     uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
     const std::vector<uint32_t>& fs, uint32_t vertex_count,
-    const std::vector<float>* verts, const std::vector<std::vector<uint32_t>>* fp,
+    const MeshInput* mesh, const std::vector<std::vector<uint32_t>>* fp,
     const float clear[4], std::vector<std::vector<uint8_t>>* out) {
+  const std::vector<float>* verts = mesh ? mesh->vertices : nullptr;
+  const std::vector<uint32_t>* idx = mesh ? mesh->indices : nullptr;
+  const bool depth = mesh && mesh->depth;
+  const uint32_t pos_floats = mesh ? mesh->pos_floats : 2;
+  const uint32_t vstride = (pos_floats + 3) * 4;
   const uint32_t nframes = fp ? (uint32_t)fp->size() : 1;
   const uint32_t push_words = fp ? (uint32_t)(*fp)[0].size() : 0;
   if (!device_ || !out) return Status::Fail(100, "vulkan", "render needs a device and an output buffer");
@@ -55,8 +85,8 @@ Status VulkanBackend::render_core(
     return Status::Fail(100, "vulkan", "selected queue family has no graphics support; offscreen render Blocked on this device");
   if (w == 0 || h == 0 || w > 4096 || h > 4096)
     return Status::Fail(100, "vulkan", "render size must be 1..4096 per axis");
-  if (vertex_count == 0 || vertex_count > 3000 || vertex_count % 3)
-    return Status::Fail(100, "vulkan", "vertex_count must be a nonzero multiple of 3 (max 3000)");
+  if (vertex_count == 0 || vertex_count > 30000 || vertex_count % 3)
+    return Status::Fail(100, "vulkan", "vertex_count must be a nonzero multiple of 3 (max 30000)");
 
   // Cleanup stack: run in reverse order on every exit path.
   std::vector<std::function<void()>> undo;
@@ -121,6 +151,46 @@ Status VulkanBackend::render_core(
   if (r != VK_SUCCESS) return vkfail("vkCreateImageView", r);
   undo.push_back([&, view] { fn<void (*)(VkDevice, VkImageView, void*)>(vkDestroyImageView)(device_, view, nullptr); });
 
+  // --- optional depth image (D32_SFLOAT) ---
+  VkImageView dview = 0;
+  VkImage dimage = 0;
+  if (depth) {
+    VkFormatProperties fprops{};
+    fn<void (*)(VkPhysicalDevice, int32_t, VkFormatProperties*)>(vkGetPhysicalDeviceFormatProperties)(
+        phys_, (int32_t)VK_FORMAT_D32_SFLOAT, &fprops);
+    if (!(fprops.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
+      return Status::Fail(100, "vulkan", "D32_SFLOAT depth attachment unsupported on this device; depth rendering Blocked");
+    VkImageCreateInfo dci = ici;
+    dci.format = VK_FORMAT_D32_SFLOAT;
+    dci.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    r = fn<VkResult (*)(VkDevice, const VkImageCreateInfo*, void*, VkImage*)>(
+        vkCreateImage)(device_, &dci, nullptr, &dimage);
+    if (r != VK_SUCCESS) return vkfail("vkCreateImage (depth)", r);
+    undo.push_back([&, dimage] { fn<void (*)(VkDevice, VkImage, void*)>(vkDestroyImage)(device_, dimage, nullptr); });
+    VkMemoryRequirements dreq{};
+    fn<void (*)(VkDevice, VkImage, VkMemoryRequirements*)>(vkGetImageMemoryRequirements)(device_, dimage, &dreq);
+    int dt = pick(dreq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (dt < 0) dt = pick(dreq.memoryTypeBits, 0);
+    if (dt < 0) return Status::Fail(100, "vulkan", "no memory type for the depth image");
+    VkMemoryAllocateInfo dmai{};
+    dmai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    dmai.allocationSize = dreq.size; dmai.memoryTypeIndex = (uint32_t)dt;
+    VkDeviceMemory dmem = 0;
+    r = fn<VkResult (*)(VkDevice, const VkMemoryAllocateInfo*, void*, VkDeviceMemory*)>(
+        vkAllocateMemory)(device_, &dmai, nullptr, &dmem);
+    if (r != VK_SUCCESS) return vkfail("vkAllocateMemory (depth)", r);
+    undo.push_back([&, dmem] { fn<void (*)(VkDevice, VkDeviceMemory, void*)>(vkFreeMemory)(device_, dmem, nullptr); });
+    r = fn<VkResult (*)(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize)>(vkBindImageMemory)(device_, dimage, dmem, 0);
+    if (r != VK_SUCCESS) return vkfail("vkBindImageMemory (depth)", r);
+    VkImageViewCreateInfo dvci = vci;
+    dvci.image = dimage; dvci.format = VK_FORMAT_D32_SFLOAT;
+    dvci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    r = fn<VkResult (*)(VkDevice, const VkImageViewCreateInfo*, void*, VkImageView*)>(
+        vkCreateImageView)(device_, &dvci, nullptr, &dview);
+    if (r != VK_SUCCESS) return vkfail("vkCreateImageView (depth)", r);
+    undo.push_back([&, dview] { fn<void (*)(VkDevice, VkImageView, void*)>(vkDestroyImageView)(device_, dview, nullptr); });
+  }
+
   // --- host readback buffer ---
   VkBufferCreateInfo bci{};
   bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -144,48 +214,66 @@ Status VulkanBackend::render_core(
   r = fn<VkResult (*)(VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize)>(vkBindBufferMemory)(device_, buf, bmem, 0);
   if (r != VK_SUCCESS) return vkfail("vkBindBufferMemory", r);
 
-  // --- optional vertex buffer (host visible, written once) ---
-  VkBuffer vbuf = 0;
-  if (verts) {
-    VkBufferCreateInfo vb{};
-    vb.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    vb.size = verts->size() * 4; vb.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    vb.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    r = fn<VkResult (*)(VkDevice, const VkBufferCreateInfo*, void*, VkBuffer*)>(
-        vkCreateBuffer)(device_, &vb, nullptr, &vbuf);
-    if (r != VK_SUCCESS) return vkfail("vkCreateBuffer (vertex)", r);
-    undo.push_back([&, vbuf] { fn<void (*)(VkDevice, VkBuffer, void*)>(vkDestroyBuffer)(device_, vbuf, nullptr); });
-    VkMemoryRequirements vreq{};
-    fn<void (*)(VkDevice, VkBuffer, VkMemoryRequirements*)>(vkGetBufferMemoryRequirements)(device_, vbuf, &vreq);
-    int vt = pick(vreq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (vt < 0) return Status::Fail(100, "vulkan", "no host-visible+coherent memory type for the vertex buffer");
-    mai.allocationSize = vreq.size; mai.memoryTypeIndex = (uint32_t)vt;
-    VkDeviceMemory vmem = 0;
-    r = fn<VkResult (*)(VkDevice, const VkMemoryAllocateInfo*, void*, VkDeviceMemory*)>(
-        vkAllocateMemory)(device_, &mai, nullptr, &vmem);
-    if (r != VK_SUCCESS) return vkfail("vkAllocateMemory (vertex)", r);
-    undo.push_back([&, vmem] { fn<void (*)(VkDevice, VkDeviceMemory, void*)>(vkFreeMemory)(device_, vmem, nullptr); });
-    r = fn<VkResult (*)(VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize)>(vkBindBufferMemory)(device_, vbuf, vmem, 0);
-    if (r != VK_SUCCESS) return vkfail("vkBindBufferMemory (vertex)", r);
-    void* vm = nullptr;
-    r = fn<VkResult (*)(VkDevice, VkDeviceMemory, VkDeviceSize, VkDeviceSize, VkFlags, void**)>(
-        vkMapMemory)(device_, vmem, 0, verts->size() * 4, 0, &vm);
-    if (r != VK_SUCCESS) return vkfail("vkMapMemory (vertex)", r);
-    std::memcpy(vm, verts->data(), verts->size() * 4);
-    fn<void (*)(VkDevice, VkDeviceMemory)>(vkUnmapMemory)(device_, vmem);
-  }
+  // --- optional vertex / index buffers (host visible, written once) ---
+  auto host_buffer = [&](const void* data, size_t nbytes, VkFlags usage, const char* what,
+                         VkBuffer* out_buf) -> Status {
+    VkBufferCreateInfo b{};
+    b.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    b.size = nbytes; b.usage = usage; b.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkResult rr = fn<VkResult (*)(VkDevice, const VkBufferCreateInfo*, void*, VkBuffer*)>(
+        vkCreateBuffer)(device_, &b, nullptr, out_buf);
+    if (rr != VK_SUCCESS) return vkfail(std::string("vkCreateBuffer (") + what + ")", rr);
+    VkBuffer bb = *out_buf;
+    undo.push_back([&, bb] { fn<void (*)(VkDevice, VkBuffer, void*)>(vkDestroyBuffer)(device_, bb, nullptr); });
+    VkMemoryRequirements q{};
+    fn<void (*)(VkDevice, VkBuffer, VkMemoryRequirements*)>(vkGetBufferMemoryRequirements)(device_, bb, &q);
+    int t = pick(q.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (t < 0) return Status::Fail(100, "vulkan", std::string("no host-visible+coherent memory type for the ") + what + " buffer");
+    VkMemoryAllocateInfo m{};
+    m.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    m.allocationSize = q.size; m.memoryTypeIndex = (uint32_t)t;
+    VkDeviceMemory mm = 0;
+    rr = fn<VkResult (*)(VkDevice, const VkMemoryAllocateInfo*, void*, VkDeviceMemory*)>(
+        vkAllocateMemory)(device_, &m, nullptr, &mm);
+    if (rr != VK_SUCCESS) return vkfail(std::string("vkAllocateMemory (") + what + ")", rr);
+    undo.push_back([&, mm] { fn<void (*)(VkDevice, VkDeviceMemory, void*)>(vkFreeMemory)(device_, mm, nullptr); });
+    rr = fn<VkResult (*)(VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize)>(vkBindBufferMemory)(device_, bb, mm, 0);
+    if (rr != VK_SUCCESS) return vkfail(std::string("vkBindBufferMemory (") + what + ")", rr);
+    void* p = nullptr;
+    rr = fn<VkResult (*)(VkDevice, VkDeviceMemory, VkDeviceSize, VkDeviceSize, VkFlags, void**)>(
+        vkMapMemory)(device_, mm, 0, nbytes, 0, &p);
+    if (rr != VK_SUCCESS) return vkfail(std::string("vkMapMemory (") + what + ")", rr);
+    std::memcpy(p, data, nbytes);
+    fn<void (*)(VkDevice, VkDeviceMemory)>(vkUnmapMemory)(device_, mm);
+    return Status::Ok();
+  };
+  VkBuffer vbuf = 0, ibuf = 0;
+  if (verts)
+    if (Status s = host_buffer(verts->data(), verts->size() * 4, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, "vertex", &vbuf); !s.ok) return s;
+  if (idx)
+    if (Status s = host_buffer(idx->data(), idx->size() * 4, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, "index", &ibuf); !s.ok) return s;
 
   // --- render pass: clear on load, store, end in TRANSFER_SRC ---
-  VkAttachmentDescription att{};
-  att.format = VK_FORMAT_R8G8B8A8_UNORM; att.samples = VK_SAMPLE_COUNT_1_BIT;
-  att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-  att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-  att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  att.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  VkAttachmentDescription att[2]{};
+  att[0].format = VK_FORMAT_R8G8B8A8_UNORM; att[0].samples = VK_SAMPLE_COUNT_1_BIT;
+  att[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; att[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  att[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  att[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+  att[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  att[0].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
   VkSubpassDescription sub{};
   sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  VkAttachmentReference dref{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+  if (depth) {
+    att[1].format = VK_FORMAT_D32_SFLOAT; att[1].samples = VK_SAMPLE_COUNT_1_BIT;
+    att[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; att[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    att[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    sub.pDepthStencilAttachment = &dref;
+  }
   sub.colorAttachmentCount = 1; sub.pColorAttachments = &ref;
   VkSubpassDependency dep{};
   dep.srcSubpass = 0; dep.dstSubpass = VK_SUBPASS_EXTERNAL;
@@ -195,7 +283,7 @@ Status VulkanBackend::render_core(
   dep.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
   VkRenderPassCreateInfo rpci{};
   rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-  rpci.attachmentCount = 1; rpci.pAttachments = &att;
+  rpci.attachmentCount = depth ? 2 : 1; rpci.pAttachments = att;
   rpci.subpassCount = 1; rpci.pSubpasses = &sub;
   rpci.dependencyCount = 1; rpci.pDependencies = &dep;
   VkRenderPass rp = 0;
@@ -204,9 +292,10 @@ Status VulkanBackend::render_core(
   if (r != VK_SUCCESS) return vkfail("vkCreateRenderPass", r);
   undo.push_back([&, rp] { fn<void (*)(VkDevice, VkRenderPass, void*)>(vkDestroyRenderPass)(device_, rp, nullptr); });
 
+  VkImageView fbviews[2] = {view, dview};
   VkFramebufferCreateInfo fbci{};
   fbci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-  fbci.renderPass = rp; fbci.attachmentCount = 1; fbci.pAttachments = &view;
+  fbci.renderPass = rp; fbci.attachmentCount = depth ? 2 : 1; fbci.pAttachments = fbviews;
   fbci.width = w; fbci.height = h; fbci.layers = 1;
   VkFramebuffer fb = 0;
   r = fn<VkResult (*)(VkDevice, const VkFramebufferCreateInfo*, void*, VkFramebuffer*)>(
@@ -249,9 +338,11 @@ Status VulkanBackend::render_core(
   stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fmod; stages[1].pName = "main";
   VkPipelineVertexInputStateCreateInfo vin{};
   vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-  VkVertexInputBindingDescription vbind{0, 20, VK_VERTEX_INPUT_RATE_VERTEX};
+  VkVertexInputBindingDescription vbind{0, vstride, VK_VERTEX_INPUT_RATE_VERTEX};
+  using Fmt = decltype(VkVertexInputAttributeDescription::format);
   VkVertexInputAttributeDescription vattr[2] = {
-      {0, 0, VK_FORMAT_R32G32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 8}};
+      {0, 0, static_cast<Fmt>(pos_floats == 3 ? (int32_t)VK_FORMAT_R32G32B32_SFLOAT : (int32_t)VK_FORMAT_R32G32_SFLOAT), 0},
+      {1, 0, static_cast<Fmt>((int32_t)VK_FORMAT_R32G32B32_SFLOAT), pos_floats * 4}};
   if (verts) {
     vin.vertexBindingDescriptionCount = 1; vin.pVertexBindingDescriptions = &vbind;
     vin.vertexAttributeDescriptionCount = 2; vin.pVertexAttributeDescriptions = vattr;
@@ -276,12 +367,17 @@ Status VulkanBackend::render_core(
   VkPipelineColorBlendStateCreateInfo cb{};
   cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
   cb.attachmentCount = 1; cb.pAttachments = &cba;
+  VkPipelineDepthStencilStateCreateInfo dss{};
+  dss.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+  dss.depthTestEnable = 1; dss.depthWriteEnable = 1;
+  dss.depthCompareOp = VK_COMPARE_OP_LESS; dss.maxDepthBounds = 1.0f;
   VkGraphicsPipelineCreateInfo gpci{};
   gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
   gpci.stageCount = 2; gpci.pStages = stages;
   gpci.pVertexInputState = &vin; gpci.pInputAssemblyState = &ia;
   gpci.pViewportState = &vps; gpci.pRasterizationState = &rs;
   gpci.pMultisampleState = &ms; gpci.pColorBlendState = &cb;
+  if (depth) gpci.pDepthStencilState = &dss;
   gpci.layout = pl; gpci.renderPass = rp; gpci.subpass = 0;
   gpci.basePipelineIndex = -1;
   VkPipeline pipe = 0;
@@ -308,12 +404,13 @@ Status VulkanBackend::render_core(
       vkAllocateCommandBuffers)(device_, &cbai, cmds.data());
   if (r != VK_SUCCESS) return vkfail("vkAllocateCommandBuffers", r);
 
-  VkClearValue cv{};
-  for (int i = 0; i < 4; ++i) cv.color.float32[i] = clear[i];
+  VkClearValue cv[2]{};
+  for (int i = 0; i < 4; ++i) cv[0].color.float32[i] = clear[i];
+  cv[1].depthStencil.depth = 1.0f;
   VkRenderPassBeginInfo rbi{};
   rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
   rbi.renderPass = rp; rbi.framebuffer = fb; rbi.renderArea = sc;
-  rbi.clearValueCount = 1; rbi.pClearValues = &cv;
+  rbi.clearValueCount = depth ? 2 : 1; rbi.pClearValues = cv;
   VkCommandBufferBeginInfo begin{};
   begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -332,8 +429,15 @@ Status VulkanBackend::render_core(
     if (push_words)
       fn<void (*)(VkCommandBuffer, VkPipelineLayout, VkFlags, uint32_t, uint32_t, const void*)>(
           vkCmdPushConstants)(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT, 0, push_words * 4, (*fp)[f].data());
-    fn<void (*)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t)>(vkCmdDraw)(
-        cmd, vertex_count, 1, 0, 0);
+    if (ibuf) {
+      fn<void (*)(VkCommandBuffer, VkBuffer, VkDeviceSize, int32_t)>(vkCmdBindIndexBuffer)(
+          cmd, ibuf, 0, (int32_t)VK_INDEX_TYPE_UINT32);
+      fn<void (*)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, int32_t, uint32_t)>(vkCmdDrawIndexed)(
+          cmd, vertex_count, 1, 0, 0, 0);
+    } else {
+      fn<void (*)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t)>(vkCmdDraw)(
+          cmd, vertex_count, 1, 0, 0);
+    }
     fn<void (*)(VkCommandBuffer)>(vkCmdEndRenderPass)(cmd);
     VkBufferImageCopy region{};
     region.bufferOffset = bytes * f;
