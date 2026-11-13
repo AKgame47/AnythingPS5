@@ -15,6 +15,7 @@
 
 namespace pnr::store {
 
+constexpr int kErrSignature = 305;
 constexpr int kErrBadSource = 300, kErrBadIndex = 301, kErrNoSource = 302, kErrDuplicate = 303, kErrIo = 304;
 
 struct Source {
@@ -22,6 +23,7 @@ struct Source {
   std::string index_url;  // https, host, no userinfo, port 443
   std::string rights;     // declared by the user; PNR does not verify it
   std::string host;       // derived
+  std::string pubkey;     // optional pinned Ed25519 public key, 64 lowercase hex (slice B1)
 };
 
 struct Package {
@@ -30,7 +32,13 @@ struct Package {
   std::string category, kind, url, sha256;
   long long size = 0;
   bool experimental = false;
+  std::string signature;  // optional Ed25519 signature, 128 lowercase hex (slice B1)
 };
+// Message a source signs for one package (binds source, id, version, hash, size).
+std::string signed_message(const std::string& source_id, const Package& p);
+// Signature policy. Source without a pinned key: ok, mode "unsigned (hash only)".
+// Source with a pinned key: the package MUST carry a signature that verifies, else failure.
+Status check_signature(const Source& s, const Package& p, std::string* mode);
 // Derived by PNR, never taken from the index.
 //   "supported":   kind == "pnr-package" (the only format PNR can install)
 //   "experimental": same kind, index marks it experimental
@@ -54,6 +62,7 @@ public:
   const std::vector<Source>& sources() const { return sources_; }
   const std::string& dir() const { return dir_; }
   const Source* find(const std::string& id) const;
+  Status set_pubkey(const std::string& id, const std::string& hex);  // "" unpins
   Status add(const std::string& id, const std::string& url, const std::string& rights);
   Status remove(const std::string& id, bool* existed);  // also deletes its cached index
   std::string index_path(const std::string& id) const { return dir_ + "/index/" + id + ".json"; }
