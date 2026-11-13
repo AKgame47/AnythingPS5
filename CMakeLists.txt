@@ -30,6 +30,9 @@ target_link_libraries(pnr_prx PUBLIC pnr_loader pnr_compat)
 target_link_libraries(pnr_loader PUBLIC pnr_core)
 
 # MODULE 03 - compatibility services
+add_library(pnr_shader shader/rdna.cpp)
+target_include_directories(pnr_shader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_library(pnr_graphics graphics/vulkan.cpp graphics/spirv.cpp)
 target_include_directories(pnr_graphics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pnr_graphics PUBLIC pnr_core dl)
@@ -117,7 +120,7 @@ add_executable(pnr_tests tests/test_main.cpp)
 target_compile_definitions(pnr_tests PRIVATE
   PNR_PS_DEMO_PATH="$<TARGET_FILE:ps_demo>"
   PNR_PSABI_DIR="$<TARGET_FILE_DIR:pnr_psabi>")
-target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics)
+target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics pnr_shader)
 
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
 # End-to-end: the CLI validates and natively runs the demo app.
