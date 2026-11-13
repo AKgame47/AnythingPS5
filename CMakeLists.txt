@@ -24,7 +24,7 @@ add_library(pnr_loader loader/elf_parser.cpp loader/native_loader.cpp loader/nid
 add_library(pnr_prx prx/prx.cpp prx/prx_file.cpp loader/import_resolver.cpp)
 
 add_library(pnr_psabi SHARED psabi/psabi.cpp)
-target_link_libraries(pnr_psabi PRIVATE pnr_compat pnr_graphics)
+target_link_libraries(pnr_psabi PRIVATE pnr_compat pnr_shader pnr_graphics)
 set_target_properties(pnr_psabi PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(pnr_prx PUBLIC pnr_loader pnr_compat)
 target_link_libraries(pnr_loader PUBLIC pnr_core)
@@ -38,6 +38,7 @@ target_include_directories(pnr_graphics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pnr_graphics PUBLIC pnr_core dl)
 target_link_libraries(pnr_shader PUBLIC pnr_graphics)
 set_target_properties(pnr_graphics PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(pnr_shader PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(pnr_compat compat/services.cpp)
 # PIC: pnr_compat also links into the pnr_psabi shared library.
 set_target_properties(pnr_compat PROPERTIES POSITION_INDEPENDENT_CODE ON)
