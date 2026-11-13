@@ -14,6 +14,8 @@
 
 namespace pnr::prx {
 
+class PsFileTable;  // prx_file.hpp
+
 using SceInt32 = std::int32_t;
 constexpr SceInt32 SCE_OK = 0;
 constexpr SceInt32 SCE_KERNEL_ERROR_ENOMEM = -1;
@@ -50,6 +52,12 @@ class PrxRegistry {
   SceInt32 bind(const std::string& nid,
                 std::function<std::int64_t(const std::vector<std::int64_t>&)>* fn,
                 std::string* error) const;
+
+  // Installs the libkernel file calls (open/read/write/close/lseek/fstat)
+  // backed by a jailed descriptor table. Until this is called those
+  // symbols stay declared-only (honest). Not thread-safe vs bind(); call
+  // once during setup.
+  void install_file_calls(PsFileTable* table);
 
  private:
   std::vector<PrxSymbol> symbols_;
