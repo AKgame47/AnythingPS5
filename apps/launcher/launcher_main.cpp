@@ -43,7 +43,7 @@ static void usage() {
             "  pnr-launcher store source add <id> <https-index-url> --rights <statement> | store source remove <id> [--yes] | store source list\n"
             "  pnr-launcher store get <source> <package> | store queue list|run [<source> <package>] | store queue pause|resume|cancel <source> <package> [--yes] | store install <source> <package>\n"
             "  pnr-launcher store refresh [id] | store search [text] [--source id] | store show <source> <package> [--json]\n"
-            "  pnr-launcher ask \"<sentence>\" [--threshold 0.8]   (EXPERIMENTAL; needs PNR_NEEDLE; mutating commands always ask you first)\n"
+            "  pnr-launcher ask \"<sentence>\" [--threshold 0.8] [--no-model-sandbox]   (EXPERIMENTAL; needs PNR_NEEDLE; mutating commands always ask you first)\n"
             "  pnr-launcher research log add <text> | log list [--limit N] | log verify   (append-only, hash-chained)\n"
             "  pnr-launcher research fetch <https-url> <out-file> --rights <statement> [--sha256 HEX] [--force]   (user-supplied URL only)\n"
             "  pnr-launcher research inspect <file> [--log]   (read-only; recognises PNR formats, never opens Sony packages)\n"
@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
   bool json = false;
   std::vector<std::string> pos, gameargs;
   bool after = false, complete = false, forget = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
-  bool sandbox_on = false, allow_flagged = false, force = false, log_it = false;
+  bool no_model_sandbox = false, sandbox_on = false, allow_flagged = false, force = false, log_it = false;
   std::string sha256_arg, threshold_s = "0.8";
   std::string note, limit_s = "20", file, platform, rights, source;
   for (size_t i = 1; i < a.size(); ++i) {
@@ -71,6 +71,7 @@ int main(int argc, char** argv) {
     else if (a[i] == "--json") json = true;
     else if (a[i] == "--yes") yes = true;
     else if (a[i] == "--sandbox") sandbox_on = true;
+    else if (a[i] == "--no-model-sandbox") no_model_sandbox = true;
     else if (a[i] == "--allow-flagged") allow_flagged = true;
     else if (a[i] == "--force") force = true;
     else if (a[i] == "--threshold" && i + 1 < a.size()) threshold_s = a[++i];
@@ -215,6 +216,7 @@ int main(int argc, char** argv) {
     lk.source_exists = [&](const std::string& id) { return areg.find(id) != nullptr; };
     lk.package_exists = [&](const std::string& s, const std::string& p) { pnr::store::Index ix; if (!areg.load_index(s, &ix)) return false; for (const auto& k : ix.packages) if (k.id == p) return true; return false; };
     pnr::ask::AskIO io;
+    io.sandbox_model = !no_model_sandbox;
     io.interactive = ::isatty(0) && ::isatty(1);
     io.confirm = [](const std::string& cmd) {
       std::printf("run this? %s  [y/N] ", cmd.c_str()); std::fflush(stdout);
