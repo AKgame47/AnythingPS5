@@ -1,0 +1,217 @@
+#include "library/game_db.hpp"
+
+#include "library/sqlite3_shim.h"
+
+#include <ctime>
+
+#include <filesystem>
+
+namespace pnr::library {
+
+struct GameDb::Impl {
+  sqlite3* h = nullptr;
+};
+
+namespace {
+Status sql_status(int rc, sqlite3* h, const char* what) {
+  if (rc == SQLITE_OK || rc == SQLITE_DONE) return Status::Ok();
+  return Status::Fail(rc, "library.db",
+                      std::string(what) + ": " +
+                          (h ? sqlite3_errmsg(h) : "no db"));
+}
+}  // namespace
+
+Status GameDb::exec(const char* sql, const char* what) {
+  char* err = nullptr;
+  int rc = sqlite3_exec(db_->h, sql, nullptr, nullptr, &err);
+  if (rc != SQLITE_OK) {
+    std::string msg = err ? err : "unknown";
+    sqlite3_free(err);
+    return Status::Fail(rc, "library.db", std::string(what) + ": " + msg);
+  }
+  return Status::Ok();
+}
+
+Status GameDb::open(const std::string& path) {
+  close();
+  // Ensure the parent directory exists so SQLite can create the file.
+  std::error_code ec;
+  auto parent = std::filesystem::path(path).parent_path();
+  if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+  db_ = new Impl();
+  int rc = sqlite3_open_v2(path.c_str(), &db_->h,
+                           SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                               SQLITE_OPEN_FULLMUTEX,
+                           nullptr);
+  if (rc != SQLITE_OK)
+    return Status::Fail(rc, "library.db", "open failed: " + path);
+  return exec(
+      "PRAGMA journal_mode=WAL;"
+      "CREATE TABLE IF NOT EXISTS games("
+      " game_id TEXT PRIMARY KEY, title TEXT NOT NULL,"
+      " version TEXT NOT NULL, platform TEXT NOT NULL);"
+      "CREATE TABLE IF NOT EXISTS installations("
+      " game_id TEXT PRIMARY KEY, path TEXT NOT NULL,"
+      " version TEXT NOT NULL, integrity TEXT NOT NULL);"
+      "CREATE TABLE IF NOT EXISTS compatibility("
+      " game_id TEXT PRIMARY KEY, state TEXT NOT NULL, notes TEXT);"
+      "CREATE TABLE IF NOT EXISTS launches("
+      " id INTEGER PRIMARY KEY AUTOINCREMENT, game_id TEXT NOT NULL,"
+      " exit_code INTEGER NOT NULL, wall_seconds REAL NOT NULL,"
+      " at REAL NOT NULL);",
+      "schema");
+}
+
+void GameDb::close() {
+  if (db_) {
+    if (db_->h) sqlite3_close_v2(db_->h);
+    delete db_;
+    db_ = nullptr;
+  }
+}
+
+namespace {
+class Stmt {
+public:
+  Stmt(sqlite3* h, const char* sql) : h_(h) {
+    rc_ = sqlite3_prepare_v2(h_, sql, -1, &st_, nullptr);
+  }
+  ~Stmt() { if (st_) sqlite3_finalize(st_); }
+  bool ok() const { return rc_ == SQLITE_OK && st_; }
+  int rc() const { return rc_; }
+  bool step_row() { return sqlite3_step(st_) == SQLITE_ROW; }
+  Status run(sqlite3* h, const char* what) {
+    int rc = sqlite3_step(st_);
+    return sql_status(rc, h, what);
+  }
+  void bind_text(int i, const std::string& v) {
+    sqlite3_bind_text(st_, i, v.c_str(), -1, SQLITE_TRANSIENT);
+  }
+  void bind_int(int i, int64_t v) { sqlite3_bind_int64(st_, i, v); }
+  void bind_double(int i, double v) { sqlite3_bind_double(st_, i, v); }
+  std::string text(int i) {
+    const unsigned char* t = sqlite3_column_text(st_, i);
+    return t ? reinterpret_cast<const char*>(t) : "";
+  }
+  int64_t integer(int i) { return sqlite3_column_int64(st_, i); }
+  sqlite3_stmt* raw() { return st_; }
+
+private:
+  sqlite3* h_;
+  sqlite3_stmt* st_ = nullptr;
+  int rc_ = SQLITE_OK;
+};
+}  // namespace
+
+Status GameDb::add_game(const GameRecord& g) {
+  Stmt s(db_->h, "INSERT OR REPLACE INTO games(game_id,title,version,platform)"
+                 " VALUES(?,?,?,?)");
+  if (!s.ok()) return sql_status(s.rc(), db_->h, "add_game prepare");
+  s.bind_text(1, g.game_id);
+  s.bind_text(2, g.title);
+  s.bind_text(3, g.version);
+  s.bind_text(4, g.platform);
+  return s.run(db_->h, "add_game");
+}
+
+std::optional<GameRecord> GameDb::get_game(const std::string& game_id) {
+  Stmt s(db_->h, "SELECT game_id,title,version,platform FROM games"
+                 " WHERE game_id=?");
+  if (!s.ok()) return std::nullopt;
+  s.bind_text(1, game_id);
+  if (!s.step_row()) return std::nullopt;
+  GameRecord g;
+  g.game_id = s.text(0);
+  g.title = s.text(1);
+  g.version = s.text(2);
+  g.platform = s.text(3);
+  return g;
+}
+
+std::vector<GameRecord> GameDb::list_games() {
+  std::vector<GameRecord> out;
+  Stmt s(db_->h, "SELECT game_id,title,version,platform FROM games"
+                 " ORDER BY title");
+  if (!s.ok()) return out;
+  while (s.step_row()) {
+    GameRecord g;
+    g.game_id = s.text(0);
+    g.title = s.text(1);
+    g.version = s.text(2);
+    g.platform = s.text(3);
+    out.push_back(g);
+  }
+  return out;
+}
+
+Status GameDb::set_installation(const InstallationRecord& inst) {
+  Stmt s(db_->h, "INSERT OR REPLACE INTO installations"
+                 "(game_id,path,version,integrity) VALUES(?,?,?,?)");
+  if (!s.ok()) return sql_status(s.rc(), db_->h, "set_installation prepare");
+  s.bind_text(1, inst.game_id);
+  s.bind_text(2, inst.path);
+  s.bind_text(3, inst.version);
+  s.bind_text(4, inst.integrity);
+  return s.run(db_->h, "set_installation");
+}
+
+std::optional<InstallationRecord> GameDb::get_installation(
+    const std::string& game_id) {
+  Stmt s(db_->h, "SELECT game_id,path,version,integrity FROM installations"
+                 " WHERE game_id=?");
+  if (!s.ok()) return std::nullopt;
+  s.bind_text(1, game_id);
+  if (!s.step_row()) return std::nullopt;
+  InstallationRecord r;
+  r.game_id = s.text(0);
+  r.path = s.text(1);
+  r.version = s.text(2);
+  r.integrity = s.text(3);
+  return r;
+}
+
+Status GameDb::set_compatibility(const CompatibilityRecord& c) {
+  Stmt s(db_->h, "INSERT OR REPLACE INTO compatibility(game_id,state,notes)"
+                 " VALUES(?,?,?)");
+  if (!s.ok()) return sql_status(s.rc(), db_->h, "set_compat prepare");
+  s.bind_text(1, c.game_id);
+  s.bind_text(2, c.state);
+  s.bind_text(3, c.notes);
+  return s.run(db_->h, "set_compat");
+}
+
+std::optional<CompatibilityRecord> GameDb::get_compatibility(
+    const std::string& game_id) {
+  Stmt s(db_->h, "SELECT game_id,state,notes FROM compatibility"
+                 " WHERE game_id=?");
+  if (!s.ok()) return std::nullopt;
+  s.bind_text(1, game_id);
+  if (!s.step_row()) return std::nullopt;
+  CompatibilityRecord r;
+  r.game_id = s.text(0);
+  r.state = s.text(1);
+  r.notes = s.text(2);
+  return r;
+}
+
+Status GameDb::record_launch(const std::string& game_id, int exit_code,
+                             double wall_seconds) {
+  Stmt s(db_->h, "INSERT INTO launches(game_id,exit_code,wall_seconds,at)"
+                 " VALUES(?,?,?,?)");
+  if (!s.ok()) return sql_status(s.rc(), db_->h, "record_launch prepare");
+  s.bind_text(1, game_id);
+  s.bind_int(2, exit_code);
+  s.bind_double(3, wall_seconds);
+  s.bind_double(4, static_cast<double>(::time(nullptr)));
+  return s.run(db_->h, "record_launch");
+}
+
+int64_t GameDb::launch_count(const std::string& game_id) {
+  Stmt s(db_->h, "SELECT COUNT(*) FROM launches WHERE game_id=?");
+  if (!s.ok()) return -1;
+  s.bind_text(1, game_id);
+  if (!s.step_row()) return -1;
+  return s.integer(0);
+}
+
+}  // namespace pnr::library
