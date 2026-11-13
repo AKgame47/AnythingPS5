@@ -70,4 +70,54 @@ std::vector<uint32_t> SpirvModule::compute_write_u32(uint32_t value) {
   return m;
 }
 
+std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes) {
+  // Reuse the validated declarations, replacing the function body. IDs
+  // 1..12 are reserved by compute_write_u32; new SSA values start at 13.
+  auto m = compute_write_u32(0);
+  size_t function = 5;
+  while (function < m.size() && (m[function] & 0xffffu) != spv::OpFunction)
+    function += m[function] >> 16u;
+  if (function >= m.size()) return {};
+  m.resize(function);
+  uint32_t next = 13;
+  std::vector<uint32_t> ids(nodes.size(), 0);
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    const auto& n = nodes[i];
+    if (n.op == U32Op::Constant) {
+      ids[i] = next++;
+      inst(m, spv::OpConstant, {6, ids[i], n.a});
+    }
+  }
+  inst(m, spv::OpFunction, {4, 1, 0, 5});
+  inst(m, spv::OpLabel, {11});
+  inst(m, spv::OpAccessChain, {8, 12, 2, 10});
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    const auto& n = nodes[i];
+    if (n.op == U32Op::Constant) continue;
+    if (n.op == U32Op::Load) {
+      ids[i] = next++;
+      inst(m, 61, {6, ids[i], 12}); // OpLoad, verified with spirv-as
+      continue;
+    }
+    if (n.a >= i || !ids[n.a]) return {};
+    if (n.op == U32Op::Store) { inst(m, spv::OpStore, {12, ids[n.a]}); continue; }
+    if (n.b >= i || !ids[n.b]) return {};
+    uint16_t op = 0;
+    switch (n.op) {
+      case U32Op::Add: op = 128; break; // OpIAdd
+      case U32Op::Sub: op = 130; break; // OpISub
+      case U32Op::And: op = 199; break;
+      case U32Op::Or: op = 197; break;
+      case U32Op::Xor: op = 198; break;
+      default: return {};
+    }
+    ids[i] = next++;
+    inst(m, op, {6, ids[i], ids[n.a], ids[n.b]});
+  }
+  inst(m, spv::OpReturn, {});
+  inst(m, spv::OpFunctionEnd, {});
+  m[3] = next;
+  return m;
+}
+
 }  // namespace pnr::graphics
