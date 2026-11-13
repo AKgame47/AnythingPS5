@@ -14,12 +14,40 @@
 #include "library/game_db.hpp"
 #include "loader/native_loader.hpp"
 #include "package/importer.hpp"
+#include "ape/ape.hpp"
+#include "laptop/laptop.hpp"
 #include "platform/os.hpp"
 
 namespace {
 
 void step(const char* name, const char* result, const std::string& detail) {
   std::printf("[%s] %-9s %s\n", name, result, detail.c_str());
+}
+
+int cmd_assess() {
+  // MODULE 05/06: classify this host and show the recommended starting
+  // settings. Classification is CPU/RAM-based only (GPU probe Blocked).
+  auto host = pnr::platform::make_host_platform();
+  pnr::ape::HardwareFacts f;
+  f.cpu_logical_cores = host->cpu_logical_cores();
+  if (auto mem = host->memory()) {
+    f.ram_total_bytes = mem->total_bytes;
+    f.ram_available_bytes = mem->available_bytes;
+  }
+  f.on_battery = host->on_battery();
+  const auto cls = pnr::ape::classify(f);
+  std::puts("PNR hardware assessment (heuristic, honest bounds):");
+  std::printf("hardware.class=%s (CPU/RAM only; GPU unknown in this build)\n",
+              pnr::ape::perf_class_name(cls));
+  const auto mode = pnr::laptop::default_mode(f);
+  const auto caps = pnr::laptop::caps_for(mode);
+  std::printf("power.default_mode=%s%s\n", pnr::laptop::power_mode_name(mode),
+              f.on_battery ? "" : " (battery state unknown: balanced)");
+  std::printf("caps.fps_cap=%d caps.min_resolution_scale=%d%% caps.max_background_tasks=%d\n",
+              caps.fps_cap, caps.min_resolution_scale_pct, caps.max_background_tasks);
+  std::puts("note: compatibility is never decided from class alone - real "
+            "frame telemetry drives the adaptive controller");
+  return 0;
 }
 
 int cmd_hwinfo() {
@@ -231,6 +259,7 @@ void usage() {
 int main(int argc, char** argv) {
   pnr::loader::NativeLoader loader;
   if (argc >= 2 && std::strcmp(argv[1], "hwinfo") == 0) return cmd_hwinfo();
+  if (argc >= 2 && std::strcmp(argv[1], "assess") == 0) return cmd_assess();
   if (argc >= 3 && std::strcmp(argv[1], "validate") == 0)
     return cmd_validate(loader, argv[2]);
   if (argc >= 3 && std::strcmp(argv[1], "import") == 0)
