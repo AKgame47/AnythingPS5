@@ -7,6 +7,9 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <csignal>
+#include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
@@ -118,6 +121,33 @@ void pnr_sandbox_tests(int& pass, int& fail) {
     { pnr::sandbox::Policy bad = pol; bad.ro_dirs = {base + "/does-not-exist"}; std::string e; pid_t c = ::fork();
       if (c == 0) { _exit(pnr::sandbox::enter(bad, &e) ? 0 : 1); } int st = 0; ::waitpid(c, &st, 0);
       check(WIFEXITED(st) && (WEXITSTATUS(st) == 125 || WEXITSTATUS(st) == 1), "fs: a missing ro dir fails loudly instead of being skipped"); }
+    {  // external signals on the sandbox parent: no orphaned game, no leftover mountpoint dir (TERM); no orphan (KILL)
+      auto marker_alive = [](const std::string& m) {
+        std::error_code e2; for (auto& de : fs::directory_iterator("/proc", e2)) {
+          const std::string n = de.path().filename().string(); if (n.empty() || !std::isdigit(static_cast<unsigned char>(n[0]))) continue;
+          std::ifstream f(de.path() / "cmdline", std::ios::binary); std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+          if (s.find(m) != std::string::npos && s.find("sleep") != std::string::npos) return true; }
+        return false; };
+      auto count_sb = [] { int n = 0; std::error_code e3; for (auto& de : fs::directory_iterator("/tmp", e3)) if (de.path().filename().string().rfind("pnr-sb-", 0) == 0) ++n; return n; };
+      const int sb_before = count_sb();
+      auto spawn = [&](const char* mark) { pid_t c = ::fork(); if (c == 0) { std::string e; if (!pnr::sandbox::enter(pol, &e)) _exit(125); ::execl("/bin/sleep", "sleep", mark, static_cast<char*>(nullptr)); _exit(127); } return c; };
+      pid_t t = spawn("31337");
+      ::usleep(600000);
+      const bool running = marker_alive("31337");
+      ::kill(t, SIGTERM);
+      auto t0 = std::chrono::steady_clock::now(); int st = 0; ::waitpid(t, &st, 0);
+      double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      ::usleep(300000);
+      check(running && el < 9 && !marker_alive("31337"), "fs: SIGTERM to the sandbox parent stops the game too (no orphan), within the 5 s grace");
+      check(count_sb() == sb_before, "fs: after SIGTERM the mountpoint dir is removed");
+      pid_t k = spawn("31338");
+      ::usleep(600000);
+      const bool running2 = marker_alive("31338");
+      ::kill(k, SIGKILL); ::waitpid(k, &st, 0);
+      ::usleep(500000);
+      check(running2 && !marker_alive("31338"), "fs: SIGKILL on the sandbox parent still kills the game (PDEATHSIG, no orphan)");
+      std::error_code e4; for (auto& de : fs::directory_iterator("/tmp", e4)) if (de.path().filename().string().rfind("pnr-sb-", 0) == 0) ::rmdir(de.path().c_str());   // documented: a SIGKILLed parent leaves one empty dir
+    }
     std::error_code ec; fs::remove_all(base, ec); (void)o2;
     bool left = false; for (auto& de : fs::directory_iterator("/tmp", ec)) if (de.path().filename().string().rfind("pnr-sb-", 0) == 0) left = true;
     check(!left, "fs: no leftover mountpoint dirs in /tmp");
