@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "compat/services.hpp"
+#include "graphics/vulkan.hpp"
 #include "core/runtime.hpp"
 #include "loader/import_resolver.hpp"
 #include "prx/prx.hpp"
@@ -81,6 +82,14 @@ int cmd_audio() {
   return 0;
 }
 
+void print_gpu_truth();
+
+int cmd_gpu() {
+  std::puts("PNR GPU snapshot (real Vulkan enumeration):");
+  print_gpu_truth();
+  return 0;
+}
+
 int cmd_hwinfo() {
   std::puts("PNR hardware snapshot (host truth, no estimates):");
   auto host = pnr::platform::make_host_platform();
@@ -98,9 +107,32 @@ int cmd_hwinfo() {
     std::printf("power.on_battery=%d\n", *batt ? 1 : 0);
   else
     std::puts("power.on_battery=unknown (no power_supply node on this host)");
-  std::puts("gpu.vulkan=UNAVAILABLE in this sandbox (no GPU/Vulkan driver); "
-            "capability-based detection lands with Phase 2");
+  print_gpu_truth();
   return 0;
+}
+
+// Real GPU/Vulkan state: enumerate through the backend; absence is
+// reported, never guessed.
+void print_gpu_truth() {
+  pnr::graphics::VulkanBackend vk;
+  auto st = vk.open();
+  if (!st) {
+    std::printf("gpu.vulkan=UNAVAILABLE (%s)\n", st.error.message.c_str());
+    return;
+  }
+  st = vk.create_instance("pnr");
+  if (!st) {
+    std::printf("gpu.vulkan=UNAVAILABLE (%s)\n", st.error.message.c_str());
+    return;
+  }
+  for (size_t i = 0; i < vk.devices().size(); ++i) {
+    const auto& d = vk.devices()[i];
+    std::printf("gpu[%zu].name=%s vendor=0x%x api=%u.%u.%u type=%s\n", i,
+                d.name.c_str(), d.vendor_id, d.api_version >> 22,
+                (d.api_version >> 12) & 0x3ff, d.api_version & 0xfff,
+                d.software ? "software (CPU Vulkan)" : "hardware");
+  }
+  vk.shutdown();
 }
 
 int cmd_import(const std::string& pkg_path) {
@@ -215,9 +247,21 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args,
   rt.capabilities().declare("cpu.x86_64", true,
                             "host executes x86-64 natively; logical cores=" +
                                 std::to_string(cores));
+  std::string gpu_note;
+  {
+    pnr::graphics::VulkanBackend vk;
+    if (vk.open() && vk.create_instance("pnr") && !vk.devices().empty()) {
+      const auto& d = vk.devices().front();
+      gpu_note = "gpu=" + d.name + (d.software ? " (software Vulkan)" : "");
+      rt.capabilities().declare("gpu.vulkan", true, gpu_note);
+      vk.shutdown();
+    } else {
+      gpu_note = "no Vulkan device (recorded, not guessed)";
+      rt.capabilities().declare("gpu.vulkan", false, gpu_note);
+    }
+  }
   step("2-analysis", "SUCCESS",
-       "logical cores=" + std::to_string(cores) +
-           "; Vulkan=unavailable in sandbox (recorded, not guessed)");
+       "logical cores=" + std::to_string(cores) + "; " + gpu_note);
 
   // STEP 3 - CONFIGURATION
   rt.config().set("profile", "balanced");
@@ -238,9 +282,9 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args,
   step("4-runtime", "SUCCESS", "compat memory/fs/thread services up");
 
   // STEP 5 - GRAPHICS INITIALIZATION
-  step("5-graphics", "BLOCKED",
-       "no Vulkan device in this environment; demo app is non-graphical. "
-       "Blocked is reported, not papered over.");
+  step("5-graphics", "SKIPPED",
+       "demo app is non-graphical; Vulkan compute backend is implemented "
+       "(see pnr gpu), render passes are Phase 2 work");
 
   // STEP 6 - CONTENT INITIALIZATION
   st = fs.create_dirs("/saves");
@@ -367,7 +411,8 @@ void usage() {
             "  pnr validate <executable>        ELF/x86-64 validation only\n"
             "  pnr import <file.pnrgame>        verify + install a dev package\n"
             "  pnr games                        list the game library\n"
-            "  pnr hwinfo                       print detected host hardware");
+            "  pnr hwinfo                       print detected host hardware\n"
+            "  pnr gpu                          real Vulkan device enumeration");
 }
 
 }  // namespace
@@ -375,6 +420,7 @@ void usage() {
 int main(int argc, char** argv) {
   pnr::loader::NativeLoader loader;
   if (argc >= 2 && std::strcmp(argv[1], "hwinfo") == 0) return cmd_hwinfo();
+  if (argc >= 2 && std::strcmp(argv[1], "gpu") == 0) return cmd_gpu();
   if (argc >= 2 && std::strcmp(argv[1], "assess") == 0) return cmd_assess();
   if (argc >= 2 && std::strcmp(argv[1], "input") == 0) return cmd_input();
   if (argc >= 2 && std::strcmp(argv[1], "audio") == 0) return cmd_audio();
