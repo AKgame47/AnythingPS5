@@ -106,9 +106,9 @@ target_include_directories(pnr_psn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pnr_psn PUBLIC pnr_library pnr_core ${CMAKE_DL_LIBS})
 
 # Unofficial store core (slice A1: sources, index validation, search; no downloads yet)
-add_library(pnr_store store/store.cpp store/store_cli.cpp)
+add_library(pnr_store store/store.cpp store/store_cli.cpp store/download.cpp)
 target_include_directories(pnr_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(pnr_store PUBLIC pnr_psn pnr_core)
+target_link_libraries(pnr_store PUBLIC pnr_psn pnr_package pnr_core)
 
 # CLI launcher (STEP 1-10 workflow driver)
 add_library(pnr_launcher launcher/launcher_core.cpp)
@@ -146,7 +146,7 @@ set_target_properties(ps_cube_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
-add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp tests/psn_sync_tests.cpp tests/store_tests.cpp)
+add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp tests/psn_sync_tests.cpp tests/store_tests.cpp tests/download_tests.cpp)
 
 # Let the tests launch the real PS-style demo binary.
 target_compile_definitions(pnr_tests PRIVATE
@@ -237,6 +237,15 @@ add_test(NAME pnr_launcher_care_workflow
     -DLAUNCHER=$<TARGET_FILE:pnr-launcher>
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_care_workflow.cmake)
 set_tests_properties(pnr_launcher_care_workflow PROPERTIES
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+add_test(NAME pnr_store_workflow
+  COMMAND ${CMAKE_COMMAND}
+    -DPS_DEMO=$<TARGET_FILE:ps_demo>
+    -DMAKE=$<TARGET_FILE:pnr_make_package>
+    -DLAUNCHER=$<TARGET_FILE:pnr-launcher>
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/store_workflow.cmake)
+set_tests_properties(pnr_store_workflow PROPERTIES
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 add_test(NAME pnr_psn_workflow
