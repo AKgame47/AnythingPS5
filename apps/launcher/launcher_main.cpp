@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -100,7 +101,19 @@ int main(int argc, char** argv) {
     if (sandbox_on) {  // no silent fallback: an unusable sandbox means the game is not started
       auto sp = pnr::sandbox::probe();
       if (!sp.usable()) { std::printf("LAUNCH NOT STARTED: --sandbox was requested but the sandbox is not usable here (%s)\n", sp.notes.c_str()); return 1; }
-      core.set_child_setup([](std::string* e) { return pnr::sandbox::enter(e); });
+      GameEntry sge;
+      if (core.get(pos[0], &sge)) {  // an unknown id is reported by launch() itself, before anything is forked
+        std::error_code aec;
+        auto gd = std::filesystem::absolute(sge.install_path, aec).lexically_normal();
+        std::string gds = gd.string(); while (gds.size() > 1 && gds.back() == '/') gds.pop_back();
+        if (aec || gds.empty()) { std::printf("LAUNCH NOT STARTED: cannot resolve the game directory for the sandbox\n"); return 1; }
+        // the game's jail root and the PS-ABI shim dir are what launch() gives it; both are env in the child
+        core.set_child_setup([gds](std::string* e) {
+          pnr::sandbox::Policy pol; pol.game_dir = gds;
+          if (const char* j = std::getenv("PNR_JAIL_ROOT")) if (*j) pol.rw_dirs.push_back(std::filesystem::absolute(j).lexically_normal().string());
+          if (const char* l = std::getenv("LD_LIBRARY_PATH")) { std::string s = l; size_t i = 0; while (i <= s.size()) { size_t k = s.find(':', i); if (k == std::string::npos) k = s.size(); if (k > i) pol.ro_dirs.push_back(std::filesystem::absolute(s.substr(i, k - i)).lexically_normal().string()); i = k + 1; } }
+          return pnr::sandbox::enter(pol, e); });
+      }
     }
     auto o = core.launch(pos[0], gameargs);
     if (json) std::puts(render_outcome_json(pos[0], o).c_str());
