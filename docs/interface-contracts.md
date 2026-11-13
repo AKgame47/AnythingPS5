@@ -313,32 +313,43 @@ touches nothing in the library.
   dispatch environment.
 
 
-## IF-GRAPH-03 Restricted constant-compute translation (v1)
+## IF-GRAPH-03 Restricted integer-compute translation (v2)
 
 Status: Experimental, Implemented (strict subset), Tested.
 
 - `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base)` parses
   little-endian words without alignment assumptions; partial words fail.
   `translate_compute_words(words, guest_base)` is the word-level entry point.
-- Result: `ok`, diagnostic `error`, `spirv`, `stored_value`. Every failure
-  returns an empty SPIR-V vector. No instruction is silently skipped.
+- Result: `ok`, diagnostic `error`, `spirv`, `stored_value_known`,
+  `stored_value`. Every failure returns empty SPIR-V. `stored_value` is
+  meaningful only when `stored_value_known` is true; runtime results are
+  never invented by the compiler.
 - Explicit test ABI: one active invocation, one 32-bit SSBO at set 0/binding 0.
   The caller's 64-bit guest base maps to exactly word zero of this binding.
   It is not a host pointer, a PS5 ABI, or general GPU address translation.
-- Accepted instructions: `v_mov_b32` from literal/inline integer/previously
-  defined constant VGPR, exactly one unmodified `flat_store_dword`, and a
-  final `s_endpgm` with zero immediate. The address VGPR pair must be fully
-  defined and equal the supplied guest base. The FLAT scalar-address field
-  must be 0x7f, offset/segment/cache/LDS/reserved fields zero.
-- Straight-line moves are constant-folded, then `compute_write_u32(value)`
-  emits the SPIR-V store. This is a restricted translator, not a runtime
-  VGPR register file or wavefront emulator. Full shader translation Planned.
-- Rejects undefined registers, unsupported sources/instructions, modifiers,
-  other addresses, additional stores, missing termination, trailing code.
-- FLAT field layout/opcode 0x1c are adapted from AnyPS5's
-  `RdnaMemoryOpDecoder.cpp` (boykopovar, GPL-2.0), under the attribution in
-  `shader/rdna.cpp`. Synthetic test instructions contain no commercial code.
-- Tests validate translated SPIR-V for Vulkan 1.0 using `PNR_SPIRV_VAL` when
-  configured, then dispatch on Vulkan and read back 0, 42, 0xdeadbeef and
-  0xffffffff. The neighboring word must remain unchanged. Missing validator
-  or loader is reported as a skip, not claimed as tested on that host.
+- Accepted instructions: `v_mov_b32` (literal/inline integer/defined VGPR),
+  `flat_load_dword`, `v_add_nc_u32`, `v_sub_nc_u32`, `v_and_b32`, `v_or_b32`,
+  `v_xor_b32`, one `flat_store_dword`, final zero-immediate `s_endpgm`.
+- VGPR definitions map to immutable SSA node indices. Copies retain old
+  definitions after source overwrite; destination/source aliasing is safe.
+  Runtime SSBO loads become OpLoad and arithmetic becomes real SPIR-V
+  integer ALU, with uint32 wraparound. No host precomputation of loaded data.
+- Address VGPR pairs must be defined constant moves equal to guest_base.
+  ALU/load-dependent addresses remain rejected, even constant-only ALU.
+  FLAT scalar address must be 0x7f, all offset/segment/cache/LDS/reserved
+  fields zero; load VDATA/store VDST must be zero.
+- `graphics::SpirvModule::compute_u32(nodes)` emits the straight-line uint
+  IR. Invalid forward references or reads from Store nodes return empty.
+  Instruction order is preserved; constant declarations precede functions.
+- Rejects undefined registers, unsupported sources/instructions/modifiers,
+  other addresses, additional stores, missing termination and trailing code.
+  No wave/EXEC, asynchronous waitcnt, general barriers, resource descriptors,
+  dynamic addresses or real-game shader ABI. Full shader compilation Planned.
+- FLAT layouts/opcodes and ALU opcode numbers follow AnyPS5's attributed
+  GPL-2.0 decoder taxonomy. Tests contain only synthetic instructions.
+- Tests use spirv-val for Vulkan 1.0 when `PNR_SPIRV_VAL` is set, check emitted
+  OpLoad/ALU opcodes, then dispatch each of five modules against four changing
+  runtime inputs without recompilation (including overflow/underflow).
+  Readback must match uint32 arithmetic and leave a neighboring word intact.
+  SSA copy/overwrite, source order, literal ALU and dependent ALU chains are
+  tested too. Missing validator/loader prints a skip, not a tested claim.
