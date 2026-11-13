@@ -70,7 +70,7 @@ stdin from /dev/null, CPU and memory limits, a 30 s wall timeout and a
 
 | Command | How `ask` treats it |
 |---|---|
-| list, show, compat show, history, store search, store show, research inspect, sandbox probe, doctor (9 read-only tools) | runs directly |
+| list, show, compat show, history, store search, store show, research inspect, sandbox probe, doctor, suggest_manifest (10 read-only tools; suggest_manifest never gets `--out`, see docs/manifest-suggest.md) | runs directly |
 | launch, store get, store install, import, remove (5 tools) | always asks y/N on a terminal; never runs non-interactively |
 
 `remove` through `ask` is a dry run: `--yes` is never passed.
