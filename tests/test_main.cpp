@@ -23,6 +23,7 @@
 #include "graphics/vulkan.hpp"
 #include "library/game_db.hpp"
 #include "shader/rdna.hpp"
+#include "shader/translate.hpp"
 #include "loader/native_loader.hpp"
 #include "loader/nid.hpp"
 #include "prx/prx.hpp"
@@ -1025,6 +1026,118 @@ int main() {
                 r.instructions[2].pc == 8 && r.instructions[0].supported &&
                 r.instructions[1].supported && r.instructions[2].supported,
             "rdna: mini program fully decoded with pcs");
+    }
+  }
+
+
+  // --- MODULE 04: restricted RDNA bytes -> SPIR-V -> Vulkan readback ---
+  {
+    using namespace pnr::shader;
+    constexpr uint64_t base = 0x0000001234567800ull;
+    auto program = [](uint32_t value) {
+      // v_mov_b32 v0, address-low; v1, address-high; v2, data;
+      // flat_store_dword v[0:1], v2; s_endpgm.
+      return std::vector<uint32_t>{0x7e0002ff, 0x34567800,
+        0x7e0202ff, 0x12, 0x7e0402ff, value,
+        0xdc700000, 0x007f0200, 0xbf810000};
+    };
+    auto bytes = [](const std::vector<uint32_t>& words) {
+      std::vector<uint8_t> b;
+      for (auto w : words) for (unsigned j = 0; j < 4; ++j)
+        b.push_back(static_cast<uint8_t>(w >> (j * 8)));
+      return b;
+    };
+    auto r = translate_compute_bytes(bytes(program(42)), base);
+    CHECK(r.ok && r.stored_value == 42 && !r.spirv.empty(),
+          "translate: little-endian RDNA bytes produce SPIR-V");
+    auto dec = rdna_decode(program(42));
+    CHECK(dec.ok && dec.instructions.size() == 5 &&
+          dec.instructions[3].mnemonic == "flat_store_dword" &&
+          dec.instructions[3].memory_data == 2 &&
+          dec.instructions[3].memory_addr == 0 &&
+          dec.instructions[3].memory_saddr == 127,
+          "translate: FLAT store fields decoded with AnyPS5 taxonomy");
+    auto rejected = [&](std::vector<uint32_t> code, const char* name) {
+      auto x = translate_compute_words(code, base);
+      CHECK(!x.ok && !x.error.empty() && x.spirv.empty(), name);
+    };
+    rejected({}, "translate: empty input rejected");
+    auto b = bytes(program(42)); b.pop_back();
+    auto bad_bytes = translate_compute_bytes(b, base);
+    CHECK(!bad_bytes.ok && bad_bytes.spirv.empty(), "translate: partial word rejected");
+    rejected({0x7e0002ff}, "translate: truncated literal rejected");
+    rejected({0xdc700000}, "translate: truncated FLAT rejected");
+    rejected({0xc0000000}, "translate: unknown family rejected");
+    auto w = program(42); w.pop_back();
+    rejected(w, "translate: missing termination rejected");
+    rejected({0xbf810000}, "translate: missing store rejected");
+    w = program(42); w.push_back(0xbf810000);
+    rejected(w, "translate: trailing instruction rejected");
+    w = program(42); w[8] |= 1;
+    rejected(w, "translate: endpgm immediate rejected");
+    w = program(42); w[4] = 0x7e040200;
+    rejected(w, "translate: SGPR source rejected");
+    w = program(42); w[4] = 0x7e0402f9;
+    rejected(w, "translate: SDWA source rejected");
+    w = program(42); w[4] = 0x7e040303;
+    rejected(w, "translate: undefined VGPR source rejected");
+    w = program(42); w[7] = 0x007f0300;
+    rejected(w, "translate: undefined data rejected");
+    w = program(42); w[7] = 0x007f02ff;
+    rejected(w, "translate: address register overflow rejected");
+    w = program(42); w[1] += 4;
+    rejected(w, "translate: out-of-binding address rejected");
+    w = program(42); w[6] |= 4;
+    rejected(w, "translate: nonzero memory offset rejected");
+    w = program(42); w[6] |= 0x10000;
+    rejected(w, "translate: cache modifier rejected");
+    w = program(42); w[6] |= 0x8000;
+    rejected(w, "translate: global segment rejected");
+    w = program(42); w[7] = 0x00000200;
+    rejected(w, "translate: scalar address mode rejected");
+    w = program(42); w.insert(w.end()-1, {0xdc700000, 0x007f0200});
+    rejected(w, "translate: second store rejected");
+    w = program(42); w[8] = 0xbf820000;
+    rejected(w, "translate: branch rejected instead of ignored");
+    w = program(42); w[6] = 0xdc300000;
+    rejected(w, "translate: load opcode rejected instead of guessed");
+    // Inline integer source and register copy use the same constant analysis.
+    w = program(42); w[4] = 0x7e0402aa; w.erase(w.begin()+5);
+    auto inline_r = translate_compute_words(w, base);
+    CHECK(inline_r.ok && inline_r.stored_value == 42,
+          "translate: inline integer move folded");
+    w = program(42); w.insert(w.begin()+6, 0x7e060302); w[8] = 0x007f0300;
+    auto copy_r = translate_compute_words(w, base);
+    CHECK(copy_r.ok && copy_r.stored_value == 42, "translate: VGPR copy folded");
+
+    const char* val = std::getenv("PNR_SPIRV_VAL");
+    if (val && std::filesystem::exists(val) && r.ok) {
+      const std::string tmp = "/tmp/pnr_translated_" + std::to_string(::getpid()) + ".spv";
+      { std::ofstream o(tmp, std::ios::binary);
+        o.write(reinterpret_cast<const char*>(r.spirv.data()), r.spirv.size()*4); }
+      const int rc = std::system((std::string(val) + " --target-env vulkan1.0 " + tmp).c_str());
+      CHECK(rc == 0, "translate: spirv-val validates translated module for Vulkan 1.0");
+      std::filesystem::remove(tmp);
+    } else std::puts("    note: translated module validator check skipped (not configured)");
+    pnr::graphics::VulkanBackend vk;
+    auto st = vk.open();
+    if (!st) std::printf("    note: translated execution skipped: %s\n", st.error.message.c_str());
+    else {
+      st = vk.create_instance("pnr-translate-tests");
+      CHECK(st, "translate: Vulkan instance created");
+      if (st && !vk.devices().empty()) {
+        st = vk.create_device(0);
+        CHECK(st, "translate: compute device created");
+        if (st) for (uint32_t v : {0u, 42u, 0xdeadbeefu, 0xffffffffu}) {
+          auto t = translate_compute_bytes(bytes(program(v)), base);
+          std::vector<uint32_t> io = {0xa5a5a5a5u, 0xcafebabeu};
+          auto run = vk.run_compute_words(t.spirv, &io);
+          CHECK(t.ok && run && io[0] == v && io[1] == 0xcafebabeu,
+                "translate: RDNA bytes dispatched, exact readback, neighbor untouched");
+          std::printf("    translated on %s: expected=0x%08x readback=0x%08x\n",
+                      vk.device_name().c_str(), v, io[0]);
+        }
+      } else CHECK(false, "translate: Vulkan device available");
     }
   }
 
