@@ -24,6 +24,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   struct Reg {
     uint32_t node; std::optional<uint32_t> constant;
     std::optional<uint32_t> origin = {}, stride = {};
+    std::optional<uint32_t> uniform_input = {};
   };
   std::array<std::optional<Reg>, 256> regs{};
   std::array<std::optional<Reg>, 106> sregs{};
@@ -36,7 +37,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   }
   for(uint32_t j=0;j<uniform_words;++j) {
     nodes.push_back({U32Op::UniformInput,j});
-    sregs[j]=Reg{uint32_t(nodes.size()-1),{}};
+    sregs[j]=Reg{uint32_t(nodes.size()-1),{},{},{},j};
   }
   struct Range { uint64_t first, last; };
   std::vector<Range> reads;
@@ -53,7 +54,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   struct Compare { uint32_t a,b; };
   Compare scc{};bool scc_defined=false;
   uint32_t carry_flag=0;bool carry_defined=false;
-  bool looped=false;
+  bool looped=false;uint32_t loop_count_uniform=16;
   bool merge_active=false;
   uint32_t merge_pc=0;
   std::array<std::optional<Reg>,256> before_branch{};
@@ -76,9 +77,10 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       auto isreg=[](const RdnaOperand& o,RdnaOperandKind kind,uint32_t reg){return o.kind==kind && o.reg==reg;};
       auto literal=[](const RdnaOperand& o,uint32_t v){return
         (o.kind==RdnaOperandKind::InlineIntConst || o.kind==RdnaOperandKind::LiteralConst) && o.value==v;};
+      const auto trip=source(i.src0);
       if(looped || conditional || merge_active || i.dst.kind!=RdnaOperandKind::ScalarReg ||
-         (i.src0.kind!=RdnaOperandKind::InlineIntConst && i.src0.kind!=RdnaOperandKind::LiteralConst) ||
-         !i.src0.value || i.src0.value>64 ||
+         !trip || (!trip->constant && !trip->uniform_input) ||
+         (trip->constant && (!*trip->constant || *trip->constant>64)) ||
          body.family!=RdnaFamily::VOP2 || body.opcode_id!=0x25 ||
          body.dst.kind!=RdnaOperandKind::VectorReg ||
          !isreg(body.src1,RdnaOperandKind::VectorReg,body.dst.reg) ||
@@ -93,7 +95,11 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
         return fail("unsupported counted loop shape/count/body/control"+at);
       const auto initial=regs[body.dst.reg],delta=source(body.src0);
       if(!initial || !delta)return fail("undefined loop accumulator/delta"+at);
-      nodes.push_back({U32Op::LoopAdd,initial->node,delta->node,i.src0.value});
+      if(trip->constant)nodes.push_back({U32Op::LoopAdd,initial->node,delta->node,*trip->constant});
+      else {
+        loop_count_uniform=*trip->uniform_input;
+        nodes.push_back({U32Op::LoopAddUniform,initial->node,delta->node,trip->node});
+      }
       // Loop output is data, not an invented affine pointer proof.
       regs[body.dst.reg]=Reg{uint32_t(nodes.size()-1),{}};
       nodes.push_back({U32Op::Constant,0});const uint32_t zero=uint32_t(nodes.size()-1);
@@ -276,6 +282,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
     if(read.first<=writes->last && writes->first<=read.last)
       return fail("multi-invocation load/output ranges overlap; barriers not supported");
   ComputeTranslation r;
+  r.loop_count_uniform=loop_count_uniform;
   r.structured_loop=looped;
   r.full64_pointers=full64;
   r.host_float32=floating;
@@ -286,7 +293,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   r.required_buffer_words = buffer_words;
   r.stored_value_known = value.has_value();
   r.stored_value = value.value_or(0); // meaningful only when known=true
-  r.spirv = graphics::SpirvModule::compute_u32(nodes, buffer_words, uint32_t(base), local_size_x, uniform_words, uint32_t(base>>32u));
+  r.spirv = graphics::SpirvModule::compute_u32(nodes, buffer_words, uint32_t(base), local_size_x, uniform_words, uint32_t(base>>32u),loop_count_uniform);
   if (r.spirv.empty()) return fail("invalid internal uint IR");
   r.ok = true;
   return r;
@@ -313,6 +320,13 @@ Status run_translated_compute(graphics::VulkanBackend& backend,
     return Status::Fail(101, "shader", "invalid translation for dispatch");
   if(translation.required_uniform_words>16 || uniforms.size()!=translation.required_uniform_words)
     return Status::Fail(103,"shader","uniform input count does not match translation");
+  if(translation.loop_count_uniform>16 ||
+     (translation.loop_count_uniform<16 &&
+      (!translation.structured_loop || translation.loop_count_uniform>=uniforms.size())))
+    return Status::Fail(104,"shader","invalid runtime loop-count metadata");
+  if(translation.loop_count_uniform<16 &&
+     (!uniforms[translation.loop_count_uniform] || uniforms[translation.loop_count_uniform]>64))
+    return Status::Fail(105,"shader","runtime loop count must be 1..64; dispatch rejected");
   if (!io || io->size() < translation.required_buffer_words)
     return Status::Fail(102, "shader", "host buffer shorter than translated SSBO range");
   return backend.run_compute_words(translation.spirv, io, uniforms);
