@@ -242,7 +242,7 @@ ImportResult import_package(const std::string& package_path,
                     "pnr-dev"});
   if (!st) { r.status = st; return r; }
   st = db.set_installation({r.manifest.id, dest, r.manifest.version,
-                            "verified"});
+                            "verified", r.manifest.executable});
   if (!st) { r.status = st; return r; }
   st = db.set_compatibility(
       {r.manifest.id, "Untested",
