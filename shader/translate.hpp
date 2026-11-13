@@ -11,6 +11,7 @@ struct ComputeTranslation {
   bool ok = false;
   std::string error;
   std::vector<uint32_t> spirv; // empty on EVERY failure
+  uint32_t required_uniform_words = 0; // initial s0..sN-1, runtime push constants
   bool conditional_selection = false; // restricted forward SCC0 skip
   uint32_t local_size_x = 1; // one workgroup, explicit test invocation ABI
   bool guarded_memory = false; // invalid runtime loads=0 / stores skipped
@@ -35,20 +36,27 @@ struct ComputeTranslation {
 // s_cmp_eq_u32, one forward s_cbranch_scc0 over v_mov-only body. Registers
 // assigned in body must also be defined on skipped path. Branch/Phi merge;
 // no loops, nesting, branch memory effects or general control flow.
+// Explicit uniform ABI: uniform_words=0..16 initializes s0..sN-1 from
+// runtime Vulkan push constants, shared across invocations. Values are not
+// baked into SPIR-V. Exact count required at checked dispatch. Not a Sony
+// user-data/descriptor ABI. Initial SGPRs outside the declared range undefined.
 // No wave/EXEC/asynchronous waitcnt semantics or real-game shader ABI.
 ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
                                            uint64_t ssbo_guest_base,
                                            uint32_t buffer_words = 1,
-                                           uint32_t local_size_x = 1);
+                                           uint32_t local_size_x = 1,
+                                           uint32_t uniform_words = 0);
 // Explicit little-endian byte input. Rejects partial words, never casts an
 // unaligned byte buffer to uint32_t*. Same restricted ABI as above.
 ComputeTranslation translate_compute_bytes(const std::vector<uint8_t>& code,
                                            uint64_t ssbo_guest_base,
                                            uint32_t buffer_words = 1,
-                                           uint32_t local_size_x = 1);
+                                           uint32_t local_size_x = 1,
+                                           uint32_t uniform_words = 0);
 // Checked execution route: refuses failed translations/null/short io before
 // any Vulkan call. Use this instead of raw backend dispatch for translations.
 Status run_translated_compute(graphics::VulkanBackend& backend,
                               const ComputeTranslation& translation,
-                              std::vector<uint32_t>* io);
+                              std::vector<uint32_t>* io,
+                              const std::vector<uint32_t>& uniforms = {});
 } // namespace pnr::shader
