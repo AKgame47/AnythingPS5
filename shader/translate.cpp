@@ -1,14 +1,19 @@
 #include "shader/translate.hpp"
 #include "shader/rdna.hpp"
 #include "graphics/spirv.hpp"
+#include "graphics/vulkan.hpp"
 #include <array>
 #include <optional>
 namespace pnr::shader {
 ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
-                                           uint64_t base) {
+                                           uint64_t base, uint32_t buffer_words) {
   auto fail = [](const std::string& msg) {
     ComputeTranslation r; r.error = msg; return r;
   };
+  if (!buffer_words || buffer_words > 65536) return fail("buffer word count must be 1..65536");
+  const uint64_t size = uint64_t(buffer_words) * 4;
+  if (base > UINT64_MAX - (size - 1)) return fail("guest range overflows uint64");
+  if (base % 4) return fail("guest base must be uint32 aligned");
   if (code.empty()) return fail("empty compute program");
   const auto d = rdna_decode(code);
   if (!d.ok) return fail("decode: " + d.error);
@@ -55,7 +60,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       const uint32_t expected = 0xdc000000u | (i.opcode_id << 18u);
       const uint32_t high_mask = load ? 0x00ffff00u : 0xffff0000u;
       // Load: VDST is allowed, VDATA must be zero. Store: VDST is zero.
-      if (i.raw0 != expected || (i.raw1 & high_mask) != 0x007f0000u)
+      if ((i.raw0 & ~0x7ffu) != expected || (i.raw1 & high_mask) != 0x007f0000u)
         return fail("unsupported FLAT modifiers/address mode" + at);
       if (!load && stored) return fail("multiple stores are not supported" + at);
       if (i.memory_addr == 255) return fail("address register pair overflow" + at);
@@ -63,14 +68,19 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       if (!lo || !hi || !lo->constant || !hi->constant)
         return fail("undefined/dynamic address VGPR pair" + at);
       uint64_t addr = uint64_t(*lo->constant) | (uint64_t(*hi->constant) << 32u);
-      if (addr != base) return fail("address is outside the single-word test ABI" + at);
+      const uint64_t offset = i.memory_offset;
+      if (addr > UINT64_MAX - offset) return fail("address plus offset overflows" + at);
+      addr += offset;
+      if (addr < base || addr - base >= size || (addr - base) % 4)
+        return fail("memory access is outside/alignment-invalid for SSBO range" + at);
+      const uint32_t index = static_cast<uint32_t>((addr - base) / 4);
       if (load) {
-        nodes.push_back({U32Op::Load});
+        nodes.push_back({U32Op::Load, index});
         regs[i.dst.reg] = Reg{static_cast<uint32_t>(nodes.size()-1), {}};
       } else {
         auto data = regs[i.memory_data];
         if (!data) return fail("undefined store data VGPR" + at);
-        nodes.push_back({U32Op::Store, data->node});
+        nodes.push_back({U32Op::Store, data->node, index});
         stored = true; value = data->constant;
       }
     } else if (i.family == RdnaFamily::SOPP && i.opcode_id == 1) {
@@ -81,15 +91,16 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   if (!ended) return fail("missing final s_endpgm");
   if (!stored) return fail("missing flat_store_dword");
   ComputeTranslation r;
+  r.required_buffer_words = buffer_words;
   r.stored_value_known = value.has_value();
   r.stored_value = value.value_or(0); // meaningful only when known=true
-  r.spirv = graphics::SpirvModule::compute_u32(nodes);
+  r.spirv = graphics::SpirvModule::compute_u32(nodes, buffer_words);
   if (r.spirv.empty()) return fail("invalid internal uint IR");
   r.ok = true;
   return r;
 }
 ComputeTranslation translate_compute_bytes(const std::vector<uint8_t>& code,
-                                           uint64_t base) {
+                                           uint64_t base, uint32_t buffer_words) {
   if (code.size() % 4) {
     ComputeTranslation r; r.error = "RDNA byte length is not a multiple of four"; return r;
   }
@@ -98,6 +109,16 @@ ComputeTranslation translate_compute_bytes(const std::vector<uint8_t>& code,
   for (size_t i = 0; i < code.size(); i += 4)
     words.push_back(uint32_t(code[i]) | (uint32_t(code[i+1]) << 8u) |
                     (uint32_t(code[i+2]) << 16u) | (uint32_t(code[i+3]) << 24u));
-  return translate_compute_words(words, base);
+  return translate_compute_words(words, base, buffer_words);
+}
+Status run_translated_compute(graphics::VulkanBackend& backend,
+                              const ComputeTranslation& translation,
+                              std::vector<uint32_t>* io) {
+  if (!translation.ok || translation.spirv.empty() ||
+      !translation.required_buffer_words || translation.required_buffer_words > 65536)
+    return Status::Fail(101, "shader", "invalid translation for dispatch");
+  if (!io || io->size() < translation.required_buffer_words)
+    return Status::Fail(102, "shader", "host buffer shorter than translated SSBO range");
+  return backend.run_compute_words(translation.spirv, io);
 }
 } // namespace pnr::shader
