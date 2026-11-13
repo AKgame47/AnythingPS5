@@ -9,7 +9,9 @@
 #include <fstream>
 #include <chrono>
 
+void pnr_loop_memory_tests(int& pass,int& fail);
 void pnr_loop_tests(int& pass,int& fail) {
+  pnr_loop_memory_tests(pass,fail);
   auto check=[&](bool ok,const char* label){
     if(ok)++pass;else ++fail;std::printf("%s %s\n",ok?"PASS":"FAIL",label);
   };
