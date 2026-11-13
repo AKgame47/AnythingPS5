@@ -84,6 +84,14 @@ int main(int argc, char** argv) {
     if (!core.get(pos[0], &e)) { std::fprintf(stderr, "launcher: no game with id '%s'\n", pos[0].c_str()); rc = 2; }
     else { std::fputs((json ? render_entry_json(e) + "\n" : render_entry_text(e)).c_str(), stdout); rc = 0; }
   } else if (a[0] == "launch" && pos.size() == 1) {
+    {  // slice B1b: games installed from a pinned-key source are re-verified before every launch
+      pnr::store::Registry preg(pnr::store::store_dir_for(dbp ? dbp : "./pnr_data/library.db"));
+      std::string note;
+      if (preg.load()) {
+        auto pv = pnr::store::check_provenance(preg.dir(), preg, pos[0], &note);
+        if (!pv) { std::printf("LAUNCH NOT STARTED: %s\n", pv.error.message.c_str()); return 1; }
+      }
+    }
     auto o = core.launch(pos[0], gameargs);
     if (json) std::puts(render_outcome_json(pos[0], o).c_str());
     else if (!o.error.empty()) std::printf("LAUNCH %s: %s\n", o.attempted ? "RAN, NOT CLEAN" : "NOT STARTED", o.error.c_str());
