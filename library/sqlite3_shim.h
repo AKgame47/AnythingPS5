@@ -37,6 +37,7 @@ int sqlite3_bind_text(sqlite3_stmt*, int, const char*, int, void(*)(void*));
 int sqlite3_bind_int64(sqlite3_stmt*, int, sqlite3_int64);
 int sqlite3_bind_double(sqlite3_stmt*, int, double);
 sqlite3_int64 sqlite3_column_int64(sqlite3_stmt*, int);
+double sqlite3_column_double(sqlite3_stmt*, int);
 const unsigned char* sqlite3_column_text(sqlite3_stmt*, int);
 sqlite3_int64 sqlite3_last_insert_rowid(sqlite3*);
 
