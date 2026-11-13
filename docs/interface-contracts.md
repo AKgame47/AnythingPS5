@@ -715,3 +715,41 @@ consume one word, with PC/truncation regression checks.
 - No zero-trip for-loop interpretation, new guest error mechanism, wave
   semantics, generalized scalar expression evaluator or dynamic unbounded
   loops are implied. Constant-count tests and restrictions remain in force.
+
+
+### Two-axis loop-memory verifier (preparation only)
+
+`shader/loop_memory.hpp` exposes prove_loop_memory(accesses, buffer_words,
+lanes, iterations). This is a standalone proof utility, NOT a newly accepted
+shader instruction shape. Current translate_compute_words still rejects
+loop-body memory, and no GPU lowering calls this verifier yet.
+
+- Access map is a uint32 load/store at byte offset origin + lane*lane_stride
+  + iteration*iteration_stride relative to the aligned SSBO guest base.
+  Strides and origin are nonnegative uint64. Buffer words 1..65536; both
+  axes 1..64; access list 1..32. Pass iterations=64 for runtime 1..64 counts:
+  every permitted execution is then a subset of the proven points.
+- Verifies stride products and sums before arithmetic, then max address
+  against last aligned uint32 offset. Origin and advancing strides must be
+  four-byte aligned. An inactive axis (extent one) may have any unused
+  stride; its product is zero. No signed strides/modulo wrap assumed.
+- Exact enumeration and sorted address groups reject ANY store collision or
+  read/write alias across lane, iteration and separate access maps. Read/read
+  overlap is allowed. This deliberately disallows same-lane sequential
+  read-modify-write or loop-carried dependencies: no ordering/barrier
+  exception is inferred. Diagonal collisions across both axes are detected
+  even when both nonzero strides appear individually disjoint.
+- Success returns ok=true and checked_points=accesses*lanes*iterations.
+  Failure returns ok=false, a nonempty diagnostic, checked_points=0. No
+  partial proof or partly safe dispatch is returned. At most 131072 points
+  are enumerated; no runtime backend or guest state is touched.
+- Tests cover overflow of stride products and origin/axis sums, alignment,
+  last-iteration bounds, aliases across both axes/accesses, exact tiled
+  buffers, transposed maps, one-word-short buffers, repeated reads, inactive
+  axes, maximum SSBO coverage and access budget. An independent address-event
+  map oracle checks 12000 deterministic small cases (both success/failure,
+  aligned and misaligned). Existing SPIR-V/lavapipe loop corpus remains
+  passing; it is NOT proof of loop-body memory execution.
+- Next lowering must bind each accepted guest address expression to these
+  maps, preserve guards inside the loop body and retain checked-count entry
+  policy. A proof utility alone is not a compiler path or a security sandbox.
