@@ -313,7 +313,7 @@ touches nothing in the library.
   dispatch environment.
 
 
-## IF-GRAPH-03 Restricted integer-compute translation (v5)
+## IF-GRAPH-03 Restricted integer-compute translation (v6)
 
 Status: Experimental, Implemented (strict subset), Tested.
 
@@ -321,7 +321,7 @@ Status: Experimental, Implemented (strict subset), Tested.
   little-endian words without alignment assumptions; partial words fail.
   `translate_compute_words(words, guest_base, buffer_words=1, local_size_x=1)` is the word-level entry point.
 - Result: `ok`, diagnostic `error`, `spirv`, `stored_value_known`,
-  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`. Every failure returns empty SPIR-V. `stored_value` is
+  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`. Every failure returns empty SPIR-V. `stored_value` is
   meaningful only when `stored_value_known` is true; runtime results are
   never invented by the compiler.
 - Explicit test ABI: one workgroup with 1..64 invocations, one fixed-size uint array SSBO at set 0/binding 0.
@@ -430,3 +430,37 @@ Status: Experimental, Implemented (strict subset), Tested.
   affine overflow and last-invocation out-of-range. Low-level SSA emitter
   does not perform the translator's alias proof; use translator and checked
   dispatch for this ABI. This is not general PS5 shader launch support.
+
+
+### Strict conditional selection (single-invocation only)
+
+- Supports `v_readfirstlane_b32` (defined VGPR to ordinary SGPR) only with
+  local_size_x=1; one invocation means no wave reduction is invented.
+  Decoder now correctly marks this instruction's destination as scalar.
+  `s_mov_b32` copies defined SGPR/inline integer/literal values. Ordinary
+  scalar values may feed existing integer/vector moves/ALU sources.
+- `s_cmp_eq_u32` creates an SSA comparison of defined scalar sources.
+  `s_cbranch_scc0` may skip forward over a body of only `v_mov_b32`.
+  Body executes on equality, skipped on inequality. One such region per
+  kernel; target must be a decoded instruction boundary within the program.
+- Body has no memory/scalar/ALU side effects. Moves may depend on earlier
+  body moves. Every assigned VGPR must be defined on the skipped path too.
+  At merge, each assigned VGPR becomes a structured SelectEqual node:
+  OpIEqual, SelectionMerge, BranchConditional and two branches to a Phi.
+  This lowers the restricted guest branch into conditional value selection,
+  not general CFG structurization. Pure move aliases can be computed before
+  selection because they cannot fault or have external effects.
+- Conditional SSA nodes deliberately discard constant/address-affine facts.
+  A selected address can still use single-invocation runtime bounds guards.
+  `conditional_selection=true` identifies this path.
+- Rejects backward/zero/out-of-program/non-boundary targets, undefined SCC
+  or SGPRs, special scalar destinations, SCC1/other compare kinds, loops,
+  nested/repeated branches, conditional loads/stores/ALU/scalar effects,
+  undefined skipped-path VGPRs and all multi-invocation scalar branching.
+- Validation tests cover four modules: runtime register selection, dependent
+  multi-register moves, literal move with exact PC/word count, and selected
+  address feeding a guarded load. Each validates for Vulkan 1.0 and runs
+  both equality outcomes on lavapipe, with whole-buffer checks for the
+  base module and focused output checks for the additional shapes.
+- No general PS5 branch, VCC/EXEC, scalar ALU flags, wave convergence,
+  divergent multi-invocation control flow or commercial shader support.
