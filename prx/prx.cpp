@@ -7,7 +7,11 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <thread>
+
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "loader/nid.hpp"
 
@@ -47,6 +51,82 @@ SceInt32 sceKernelCreateThread(const char* name, void (*entry)(void*), void* arg
   return SCE_OK;
 }
 
+
+namespace {
+
+struct Mapping { void* start; std::size_t size; std::int64_t prot; };
+std::mutex g_map_mu;
+std::vector<Mapping>& mappings() { static std::vector<Mapping> m; return m; }
+
+Mapping* find_mapping(void* addr) {
+  for (auto& m : mappings())
+    if (addr >= m.start && addr < static_cast<char*>(m.start) + m.size)
+      return &m;
+  return nullptr;
+}
+
+bool prot_valid(std::int64_t prot) {
+  return prot >= 0 && prot <= (SCE_KERNEL_PROT_READ | SCE_KERNEL_PROT_WRITE |
+                               SCE_KERNEL_PROT_EXEC);
+}
+
+}  // namespace
+
+void* sceKernelMapMemory(std::size_t size, std::int64_t prot) {
+  if (size == 0 || !prot_valid(prot)) return nullptr;
+  void* p = ::mmap(nullptr, size, static_cast<int>(prot),
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (p == MAP_FAILED) return nullptr;
+  std::lock_guard<std::mutex> lk(g_map_mu);
+  mappings().push_back(Mapping{p, size, prot});
+  return p;
+}
+
+SceInt32 sceKernelMunmap(void* addr, std::size_t size) {
+  if (addr == nullptr || size == 0) return SCE_KERNEL_ERROR_EINVAL;
+  std::lock_guard<std::mutex> lk(g_map_mu);
+  Mapping* m = find_mapping(addr);
+  if (m == nullptr) return SCE_KERNEL_ERROR_EINVAL;  // not ours: honest
+  if (size > m->size) return SCE_KERNEL_ERROR_EINVAL;
+  if (::munmap(addr, size) != 0) return SCE_KERNEL_ERROR_UNKNOWN;
+  if (addr == m->start && size == m->size) {
+    *m = mappings().back();
+    mappings().pop_back();
+  } else if (addr == m->start) {
+    m->start = static_cast<char*>(m->start) + size;
+    m->size -= size;
+  } else if (static_cast<char*>(addr) + size ==
+             static_cast<char*>(m->start) + m->size) {
+    m->size -= size;
+  } else {
+    return SCE_KERNEL_ERROR_EINVAL;  // middle-split unmap: not supported yet
+  }
+  return SCE_OK;
+}
+
+SceInt32 sceKernelMTypeprotect(void* addr, std::size_t size, std::int64_t prot) {
+  if (addr == nullptr || size == 0 || !prot_valid(prot))
+    return SCE_KERNEL_ERROR_EINVAL;
+  std::lock_guard<std::mutex> lk(g_map_mu);
+  Mapping* m = find_mapping(addr);
+  if (m == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+  if (::mprotect(addr, size, static_cast<int>(prot)) != 0)
+    return SCE_KERNEL_ERROR_UNKNOWN;
+  if (addr == m->start && size >= m->size) m->prot = prot;
+  return SCE_OK;
+}
+
+SceInt32 sceKernelQueryMemoryProtection(void* addr, void** start, void** end,
+                                        std::int64_t* prot) {
+  if (addr == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+  std::lock_guard<std::mutex> lk(g_map_mu);
+  Mapping* m = find_mapping(addr);
+  if (m == nullptr) return SCE_KERNEL_ERROR_EINVAL;  // unknown range: honest
+  if (start) *start = m->start;
+  if (end) *end = static_cast<char*>(m->start) + m->size;
+  if (prot) *prot = m->prot;
+  return SCE_OK;
+}
 
 namespace {
 
@@ -163,8 +243,40 @@ PrxRegistry::PrxRegistry() {
         return sceKernelCreateThread("pnr-prx-thread", entry, arg);
       }));
   // Declared-only taxonomy entries (honest: no host implementation yet).
-  symbols_.push_back(decl_only("libkernel", "sceKernelMapMemory"));
-  symbols_.push_back(decl_only("libkernel", "sceKernelMTypeprotect"));
+  symbols_.push_back(decl_only("libkernel", "sceKernelReserveVirtualRange"));
+  symbols_.push_back(decl_only("libkernel", "sceKernelAvailableFlexibleMemorySize"));
+  // libkernel memory management (over POSIX mmap/mprotect/munmap).
+  symbols_.push_back(impl("libkernel", "sceKernelMapMemory",
+      [](const std::vector<std::int64_t>& a) -> std::int64_t {
+        if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
+        return reinterpret_cast<std::int64_t>(sceKernelMapMemory(
+            static_cast<std::size_t>(a[0]), a[1]));
+      }));
+  symbols_.push_back(impl("libkernel", "sceKernelMunmap",
+      [](const std::vector<std::int64_t>& a) -> std::int64_t {
+        if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
+        return sceKernelMunmap(reinterpret_cast<void*>(a[0]),
+                               static_cast<std::size_t>(a[1]));
+      }));
+  symbols_.push_back(impl("libkernel", "sceKernelMTypeprotect",
+      [](const std::vector<std::int64_t>& a) -> std::int64_t {
+        if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
+        return sceKernelMTypeprotect(reinterpret_cast<void*>(a[0]),
+                                     static_cast<std::size_t>(a[1]), a[2]);
+      }));
+  symbols_.push_back(impl("libkernel", "sceKernelQueryMemoryProtection",
+      [](const std::vector<std::int64_t>& a) -> std::int64_t {
+        if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
+        void* s = nullptr; void* e = nullptr; std::int64_t prot = 0;
+        const auto rc = sceKernelQueryMemoryProtection(
+            reinterpret_cast<void*>(a[0]), &s, &e, &prot);
+        if (rc == SCE_OK && a.size() >= 4) {
+          *reinterpret_cast<void**>(a[1]) = s;
+          *reinterpret_cast<void**>(a[2]) = e;
+          *reinterpret_cast<std::int64_t*>(a[3]) = prot;
+        }
+        return rc;
+      }));
   // libSceLibcInternal subset, implemented over host equivalents.
   symbols_.push_back(impl("libSceLibcInternal", "printf",
       [](const std::vector<std::int64_t>& a) -> std::int64_t {
