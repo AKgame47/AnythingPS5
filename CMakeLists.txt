@@ -24,7 +24,7 @@ add_library(pnr_loader loader/elf_parser.cpp loader/native_loader.cpp loader/nid
 add_library(pnr_prx prx/prx.cpp prx/prx_file.cpp loader/import_resolver.cpp)
 
 add_library(pnr_psabi SHARED psabi/psabi.cpp)
-target_link_libraries(pnr_psabi PRIVATE pnr_compat)
+target_link_libraries(pnr_psabi PRIVATE pnr_compat pnr_graphics)
 set_target_properties(pnr_psabi PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(pnr_prx PUBLIC pnr_loader pnr_compat)
 target_link_libraries(pnr_loader PUBLIC pnr_core)
@@ -112,6 +112,9 @@ add_executable(pnr_test_app examples/test_app.cpp)
 add_executable(ps_demo examples/ps_demo.cpp)
 target_link_libraries(ps_demo PRIVATE pnr_psabi)
 set_target_properties(ps_demo PROPERTIES BUILD_RPATH "$ORIGIN")
+add_executable(ps_cube_demo examples/ps_cube_demo.cpp)
+target_link_libraries(ps_cube_demo PRIVATE pnr_psabi)
+set_target_properties(ps_cube_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
@@ -120,10 +123,17 @@ add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_mem
 # Let the tests launch the real PS-style demo binary.
 target_compile_definitions(pnr_tests PRIVATE
   PNR_PS_DEMO_PATH="$<TARGET_FILE:ps_demo>"
+  PNR_PS_CUBE_DEMO_PATH="$<TARGET_FILE:ps_cube_demo>"
   PNR_PSABI_DIR="$<TARGET_FILE_DIR:pnr_psabi>")
 target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics pnr_shader)
 
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
+# The CLI runs a game that renders a rotating 3D cube through pnrGfx* calls.
+add_test(NAME pnr_cube_run COMMAND pnr run $<TARGET_FILE:ps_cube_demo>)
+set_tests_properties(pnr_cube_run PROPERTIES
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  PASS_REGULAR_EXPRESSION "RESULT: RUN OK"
+  FAIL_REGULAR_EXPRESSION "FAILED;BLOCKED;ps_cube_demo: FAIL;SKIPPED   demo app")
 # End-to-end: the CLI validates and natively runs the demo app.
 add_test(NAME pnr_end_to_end
          COMMAND pnr run $<TARGET_FILE:pnr_test_app>)
