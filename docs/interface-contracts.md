@@ -237,3 +237,9 @@ MISMATCH. Non-packages fail at archive validation.
 - `resolve_imports(path, registry, &out) -> Status`: bounds-checked parse of the ELF dynamic section (DT_NEEDED) and undefined .dynsym symbols; malformed files fail with a specific error, never a crash.
 - Each undefined symbol is classified: `host` (native library satisfies it), `prx-implemented` (taxonomy + working implementation), `prx-declared` (in taxonomy, not implemented - reported honestly), or `unknown` (PS-style sce* name outside the taxonomy).
 - `pnr run` prints the classification summary and every non-host import before launch; nothing is silently substituted.
+
+## IF-PRX-02 Libkernel File Calls (v1) — Implemented, Tested
+
+- `PsFileTable(fs)`: a jailed descriptor table over a `compat::FileSystemService`. Every path is resolved through the jail before any host syscall; traversal (`..`, escaping segments) returns EINVAL, absolute virtual paths stay inside the jail.
+- `open(path, flags) -> fd>=3` (RDONLY/WRONLY/RDWR + CREAT/TRUNC/APPEND subset; unknown flags EINVAL), `read`/`write` -> byte counts, `close`, `lseek` (SET/CUR/END), `fstat` -> `{size, is_directory}`. Closed or foreign fds are EINVAL, never host-fd guesses.
+- Registry integration: file calls are declared-only until `PrxRegistry::install_file_calls(&table)` wires them; `bind()` then resolves them as implemented. This keeps "no filesystem" an honest state.
