@@ -2,7 +2,7 @@
 
 **PNR — PlayStation Native Runtime.** A research project exploring native
 x86-64 game compatibility on Windows and Linux: a compatibility-layer
-runtime, Vulkan graphics backend (planned), and an adaptive performance
+runtime, Vulkan compute backend (rendering planned), and an adaptive performance
 engine for ordinary PCs and laptops, including low-end hardware.
 
 > **Honest status:** PNR cannot run any commercial PS5 game. No Sony
@@ -28,7 +28,6 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Controlled importer: checksum verification, ELF validation, traversal protection, library registration | Implemented, Tested |
 | Game library metadata: SQLite store (games, installations, compatibility, launches) | Implemented, Tested |
 | Library run by game id: `pnr run <id>` resolves the installed package, gives the game its own jail, records the launch, and honestly advances compatibility Untested to Launches Only on a clean exit | Implemented, Tested |
-
 | CLI driving the full 10-step launch workflow with honest per-step results | Implemented, Tested |
 | Developer-controlled demo app running only on compat services | Implemented, Tested |
 | Vulkan compute backend: dlopen-loaded (no SDK needed), instance/device/SSBO/pipeline/dispatch/readback; absence of a driver is reported, never faked | Implemented (compute), Tested on software Vulkan (Mesa lavapipe) in the sandbox; hardware GPU untested |
