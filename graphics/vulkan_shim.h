@@ -83,6 +83,7 @@ enum : VkStructureType {
 };
 enum : VkFlags {
   VK_QUEUE_GRAPHICS_BIT = 0x1,
+  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT = 0x80,
   VK_QUEUE_COMPUTE_BIT = 0x2,
   VK_IMAGE_USAGE_TRANSFER_SRC_BIT = 0x1,
   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT = 0x10,
@@ -111,6 +112,9 @@ enum : int32_t {
   VK_COMMAND_BUFFER_LEVEL_PRIMARY = 0,
   VK_SHARING_MODE_EXCLUSIVE = 0,
   VK_PIPELINE_BIND_POINT_GRAPHICS = 0,
+  VK_FORMAT_R32G32_SFLOAT = 103,
+  VK_FORMAT_R32G32B32_SFLOAT = 106,
+  VK_VERTEX_INPUT_RATE_VERTEX = 0,
   VK_FORMAT_R8G8B8A8_UNORM = 37,
   VK_IMAGE_TYPE_2D = 1,
   VK_IMAGE_TILING_OPTIMAL = 0,
@@ -253,6 +257,8 @@ typedef struct VkSubmitInfo {
   uint32_t commandBufferCount; const VkCommandBuffer* pCommandBuffers;
   uint32_t signalSemaphoreCount; const VkSemaphore* pSignalSemaphores;
 } VkSubmitInfo;
+typedef struct VkVertexInputBindingDescription { uint32_t binding, stride; int32_t inputRate; } VkVertexInputBindingDescription;
+typedef struct VkVertexInputAttributeDescription { uint32_t location, binding; int32_t format; uint32_t offset; } VkVertexInputAttributeDescription;
 typedef struct VkOffset2D { int32_t x, y; } VkOffset2D;
 typedef struct VkOffset3D { int32_t x, y, z; } VkOffset3D;
 typedef struct VkExtent2D { uint32_t width, height; } VkExtent2D;
@@ -305,8 +311,8 @@ typedef struct VkFramebufferCreateInfo {
 } VkFramebufferCreateInfo;
 typedef struct VkPipelineVertexInputStateCreateInfo {
   VkStructureType sType; const void* pNext; VkFlags flags;
-  uint32_t vertexBindingDescriptionCount; const void* pVertexBindingDescriptions;
-  uint32_t vertexAttributeDescriptionCount; const void* pVertexAttributeDescriptions;
+  uint32_t vertexBindingDescriptionCount; const VkVertexInputBindingDescription* pVertexBindingDescriptions;
+  uint32_t vertexAttributeDescriptionCount; const VkVertexInputAttributeDescription* pVertexAttributeDescriptions;
 } VkPipelineVertexInputStateCreateInfo;
 typedef struct VkPipelineInputAssemblyStateCreateInfo {
   VkStructureType sType; const void* pNext; VkFlags flags; int32_t topology;
