@@ -313,7 +313,7 @@ touches nothing in the library.
   dispatch environment.
 
 
-## IF-GRAPH-03 Restricted compute translation (v11)
+## IF-GRAPH-03 Restricted compute translation (v12)
 
 Status: Experimental, Implemented (strict subset), Tested.
 
@@ -321,7 +321,7 @@ Status: Experimental, Implemented (strict subset), Tested.
   little-endian words without alignment assumptions; partial words fail.
   `translate_compute_words(words, guest_base, buffer_words=1, local_size_x=1, uniform_words=0, guest_base_high=0, loop_count_uniform=16)` is the word-level entry point.
 - Result: `ok`, diagnostic `error`, `spirv`, `stored_value_known`,
-  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`, `required_uniform_words`, `host_float32`, `full64_pointers`, `structured_loop`, `loop_count_uniform`. Every failure returns empty SPIR-V. `stored_value` is
+  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`, `required_uniform_words`, `host_float32`, `full64_pointers`, `structured_loop`, `loop_count_uniform`, `loop_memory`. Every failure returns empty SPIR-V. `stored_value` is
   meaningful only when `stored_value_known` is true; runtime results are
   never invented by the compiler.
 - Explicit test ABI: one workgroup with 1..64 invocations, one fixed-size uint array SSBO at set 0/binding 0.
@@ -721,8 +721,8 @@ consume one word, with PC/truncation regression checks.
 
 `shader/loop_memory.hpp` exposes prove_loop_memory(accesses, buffer_words,
 lanes, iterations). This is a standalone proof utility, NOT a newly accepted
-shader instruction shape. Current translate_compute_words still rejects
-loop-body memory, and no GPU lowering calls this verifier yet.
+shader instruction shape. The strict copy-loop lowering below now calls this verifier;
+other loop-memory patterns remain rejected.
 
 - Access map is a uint32 load/store at byte offset origin + lane*lane_stride
   + iteration*iteration_stride relative to the aligned SSBO guest base.
@@ -750,6 +750,64 @@ loop-body memory, and no GPU lowering calls this verifier yet.
   map oracle checks 12000 deterministic small cases (both success/failure,
   aligned and misaligned). Existing SPIR-V/lavapipe loop corpus remains
   passing; it is NOT proof of loop-body memory execution.
-- Next lowering must bind each accepted guest address expression to these
-  maps, preserve guards inside the loop body and retain checked-count entry
-  policy. A proof utility alone is not a compiler path or a security sandbox.
+- The copy-loop lowering below binds accepted address expressions to these
+  maps, retains guards inside the body and keeps checked-count entry policy.
+  This proof is not a security sandbox.
+
+
+### Dedicated guarded copy-loop lowering
+
+- Recognizes exactly eight decoded instructions: s_mov_b32 counter,count;
+  flat_load_dword data,srcPair+offset; flat_store_dword dstPair+offset,data;
+  v_add_nc_u32 srcLow,srcStep,srcLow; v_add_nc_u32 dstLow,dstStep,dstLow;
+  s_sub_u32 counter,counter,1; s_cmp_eq_u32 counter,0;
+  s_cbranch_scc0 back-to-load. Scalar count 1..64 may be literal/inline or
+  declared runtime uniform/copy under the existing error105/entry-guard
+  contract. Exact decoded instruction boundaries include literal words.
+- Source/destination low words need proven non-wrapping affine lane maps;
+  high words must be constant and equal the binding base high. Binding must
+  not cross a low-word boundary. Steps are literal/inline nonnegative bytes;
+  both final pointers after N increments must fit uint32, even though only
+  iterations 0..N-1 access memory. Runtime counts prove all 64 iterations.
+  FLAT offsets are separately included in proof and emitted guards.
+- Calls prove_loop_memory for the read/store maps at origin-base+offset,
+  lane stride and iteration step. Every store is distinct across lanes and
+  iterations; every read is disjoint from every store. Input broadcasts are
+  allowed, output broadcasts/collisions are not. Tiled and transposed maps
+  work; no hardcoded lane-stride-four rule is substituted for exact proof.
+  Existing prior-read/output envelopes are also checked conservatively.
+- One guest store instruction total, one loop, no combined selection region.
+  Pointer pairs cannot overlap low/high words; loaded data cannot overwrite
+  any address word and must be the stored register. Strict existing FLAT
+  modifier/segment/saddr/reserved-field checks remain. No additional body
+  ALU, read-modify-write, in-place update, memory dependency, signed stride,
+  full64 loop pointer, barriers, atomics, nested/repeated loop or general CFG.
+- LoopCopy IR carries source/dest low SSA refs a/b, c=count literal or input
+  node, d=0 constant /1 runtime mode, e/f=pointer steps, g/h=FLAT byte offsets.
+  Header Phi values carry pointers, iteration and last loaded word. Body has
+  separate structured load/store guards including alignment/range and
+  offset-add overflow; AccessChain and load/store occur ONLY in valid paths.
+  Invalid load=0/store=skip remains the low-level defensive policy, though
+  accepted guest shapes prove those accesses valid for every permitted count.
+- LoopCopy result is last loaded word; LoopCopySource/Dest project final
+  pointers at loop exit. Guest data/pointer/counter registers preserve exact
+  final values. Constant-count pointer maps keep final affine facts only when
+  proven; runtime final maps lose affine facts rather than guessing count.
+  Counter exits zero and stale carry is invalidated. loop_memory=true and
+  structured_loop=true identify the path; guarded_memory=true is retained.
+- Low-level emitter checks count mode/limits, refs, offsets, runtime guard
+  match and non-crossing binding. It is NOT an alias-proof API: callers
+  bypassing translator own alias semantics. Guards still prevent OOB pointer
+  construction. Use translator plus checked dispatch for the full contract.
+- 26 new modules validate for Vulkan 1.0 and execute on lavapipe: sixteen
+  local-size/count combinations (1/2/8/64 lanes, 1/2/16/64 counts), three
+  changing-runtime-count modules, offset and transposed maps, and five
+  low-level final-pointer/data/invalid-load/store probes. Whole buffers match
+  for every lane/iteration, wrap-pattern input, untouched input and sentinel.
+  Runtime invalid count is rejected before dispatch and raw entry guard is
+  verified no-op. Byte API preserves exact module and loop-memory metadata.
+- Negatives cover last-iteration OOB, two-axis aliases/collisions, alignment,
+  pointer wrap, FLAT modifiers/reserved fields, data/address alias, wrong
+  increments/counter/compare/backedge, dynamic/unproven/mismatched-high pairs,
+  zero/oversized/undeclared count, short full-domain runtime extent, boundary
+  crossing, repeated/combined regions, extra outside store and malformed IR.
