@@ -40,6 +40,9 @@ class PrxRegistry {
   // Look up by NID. Returns nullptr when the NID is not in the taxonomy.
   const PrxSymbol* find(const std::string& nid) const;
 
+  // Look up by symbol name (any library). nullptr when not in the taxonomy.
+  const PrxSymbol* find_name(const std::string& name) const;
+
   // Bind an imported NID to a callable host trampoline.
   // Returns SCE_OK and sets fn on success;
   // SCE_KERNEL_ERROR_UNKNOWN when the NID is not in the taxonomy;
