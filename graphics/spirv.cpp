@@ -71,7 +71,7 @@ std::vector<uint32_t> SpirvModule::compute_write_u32(uint32_t value) {
 }
 
 std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes,
-                                                uint32_t buffer_words) {
+                                                uint32_t buffer_words, uint32_t guest_base_low) {
   if (!buffer_words || buffer_words > 65536) return {};
   // SPIR-V 1.0 Uniform BufferBlock containing a fixed-size uint array.
   // IDs 1..12 retain the original emitter's meanings; 13=array type,
@@ -98,7 +98,19 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   inst(m, spv::OpTypePointer, {8, spv::StorageUniform, 6});
   inst(m, spv::OpConstant, {6, 10, 0});
   inst(m, spv::OpVariable, {7, 2, spv::StorageUniform});
-  uint32_t next = 15;
+  bool guards = false;
+  for (const auto& n : nodes)
+    guards |= n.op == U32Op::GuardedLoad || n.op == U32Op::GuardedStore;
+  if (guards && ((guest_base_low % 4) ||
+      uint64_t(guest_base_low) + uint64_t(buffer_words)*4 > 0x100000000ull)) return {};
+  // Guard constants: bool type=15, base=16, last aligned address=17,
+  // alignment mask=18, shift count=19. Opcode values checked via spirv-as.
+  inst(m, 20, {15}); // OpTypeBool
+  inst(m, spv::OpConstant, {6, 16, guest_base_low});
+  inst(m, spv::OpConstant, {6, 17, guest_base_low + (buffer_words-1)*4});
+  inst(m, spv::OpConstant, {6, 18, 3});
+  inst(m, spv::OpConstant, {6, 19, 2});
+  uint32_t next = 20;
   std::vector<uint32_t> ids(nodes.size(), 0), indices(nodes.size(), 0);
   for (size_t i = 0; i < nodes.size(); ++i) {
     const auto& n = nodes[i];
@@ -114,9 +126,44 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   }
   inst(m, spv::OpFunction, {4, 1, 0, 5});
   inst(m, spv::OpLabel, {11});
+  uint32_t current_label = 11;
   for (size_t i = 0; i < nodes.size(); ++i) {
     const auto& n = nodes[i];
     if (n.op == U32Op::Constant) continue;
+    if (n.op == U32Op::GuardedLoad || n.op == U32Op::GuardedStore) {
+      const bool load = n.op == U32Op::GuardedLoad;
+      const uint32_t addr_node = load ? n.a : n.b;
+      if (addr_node >= i || !ids[addr_node] ||
+          (!load && (n.a >= i || !ids[n.a]))) return {};
+      const uint32_t addr = ids[addr_node];
+      const uint32_t ge=next++, le=next++, masked=next++, aligned=next++;
+      const uint32_t range=next++, valid=next++, yes=next++, merge=next++;
+      inst(m, 174, {15, ge, addr, 16}); // OpUGreaterThanEqual
+      inst(m, 178, {15, le, addr, 17}); // OpULessThanEqual
+      inst(m, 199, {6, masked, addr, 18}); // OpBitwiseAnd
+      inst(m, 170, {15, aligned, masked, 10}); // OpIEqual
+      inst(m, 167, {15, range, ge, le});
+      inst(m, 167, {15, valid, range, aligned});
+      inst(m, 247, {merge, 0}); // OpSelectionMerge None
+      inst(m, 250, {valid, yes, merge}); // OpBranchConditional
+      inst(m, spv::OpLabel, {yes});
+      const uint32_t delta=next++, index=next++, ptr=next++;
+      inst(m, 130, {6, delta, addr, 16});
+      inst(m, 194, {6, index, delta, 19}); // OpShiftRightLogical
+      // Crucially, pointer construction and memory access are INSIDE yes.
+      inst(m, spv::OpAccessChain, {8, ptr, 2, 10, index});
+      uint32_t loaded = 0;
+      if (load) { loaded=next++; inst(m, 61, {6, loaded, ptr}); }
+      else inst(m, spv::OpStore, {ptr, ids[n.a]});
+      inst(m, 249, {merge});
+      inst(m, spv::OpLabel, {merge});
+      if (load) {
+        ids[i]=next++;
+        inst(m, 245, {6, ids[i], loaded, yes, 10, current_label}); // OpPhi
+      }
+      current_label = merge;
+      continue;
+    }
     uint32_t access = 0;
     if (n.op == U32Op::Load || n.op == U32Op::Store) {
       access = next++;
