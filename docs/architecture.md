@@ -165,3 +165,13 @@ criterion in `docs/feasibility-report.md` §8.
 ## Game-driven rendering
 
 `libpnr_psabi.so` exports a small PNR extension, `pnrGfxInit`, `pnrGfxDrawCube`, `pnrGfxPresentToFile`, `pnrGfxFramesRendered`, `pnrGfxLastError`. They are PNR names, not Sony APIs, and the import resolver classifies any `pnr*` import as `pnr-extension`. A game calls them from its own frame loop; the shim runs the 3D draw path in the game process and "presents" by writing a PPM through the game's jail. `pnr run` step 5 reports the offscreen renderer (or BLOCKED without a Vulkan device) and step 8 counts the frame files. No swapchain, display, audio or input here, and the draw path is the hand-authored cube pipeline; translated RDNA vertex output is not connected yet (next slice).
+
+## Compute-as-vertex bridge (Experimental)
+
+`graphics/rdna_vertex.hpp` builds restricted RDNA words, translates them
+with `translate_compute_words` (24 lanes, 16 push-constant scalars as
+s0..s15) and runs one dispatch per clip component. The readback feeds
+`render_clip_mesh_rgba` with a pass-through vertex shader. This is a PNR
+test ABI: no vertex-stage inputs, exports or parameter cache, no Sony
+driver state. The single-store translator limit is why it takes four
+dispatches. Float results follow host Vulkan policy.
