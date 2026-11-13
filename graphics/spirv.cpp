@@ -71,7 +71,8 @@ std::vector<uint32_t> SpirvModule::compute_write_u32(uint32_t value) {
 }
 
 std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes,
-                                                uint32_t buffer_words, uint32_t guest_base_low, uint32_t local_size_x) {
+                                                uint32_t buffer_words, uint32_t guest_base_low, uint32_t local_size_x, uint32_t uniform_words) {
+  if(uniform_words>16) return {};
   if (!local_size_x || local_size_x > 64) return {};
   if (!buffer_words || buffer_words > 65536) return {};
   // SPIR-V 1.0 Uniform BufferBlock containing a fixed-size uint array.
@@ -100,6 +101,11 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
       i+=count;
     }
   }
+  if(uniform_words) {
+    inst(m,spv::OpDecorate,{22,2}); // Block push-constant struct
+    for(uint32_t j=0;j<uniform_words;++j)
+      inst(m,spv::OpMemberDecorate,{22,j,spv::DecorOffset,j*4});
+  }
   inst(m, spv::OpDecorate, {21, 11, 29}); // BuiltIn LocalInvocationIndex
   inst(m, spv::OpDecorate, {13, 6, 4}); // ArrayStride = 6, uint stride 4
   inst(m, spv::OpTypeVoid, {4});
@@ -126,13 +132,23 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   inst(m, spv::OpConstant, {6, 19, 2});
   inst(m, spv::OpTypePointer, {20, 1, 6}); // Input uint
   inst(m, spv::OpVariable, {20, 21, 1});
-  uint32_t next = 22;
+  if(uniform_words) {
+    m.push_back(((uniform_words+2)<<16u)|spv::OpTypeStruct);
+    m.push_back(22);for(uint32_t j=0;j<uniform_words;++j)m.push_back(6);
+    inst(m,spv::OpTypePointer,{23,9,22}); // PushConstant = 9
+    inst(m,spv::OpTypePointer,{24,9,6});
+    inst(m,spv::OpVariable,{23,25,9});
+  }
+  uint32_t next = 26;
   std::vector<uint32_t> ids(nodes.size(), 0), indices(nodes.size(), 0);
   for (size_t i = 0; i < nodes.size(); ++i) {
     const auto& n = nodes[i];
     if (n.op == U32Op::Constant) {
       ids[i] = next++;
       inst(m, spv::OpConstant, {6, ids[i], n.a});
+    } else if (n.op == U32Op::UniformInput) {
+      if(n.a>=uniform_words)return {};
+      indices[i]=next++;inst(m,spv::OpConstant,{6,indices[i],n.a});
     } else if (n.op == U32Op::Load || n.op == U32Op::Store) {
       const uint32_t index = n.op == U32Op::Load ? n.a : n.b;
       if (index >= buffer_words) return {};
@@ -146,6 +162,11 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   for (size_t i = 0; i < nodes.size(); ++i) {
     const auto& n = nodes[i];
     if (n.op == U32Op::Constant) continue;
+    if (n.op == U32Op::UniformInput) {
+      const uint32_t ptr=next++;
+      inst(m,spv::OpAccessChain,{24,ptr,25,indices[i]});
+      ids[i]=next++;inst(m,61,{6,ids[i],ptr});continue;
+    }
     if (n.op == U32Op::InvocationIndex) {
       ids[i]=next++; inst(m, 61, {6, ids[i], 21}); continue;
     }
