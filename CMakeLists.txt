@@ -100,10 +100,10 @@ target_link_libraries(pnr_compat PUBLIC Threads::Threads)
 target_link_libraries(pnr_loader PUBLIC Threads::Threads pnr_platform)
 target_link_libraries(pnr_package PUBLIC pnr_library)
 
-# PSN connector, slice 1 (offline core: no network code)
-add_library(pnr_psn psn/json.cpp psn/psn.cpp psn/psn_cli.cpp)
+# PSN connector (slice 1 offline core; slice 2 live sync over dlopen-ed libcurl)
+add_library(pnr_psn psn/json.cpp psn/psn.cpp psn/psn_cli.cpp psn/http.cpp psn/curl_http.cpp psn/sync.cpp)
 target_include_directories(pnr_psn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(pnr_psn PUBLIC pnr_library pnr_core)
+target_link_libraries(pnr_psn PUBLIC pnr_library pnr_core ${CMAKE_DL_LIBS})
 
 # CLI launcher (STEP 1-10 workflow driver)
 add_library(pnr_launcher launcher/launcher_core.cpp)
@@ -141,7 +141,7 @@ set_target_properties(ps_cube_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
-add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp)
+add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp tests/psn_sync_tests.cpp)
 
 # Let the tests launch the real PS-style demo binary.
 target_compile_definitions(pnr_tests PRIVATE
