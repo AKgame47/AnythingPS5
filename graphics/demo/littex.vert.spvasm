@@ -1,0 +1,83 @@
+; PNR hand-authored lit TEXTURED vertex shader (adds uv at location 2, normal at 3).
+; Based on lit_hand.vert: PNR hand-authored lit vertex shader: gl_Position = MVP * vec4(position,1).
+; Push constants: column-major mat4 MVP, then vec4 light (xyz = unit direction
+; TOWARD the light in the mesh's object space). Outputs colour and the raw
+; Lambert dot d = dot(normal, light.xyz) (clamped in the fragment shader). GPL-2.0.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %inPos %inCol %inUV %inNrm %outCol %outD %outUV %glpos
+               OpDecorate %inPos Location 0
+               OpDecorate %inCol Location 1
+               OpDecorate %inUV Location 2
+               OpDecorate %inNrm Location 3
+               OpDecorate %outUV Location 2
+               OpDecorate %outCol Location 0
+               OpDecorate %outD Location 1
+               OpDecorate %glpos BuiltIn Position
+               OpMemberDecorate %PC 0 Offset 0
+               OpMemberDecorate %PC 0 ColMajor
+               OpMemberDecorate %PC 0 MatrixStride 16
+               OpMemberDecorate %PC 1 Offset 64
+               OpDecorate %PC Block
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+         %v2 = OpTypeVector %float 2
+         %v3 = OpTypeVector %float 3
+         %v4 = OpTypeVector %float 4
+         %m4 = OpTypeMatrix %v4 4
+        %int = OpTypeInt 32 1
+         %i0 = OpConstant %int 0
+         %i1 = OpConstant %int 1
+         %f1 = OpConstant %float 1
+         %PC = OpTypeStruct %m4 %v4
+       %pPC = OpTypePointer PushConstant %PC
+         %pc = OpVariable %pPC PushConstant
+       %pm4 = OpTypePointer PushConstant %m4
+       %pv4 = OpTypePointer PushConstant %v4
+       %pi2 = OpTypePointer Input %v2
+       %po2 = OpTypePointer Output %v2
+       %pi3 = OpTypePointer Input %v3
+       %po3 = OpTypePointer Output %v3
+       %po4 = OpTypePointer Output %v4
+       %pof = OpTypePointer Output %float
+      %inPos = OpVariable %pi3 Input
+      %inCol = OpVariable %pi3 Input
+       %inUV = OpVariable %pi2 Input
+      %inNrm = OpVariable %pi3 Input
+     %outCol = OpVariable %po3 Output
+       %outD = OpVariable %pof Output
+      %outUV = OpVariable %po2 Output
+      %glpos = OpVariable %po4 Output
+       %main = OpFunction %void None %fn
+          %e = OpLabel
+          %p = OpLoad %v3 %inPos
+         %p0 = OpCompositeExtract %float %p 0
+         %p1 = OpCompositeExtract %float %p 1
+         %p2 = OpCompositeExtract %float %p 2
+         %p4 = OpCompositeConstruct %v4 %p0 %p1 %p2 %f1
+         %mp = OpAccessChain %pm4 %pc %i0
+          %m = OpLoad %m4 %mp
+        %pos = OpMatrixTimesVector %v4 %m %p4
+               OpStore %glpos %pos
+        %col = OpLoad %v3 %inCol
+               OpStore %outCol %col
+         %uv = OpLoad %v2 %inUV
+               OpStore %outUV %uv
+         %lp = OpAccessChain %pv4 %pc %i1
+         %l4 = OpLoad %v4 %lp
+         %l0 = OpCompositeExtract %float %l4 0
+         %l1 = OpCompositeExtract %float %l4 1
+         %l2 = OpCompositeExtract %float %l4 2
+          %n = OpLoad %v3 %inNrm
+         %n0 = OpCompositeExtract %float %n 0
+         %n1 = OpCompositeExtract %float %n 1
+         %n2 = OpCompositeExtract %float %n 2
+         %t0 = OpFMul %float %l0 %n0
+         %t1 = OpFMul %float %l1 %n1
+         %t2 = OpFMul %float %l2 %n2
+         %s0 = OpFAdd %float %t0 %t1
+          %d = OpFAdd %float %s0 %t2
+               OpStore %outD %d
+               OpReturn
+               OpFunctionEnd
