@@ -1,0 +1,56 @@
+; PNR hand-authored vertex shader: rotates a 2D vertex by (cos, sin) pushed
+; per frame and passes the vertex colour through. GPL-2.0.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %inPos %inCol %outCol %glpos
+               OpDecorate %inPos Location 0
+               OpDecorate %inCol Location 1
+               OpDecorate %outCol Location 0
+               OpDecorate %glpos BuiltIn Position
+               OpMemberDecorate %PC 0 Offset 0
+               OpMemberDecorate %PC 1 Offset 4
+               OpDecorate %PC Block
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+         %v2 = OpTypeVector %float 2
+         %v3 = OpTypeVector %float 3
+         %v4 = OpTypeVector %float 4
+        %int = OpTypeInt 32 1
+         %i0 = OpConstant %int 0
+         %i1 = OpConstant %int 1
+         %f0 = OpConstant %float 0
+         %f1 = OpConstant %float 1
+         %PC = OpTypeStruct %float %float
+       %pPC = OpTypePointer PushConstant %PC
+         %pc = OpVariable %pPC PushConstant
+       %pfl = OpTypePointer PushConstant %float
+       %pi2 = OpTypePointer Input %v2
+       %pi3 = OpTypePointer Input %v3
+       %po3 = OpTypePointer Output %v3
+       %po4 = OpTypePointer Output %v4
+      %inPos = OpVariable %pi2 Input
+      %inCol = OpVariable %pi3 Input
+     %outCol = OpVariable %po3 Output
+      %glpos = OpVariable %po4 Output
+       %main = OpFunction %void None %fn
+          %e = OpLabel
+          %p = OpLoad %v2 %inPos
+          %x = OpCompositeExtract %float %p 0
+          %y = OpCompositeExtract %float %p 1
+         %cp = OpAccessChain %pfl %pc %i0
+          %c = OpLoad %float %cp
+         %sp = OpAccessChain %pfl %pc %i1
+          %s = OpLoad %float %sp
+         %cx = OpFMul %float %c %x
+         %sy = OpFMul %float %s %y
+         %nx = OpFSub %float %cx %sy
+         %sx = OpFMul %float %s %x
+         %cy = OpFMul %float %c %y
+         %ny = OpFAdd %float %sx %cy
+        %pos = OpCompositeConstruct %v4 %nx %ny %f0 %f1
+               OpStore %glpos %pos
+        %col = OpLoad %v3 %inCol
+               OpStore %outCol %col
+               OpReturn
+               OpFunctionEnd
