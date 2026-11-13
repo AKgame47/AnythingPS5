@@ -97,6 +97,16 @@ public:
                                  const float clear[4],
                                  std::vector<std::vector<uint8_t>>* frames);
 
+  // Single frame, no push constants: vertices are float4 clip-space position
+  // (x,y,z,w) + float3 colour (7 floats each), indexed, depth optional. The
+  // vertex shader is expected to pass the position through unchanged.
+  Status render_clip_mesh_rgba(uint32_t width, uint32_t height,
+                               const std::vector<uint32_t>& vert_spirv,
+                               const std::vector<uint32_t>& frag_spirv,
+                               const std::vector<float>& vertices,
+                               const std::vector<uint32_t>& indices, bool depth,
+                               const float clear[4], std::vector<uint8_t>* image);
+
   void shutdown();
 
 private:
