@@ -57,6 +57,38 @@ struct ScanReport {
 };
 constexpr size_t kScanMaxEntries = 1000;
 
+struct ImportOutcome {
+  bool ok = false;
+  std::string error;
+  std::string game_id, title, version, install_path;
+  std::string kind;  // "fresh", "reinstall" (same version) or "different-version"
+  std::string previous_version, previous_path;  // set when the id was already installed
+};
+
+// What remove() would delete, and what it did. Nothing is deleted unless
+// confirmed, and nothing outside <library dir>/games and <library dir>/jail/<id>.
+struct RemoveOutcome {
+  bool found = false;
+  bool refused = false;          // path-containment or safety refusal; nothing deleted
+  bool needs_confirmation = false;
+  bool removed = false;
+  std::string error;
+  std::string install_path, jail_path;
+  bool install_exists = false, jail_exists = false;
+  bool keep_saves = false;
+};
+
+struct VerifyOutcome {
+  bool found = false;
+  bool ok = false;
+  std::vector<std::string> problems;
+  bool marked_failed = false;    // integrity set to "failed" by this call
+};
+
+// Ids usable as a library directory name: 1..128 chars of [A-Za-z0-9._-],
+// never "." or "..".
+bool valid_game_id(const std::string& id);
+
 // The six compatibility states the library knows.
 const std::vector<std::string>& compat_states();
 bool valid_compat_state(const std::string& s);
@@ -90,8 +122,20 @@ public:
   // Read-only directory scan (non-recursive, symlinks not followed).
   Status scan(const std::string& dir, ScanReport* out);
 
+  // Runs the importer (every check) into this library's own directory.
+  // A previous install tree of another version is left in place and reported.
+  ImportOutcome import_package(const std::string& pkg_path);
+  // Dry run unless confirmed. keep_saves keeps <library dir>/jail/<id>.
+  RemoveOutcome remove(const std::string& game_id, bool keep_saves, bool confirmed);
+  // Re-checks the installed files (existence, entry is an x86-64 ELF). It
+  // cannot re-check payload checksums (the manifest is not kept). It only ever
+  // marks integrity "failed"; it never restores "verified" and never touches
+  // compatibility.
+  VerifyOutcome verify(const std::string& game_id);
+
 private:
   library::GameDb db_;
+  std::string root_;  // library directory (parent of the db file)
   bool open_ = false;
   std::string jail_root_;  // <library dir>/jail; each game gets <jail_root_>/<game_id>
 };
@@ -106,6 +150,12 @@ std::string render_history_text(const GameEntry& g, const std::vector<library::L
 std::string render_history_json(const GameEntry& g, const std::vector<library::LaunchRow>& rows);
 std::string render_scan_text(const ScanReport& r);
 std::string render_scan_json(const ScanReport& r);
+std::string render_import_text(const ImportOutcome& o);
+std::string render_import_json(const ImportOutcome& o);
+std::string render_remove_text(const std::string& id, const RemoveOutcome& o);
+std::string render_remove_json(const std::string& id, const RemoveOutcome& o);
+std::string render_verify_text(const std::string& id, const VerifyOutcome& o);
+std::string render_verify_json(const std::string& id, const VerifyOutcome& o);
 std::string render_outcome_json(const std::string& game_id, const LaunchOutcome& o);
 
 }  // namespace pnr::launcher
