@@ -11,6 +11,7 @@
 #include <iterator>
 
 #include "launcher/launcher_core.hpp"
+#include "sandbox/sandbox.hpp"
 #include "psn/psn_cli.hpp"
 #include "store/store_cli.hpp"
 
@@ -50,12 +51,14 @@ int main(int argc, char** argv) {
   bool json = false;
   std::vector<std::string> pos, gameargs;
   bool after = false, complete = false, forget = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
+  bool sandbox_on = false;
   std::string note, limit_s = "20", file, platform, rights, source;
   for (size_t i = 1; i < a.size(); ++i) {
     if (after) gameargs.push_back(a[i]);
     else if (a[i] == "--") after = true;
     else if (a[i] == "--json") json = true;
     else if (a[i] == "--yes") yes = true;
+    else if (a[i] == "--sandbox") sandbox_on = true;
     else if (a[i] == "--overwrite") overwrite = true;
     else if (a[i] == "--orphans") orphans = true;
     else if (a[i] == "--complete") complete = true;
@@ -91,6 +94,11 @@ int main(int argc, char** argv) {
         auto pv = pnr::store::check_provenance(preg.dir(), preg, pos[0], &note);
         if (!pv) { std::printf("LAUNCH NOT STARTED: %s\n", pv.error.message.c_str()); return 1; }
       }
+    }
+    if (sandbox_on) {  // no silent fallback: an unusable sandbox means the game is not started
+      auto sp = pnr::sandbox::probe();
+      if (!sp.usable()) { std::printf("LAUNCH NOT STARTED: --sandbox was requested but the sandbox is not usable here (%s)\n", sp.notes.c_str()); return 1; }
+      core.set_child_setup([](std::string* e) { return pnr::sandbox::enter(e); });
     }
     auto o = core.launch(pos[0], gameargs);
     if (json) std::puts(render_outcome_json(pos[0], o).c_str());
@@ -166,6 +174,9 @@ int main(int argc, char** argv) {
     auto o = core.restore_saves(pos[0], pos[1], overwrite);
     std::fputs((json ? render_saves_json("restore", o) + "\n" : render_saves_text("restore", o)).c_str(), stdout);
     rc = o.ok ? 0 : 1;
+  } else if (a[0] == "sandbox" && pos.size() == 1 && pos[0] == "probe") {
+    std::fputs(pnr::sandbox::describe(pnr::sandbox::probe()).c_str(), stdout);
+    rc = 0;
   } else if (a[0] == "store" && !pos.empty()) {
     pnr::store::Registry reg(pnr::store::store_dir_for(dbp ? dbp : "./pnr_data/library.db"));
     std::string out;
