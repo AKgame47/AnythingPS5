@@ -14,6 +14,9 @@
 #include "ape/ape.hpp"
 #include "compat/services.hpp"
 #include "laptop/laptop.hpp"
+#include "services/audio.hpp"
+#include "services/input.hpp"
+#include "services/virtual_fs.hpp"
 #include "core/runtime.hpp"
 #include "library/game_db.hpp"
 #include "loader/native_loader.hpp"
@@ -465,6 +468,55 @@ int main() {
     pnr::laptop::apply_caps(saver, s);
     CHECK(s.fps_cap == 30 && s.background_tasks == 1,
           "laptop: caps bound quality settings");
+  }
+
+  // --- MODULE 08: virtual filesystem areas + save isolation ---
+  {
+    std::remove("/tmp/pnr_vfs_test/save_data/u1/g1/save.dat");
+    pnr::services::VirtualFileSystem vfs("/tmp/pnr_vfs_test");
+    auto saves1 = vfs.saves("u1", "g1");
+    CHECK(saves1.write_file("/save.dat", "hello") , "vfs: write user save");
+    auto saves2 = vfs.saves("u2", "g1");
+    CHECK(!saves2.exists("/save.dat"), "vfs: saves isolated per user");
+    std::string host;
+    auto area = vfs.area(pnr::services::FsArea::shader_cache);
+    CHECK(!area.resolve("/../escape", host), "vfs: traversal rejected");
+    CHECK(!pnr::services::VirtualFileSystem::valid_id("../x"),
+          "vfs: id validation rejects traversal");
+    CHECK(!pnr::services::VirtualFileSystem::valid_id("a/b"),
+          "vfs: id validation rejects slashes");
+    bool threw = false;
+    try { (void)vfs.saves("../bad", "g1"); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw, "vfs: invalid user id rejected");
+  }
+
+  // --- MODULE 08: audio null backend (honest no-device) ---
+  {
+    auto backend = pnr::services::make_audio_backend();
+    CHECK(backend->enumerate().empty(), "audio: no devices in sandbox");
+    pnr::services::IAudioStream* stream = nullptr;
+    CHECK(!backend->open_stream("default", &stream),
+          "audio: open fails honestly without a device");
+  }
+
+  // --- MODULE 08: input mapping + virtual device ---
+  {
+    pnr::services::InputMapper mapper;
+    CHECK(mapper.load("jump = KEY_SPACE\nfire = BTN_LEFT\n"),
+          "input: profile parses");
+    CHECK(mapper.binding_count() == 2, "input: two bindings");
+    CHECK(mapper.control_for("jump").value() == "KEY_SPACE",
+          "input: action resolves to control");
+    CHECK(!mapper.control_for("crouch"), "input: unmapped action -> nullopt");
+    CHECK(!mapper.load("broken line\n"), "input: malformed line rejected");
+    auto ev = mapper.translate({"KEY_SPACE", 1});
+    CHECK(ev && ev->control == "jump" && ev->value == 1,
+          "input: raw event translates to action");
+    pnr::services::VirtualInputDevice virt;
+    CHECK(!virt.poll(), "input: empty queue polls empty");
+    virt.push({"KEY_A", 1});
+    auto e2 = virt.poll();
+    CHECK(e2 && e2->control == "KEY_A", "input: virtual device queues events");
   }
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
