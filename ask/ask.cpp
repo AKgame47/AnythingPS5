@@ -185,14 +185,16 @@ Status run_needle(const std::string& needle_path, const std::string& prompt, con
   if (pid == 0) {
     ::dup2(pipefd[1], 1); ::close(pipefd[0]); ::close(pipefd[1]);
     int dn = ::open("/dev/null", O_RDWR); if (dn >= 0) { ::dup2(dn, 0); ::dup2(dn, 2); }
-    struct rlimit cpu{static_cast<rlim_t>(opt.timeout_seconds), static_cast<rlim_t>(opt.timeout_seconds)}; ::setrlimit(RLIMIT_CPU, &cpu);
-    struct rlimit as{1ull << 30, 1ull << 30}; ::setrlimit(RLIMIT_AS, &as);
     ::setsid();
     if (opt.sandbox) {
       pnr::sandbox::Policy pol; pol.game_dir = dir;
       std::string se;
       if (!pnr::sandbox::enter(pol, &se)) _exit(126);
     }
+    // limits are applied last, just before exec: an address-space limit set earlier starves the sandbox setup
+    // itself of memory (seen as an intermittent failure under AddressSanitizer, whose process is huge)
+    struct rlimit cpu{static_cast<rlim_t>(opt.timeout_seconds), static_cast<rlim_t>(opt.timeout_seconds)}; ::setrlimit(RLIMIT_CPU, &cpu);
+    struct rlimit as{1ull << 30, 1ull << 30}; ::setrlimit(RLIMIT_AS, &as);
     char* envp[] = {const_cast<char*>("PATH=/usr/bin:/bin"), const_cast<char*>("LANG=C"), nullptr};
     char* av[] = {const_cast<char*>(exe.c_str()), const_cast<char*>("--tools"), const_cast<char*>(tools_path.c_str()), const_cast<char*>("--prompt"), const_cast<char*>(prompt.c_str()), nullptr};
     ::execve(exe.c_str(), av, envp);
