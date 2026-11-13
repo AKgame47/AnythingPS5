@@ -185,3 +185,16 @@ MISMATCH. Non-packages fail at archive validation.
   New imports are always Untested.
 - Entitlement records are a separate future table; this store never
   asserts ownership, distribution or execution rights.
+
+## IF-APE-01 Adaptive Performance Engine (v1) — Implemented, Tested
+
+- `HardwareFacts{cpu_logical_cores, ram_total_bytes?, ram_available_bytes?, on_battery?}`: optional fields are nullopt when the host cannot report them; never fabricated.
+- `classify(HardwareFacts) -> PerfClass`: CPU/RAM heuristic (D: >=12 cores and >=32 GiB; C: >=8 and >=16 GiB; B: >=4 and >=8 GiB; else A; no cores -> Unknown). GPU is excluded until Module 04 probing exists; compatibility is never decided from class alone.
+- `FrameWindow::recompute()`: avg, p95, variance over the recorded frame times.
+- `AdaptiveController::decide(Telemetry, QualitySettings&) -> Adjustment`: at most one bounded change per decision (background_tasks halved on CPU saturation; resolution scale -10% on memory pressure or missed frame target; fps_cap floor 30 as last resort); `evaluate()` after the stabilization window reverts changes that did not improve frame time. Deterministic rules only — ML tuning is deferred per the master prompt.
+
+## IF-LOM-01 Laptop Optimization Manager (v1) — Implemented, Tested
+
+- `PowerMode`: battery_saver / balanced / max_performance with fixed `Caps{fps_cap, min_resolution_scale_pct, max_background_tasks}` (30/50%/1, 60/75%/2, 120/100%/4).
+- `default_mode(HardwareFacts)`: on battery -> saver; plugged in OR unknown -> balanced (unknown power state is never assumed to be AC).
+- `apply_caps(Caps, QualitySettings&)`: applies caps as bounds to APE quality settings.
