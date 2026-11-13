@@ -1,0 +1,130 @@
+# PNR Interface Contracts
+
+Version 0.1 · Phase 0 deliverable · 2026-11-13
+Contracts are versioned. Breaking changes bump the major version and keep
+the old symbol available for one release where feasible.
+
+## IF-CORE-01 RuntimeManager (v1) — Implemented, Tested
+
+Owns the runtime. Construction is cheap; `initialize()` performs
+VALIDATING → INITIALIZING → READY.
+
+- `Status initialize()` — fails if any registered subsystem fails to
+  initialize. On failure the runtime stays usable for error reporting.
+- `Status mark_running() / suspend() / resume() / shutdown()` — lifecycle
+  transitions; illegal transitions return an explicit error.
+- Accessors: `events()`, `subsystems()`, `config()`, `capabilities()`,
+  `errors()`, `lifecycle()`.
+
+Threading: individual sub-objects are internally synchronized;
+`RuntimeManager` methods are intended for the launcher main thread.
+
+## IF-CORE-02 LifecycleController (v1) — Implemented, Tested
+
+Legal transitions (enforced, anything else fails):
+
+```
+CREATED      -> VALIDATING | STOPPING
+VALIDATING   -> INITIALIZING | STOPPING
+INITIALIZING -> READY | STOPPING
+READY        -> RUNNING | STOPPING
+RUNNING      -> SUSPENDED | STOPPING
+SUSPENDED    -> RUNNING | STOPPING
+STOPPING     -> TERMINATED
+TERMINATED   -> (final)
+```
+
+## IF-CORE-03 RuntimeEventBus (v1) — Implemented, Tested
+
+- `subscribe(type, handler) -> id`; `unsubscribe(id)`; `publish(event)`.
+- `"*"` subscribes to everything. Synchronous dispatch, publish order,
+  handlers invoked outside the internal lock.
+- Known types: `lifecycle.changed`, `session.started`, `session.exited`,
+  `session.crashed`, `session.stop_requested`.
+
+## IF-CORE-04 ConfigurationManager (v1) — Implemented, Tested
+
+- `load_from_file(path)` — `key = value` lines, `#` comments, blank lines
+  allowed. Missing file, malformed line, or empty key are explicit errors.
+- `get / get_or / get_int / set`.
+
+## IF-CORE-05 CapabilityRegistry (v1) — Implemented, Tested
+
+- `declare(name, supported, note)`; `query(name) -> optional<Capability>`.
+- Absence of a capability record means "not detected", and consumers must
+  treat it as unsupported. Predeclared negatives: `graphics.vulkan` (in the
+  dev sandbox), `loader.protected_ps5_format` (until authorized).
+
+## IF-CORE-06 GameSession (v1) — Implemented, Tested
+
+- Constructed with an injected `Launcher` (function: exe, args, out-signal
+  -> exit code). The core never links the loader.
+- `start()` requires READY or RUNNING; publishes session events; converts
+  signals and non-zero exits into failures. Never reports success for a
+  crashed game.
+
+## IF-LOAD-01 ElfParser (v1) — Implemented, Tested
+
+- `parse_elf(path) / parse_elf_bytes(bytes) -> ParseResult`.
+- Validates: ELF magic, ELF64 class, little-endian, header sizes,
+  program-header table bounds, per-segment file-range bounds.
+- Rejects with specific errors; never guesses at unrecognized formats.
+- `is_x86_64`, `is_executable_type` helpers. Only ET_EXEC/ET_DYN pass
+  loader validation today.
+
+## IF-LOAD-02 NativeLoader (v1) — Implemented (POSIX), Tested
+
+- `validate(path) -> ParseResult` (STEP 1 of the launch workflow).
+- `launch(path, args) -> LaunchResult`: validated → fork + execv in a
+  child process → waitpid → `{started, finished, exit_code | signal,
+  wall_seconds}`. Child inherits stdio (capture Planned).
+- In-process segment mapping (`mmap` + relocations + TLS) for host-ABI
+  binaries: Planned. Foreign-ABI loading: Phase 7 research, Blocked.
+
+## IF-LOAD-03 FormatAdapter (v0) — Planned
+
+Replaceable binary-format front end. Future adapters register a recognizer
++ parser pair. Protected/proprietary formats register as "recognized but
+unsupported", producing an informative error — never a fake load.
+
+## IF-COMPAT-01 MemoryService (v1) — Implemented, Tested
+
+- `allocate(size, alignment=16)` — power-of-two alignment required;
+  returns nullptr on failure (never a dummy pointer).
+- `deallocate(ptr)`; `bytes_outstanding()`; `live_allocations()`.
+
+## IF-COMPAT-02 TimingService (v1) — Implemented, Tested
+
+- `now_seconds()` monotonic; `sleep_ms(ms)`.
+
+## IF-COMPAT-03 FileSystemService (v1) — Implemented, Tested
+
+- Jail root set at construction. Virtual paths start with `/` and resolve
+  inside the root; `..` escaping the root, backslashes, and NULs are
+  rejected.
+- `resolve / write_file / read_file / exists / create_dirs`.
+
+## IF-COMPAT-04 ThreadService (v1) — Implemented, Tested
+
+- `spawn(fn) -> id`; `join_all()`; `live_count()`.
+
+## IF-OS-01 .. IF-OS-11 Host abstraction (v0) — Planned
+
+`IProcess, IThread, IMemory, IFilesystem, IClock, IWindow, IDisplay,
+IInput, IAudio, IPower, ITelemetry` with Windows and Linux backends.
+Currently the loader and compat modules carry POSIX paths directly; the
+abstraction lands before the Windows build (P1 follow-up) so both OSes
+share one core.
+
+## IF-GRAPH-01 .. — Planned (Phase 2)
+
+Game Rendering Interface → Graphics Compatibility Adapter → Intermediate
+Rendering Commands → Shader/Resource Translator → Vulkan Backend.
+Contract drafting starts with the Vulkan prototype; nothing is specified
+here that has not been validated against a real device.
+
+## Cross-language boundary (v0) — Reserved
+
+A narrow C ABI (`pnr_` prefix, opaque handles, explicit error codes) is
+reserved for future Rust crates (telemetry, package management). No Rust
+code ships yet; no Rust toolchain exists in the current dev sandbox.
