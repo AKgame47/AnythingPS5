@@ -22,6 +22,7 @@ struct GameEntry {
   bool runnable = false;       // installed, with an entry point
   std::string not_runnable_reason;  // empty when runnable
   int64_t launch_count = 0;
+  bool compat_human_set = false;  // a person set it; automatic bookkeeping leaves it alone
 };
 
 struct LaunchOutcome {
@@ -35,6 +36,30 @@ struct LaunchOutcome {
   bool compat_advanced = false;  // Untested -> Launches Only
   std::string error;        // empty when the game ran and exited
 };
+
+// One inspected file from scan(). Read-only classification: nothing is
+// imported, extracted or executed, and nothing here says a game is playable.
+struct ScanItem {
+  std::string file;      // file name inside the scanned directory
+  std::string kind;      // "elf" or "pnrgame"
+  bool ok = false;       // elf: valid x86-64 ELF; pnrgame: import would accept it
+  std::string error;     // reason when !ok
+  std::string game_id, title, version;  // pnrgame only
+  bool in_library = false;              // pnrgame only: id already in the library
+  bool has_imports = false;             // elf only: counts below are valid
+  int host = 0, prx_implemented = 0, prx_declared = 0, unknown = 0, pnr_extension = 0;
+};
+
+struct ScanReport {
+  std::vector<ScanItem> items;
+  int skipped = 0;          // regular files that are neither ELF nor .pnrgame
+  bool truncated = false;   // more than kScanMaxEntries entries; the rest were not inspected
+};
+constexpr size_t kScanMaxEntries = 1000;
+
+// The six compatibility states the library knows.
+const std::vector<std::string>& compat_states();
+bool valid_compat_state(const std::string& s);
 
 class LauncherCore {
 public:
@@ -53,6 +78,18 @@ public:
                        const std::vector<std::string>& args = {},
                        const std::vector<std::string>& env = {});
 
+  // Human-set compatibility. Rejects unknown ids, unknown state names and
+  // overlong or control-character notes. The state is marked human-set so
+  // launches and re-imports never overwrite it. Only a person reaches
+  // "Verified Playable" / "Playable With Issues": no automatic path does.
+  Status set_compat(const std::string& game_id, const std::string& state,
+                    const std::string& note);
+  // Newest first. Returns false for an unknown id (or no open library).
+  bool history(const std::string& game_id, int limit,
+               std::vector<library::LaunchRow>* out);
+  // Read-only directory scan (non-recursive, symlinks not followed).
+  Status scan(const std::string& dir, ScanReport* out);
+
 private:
   library::GameDb db_;
   bool open_ = false;
@@ -65,6 +102,10 @@ std::string render_list_text(const std::vector<GameEntry>& games);
 std::string render_list_json(const std::vector<GameEntry>& games);
 std::string render_entry_text(const GameEntry& g);
 std::string render_entry_json(const GameEntry& g);
+std::string render_history_text(const GameEntry& g, const std::vector<library::LaunchRow>& rows);
+std::string render_history_json(const GameEntry& g, const std::vector<library::LaunchRow>& rows);
+std::string render_scan_text(const ScanReport& r);
+std::string render_scan_json(const ScanReport& r);
 std::string render_outcome_json(const std::string& game_id, const LaunchOutcome& o);
 
 }  // namespace pnr::launcher
