@@ -17,6 +17,8 @@
 #include "ape/ape.hpp"
 #include "laptop/laptop.hpp"
 #include "platform/os.hpp"
+#include "services/audio.hpp"
+#include "services/input.hpp"
 
 namespace {
 
@@ -47,6 +49,28 @@ int cmd_assess() {
               caps.fps_cap, caps.min_resolution_scale_pct, caps.max_background_tasks);
   std::puts("note: compatibility is never decided from class alone - real "
             "frame telemetry drives the adaptive controller");
+  return 0;
+}
+
+int cmd_input() {
+  auto backend = pnr::services::make_input_backend();
+  std::printf("input.backend=%s\n", backend->name().c_str());
+  const auto devices = backend->enumerate();
+  std::printf("input.devices=%zu\n", devices.size());
+  for (const auto& d : devices)
+    std::printf("  %s (%s)\n", d.path.empty() ? d.name.c_str() : d.path.c_str(),
+                d.name.c_str());
+  if (devices.empty()) std::puts("  (no input devices visible on this host)");
+  return 0;
+}
+
+int cmd_audio() {
+  auto backend = pnr::services::make_audio_backend();
+  std::printf("audio.backend=%s\n", backend->name().c_str());
+  const auto devices = backend->enumerate();
+  std::printf("audio.devices=%zu\n", devices.size());
+  if (devices.empty())
+    std::puts("  (no audio devices available; host audio backends Planned)");
   return 0;
 }
 
@@ -260,6 +284,8 @@ int main(int argc, char** argv) {
   pnr::loader::NativeLoader loader;
   if (argc >= 2 && std::strcmp(argv[1], "hwinfo") == 0) return cmd_hwinfo();
   if (argc >= 2 && std::strcmp(argv[1], "assess") == 0) return cmd_assess();
+  if (argc >= 2 && std::strcmp(argv[1], "input") == 0) return cmd_input();
+  if (argc >= 2 && std::strcmp(argv[1], "audio") == 0) return cmd_audio();
   if (argc >= 3 && std::strcmp(argv[1], "validate") == 0)
     return cmd_validate(loader, argv[2]);
   if (argc >= 3 && std::strcmp(argv[1], "import") == 0)
