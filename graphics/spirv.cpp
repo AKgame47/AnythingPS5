@@ -71,10 +71,11 @@ std::vector<uint32_t> SpirvModule::compute_write_u32(uint32_t value) {
 }
 
 std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes,
-                                                uint32_t buffer_words, uint32_t guest_base_low, uint32_t local_size_x, uint32_t uniform_words, uint32_t guest_base_high) {
+                                                uint32_t buffer_words, uint32_t guest_base_low, uint32_t local_size_x, uint32_t uniform_words, uint32_t guest_base_high, uint32_t loop_count_uniform) {
   if(uniform_words>16) return {};
   if (!local_size_x || local_size_x > 64) return {};
   if (!buffer_words || buffer_words > 65536) return {};
+  if(loop_count_uniform>16 || (loop_count_uniform<16 && loop_count_uniform>=uniform_words))return {};
   const uint64_t guest_base=(uint64_t(guest_base_high)<<32u)|guest_base_low;
   if(guest_base>UINT64_MAX-(uint64_t(buffer_words)*4-1))return {};
   // SPIR-V 1.0 Uniform BufferBlock containing a fixed-size uint array.
@@ -148,6 +149,12 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
                          uint64_t(buffer_words-1)*4;
   inst(m,spv::OpConstant,{6,29,uint32_t(last64>>32u)});
   uint32_t next = 30;
+  uint32_t loop_index=0,loop_max=0;
+  if(loop_count_uniform<16) {
+    loop_index=next++;loop_max=next++;
+    inst(m,spv::OpConstant,{6,loop_index,loop_count_uniform});
+    inst(m,spv::OpConstant,{6,loop_max,64});
+  }
   std::vector<uint32_t> no_contraction;
   std::vector<uint32_t> ids(nodes.size(), 0), indices(nodes.size(), 0);
   for (size_t i = 0; i < nodes.size(); ++i) {
@@ -174,6 +181,16 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   inst(m, spv::OpFunction, {4, 1, 0, 5});
   inst(m, spv::OpLabel, {11});
   uint32_t current_label = 11;
+  if(loop_count_uniform<16) {
+    const uint32_t ptr=next++,trip=next++,ge=next++,le=next++,valid=next++;
+    const uint32_t no=next++,yes=next++;
+    inst(m,spv::OpAccessChain,{24,ptr,25,loop_index});inst(m,61,{6,trip,ptr});
+    inst(m,174,{15,ge,trip,27});inst(m,178,{15,le,trip,loop_max});
+    inst(m,167,{15,valid,ge,le});
+    inst(m,247,{yes,0});inst(m,250,{valid,yes,no});
+    inst(m,spv::OpLabel,{no});inst(m,spv::OpReturn,{});
+    inst(m,spv::OpLabel,{yes});current_label=yes;
+  }
   for (size_t i = 0; i < nodes.size(); ++i) {
     const auto& n = nodes[i];
     if (n.op == U32Op::Constant) continue;
@@ -200,14 +217,17 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
       current_label=merge;
       continue;
     }
-    if(n.op==U32Op::LoopAdd) {
+    if(n.op==U32Op::LoopAdd || n.op==U32Op::LoopAddUniform) {
+      const bool runtime=n.op==U32Op::LoopAddUniform;
+      if(runtime && (loop_count_uniform==16 || n.c>=i || !ids[n.c] ||
+         nodes[n.c].op!=U32Op::UniformInput || nodes[n.c].a!=loop_count_uniform))return {};
       if(n.a>=i || n.b>=i || !ids[n.a] || !ids[n.b])return {};
       const uint32_t header=next++,body=next++,cont=next++,merge=next++;
       const uint32_t acc=next++,count=next++,updated=next++,incremented=next++,cond=next++;
       inst(m,249,{header});inst(m,spv::OpLabel,{header});
       inst(m,245,{6,acc,ids[n.a],current_label,updated,cont});
       inst(m,245,{6,count,10,current_label,incremented,cont});
-      inst(m,176,{15,cond,count,indices[i]});
+      inst(m,176,{15,cond,count,runtime?ids[n.c]:indices[i]});
       inst(m,246,{merge,cont,0}); // OpLoopMerge, no control hints
       inst(m,250,{cond,body,merge});
       inst(m,spv::OpLabel,{body});inst(m,128,{6,updated,acc,ids[n.b]});
