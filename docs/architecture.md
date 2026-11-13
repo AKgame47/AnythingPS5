@@ -161,3 +161,7 @@ criterion in `docs/feasibility-report.md` §8.
 ## 3D slice
 
 `render_mesh_frames_rgba` draws an indexed mesh (float3 position, float3 colour, uint32 indices) with an optional D32_SFLOAT depth buffer (compare LESS) and a per-frame push-constant MVP (16 words, column-major). `graphics/mat4.hpp` holds the matrix helpers and the unit cube; `graphics/demo/cube.vert.spvasm` multiplies position by the pushed matrix. Tests compare every pixel of an 8-frame rotation with a CPU ray-vs-box caster and check depth ON versus OFF. Limits: offscreen only, no culling, lighting, textures or vertex-shader translation from RDNA; the slice proves the draw path, not a game renderer.
+
+## Game-driven rendering
+
+`libpnr_psabi.so` exports a small PNR extension, `pnrGfxInit`, `pnrGfxDrawCube`, `pnrGfxPresentToFile`, `pnrGfxFramesRendered`, `pnrGfxLastError`. They are PNR names, not Sony APIs, and the import resolver classifies any `pnr*` import as `pnr-extension`. A game calls them from its own frame loop; the shim runs the 3D draw path in the game process and "presents" by writing a PPM through the game's jail. `pnr run` step 5 reports the offscreen renderer (or BLOCKED without a Vulkan device) and step 8 counts the frame files. No swapchain, display, audio or input here, and the draw path is the hand-authored cube pipeline; translated RDNA vertex output is not connected yet (next slice).
