@@ -301,6 +301,20 @@ Status GameDb::record_launch(const std::string& game_id, int exit_code,
   return s.run(db_->h, "record_launch");
 }
 
+Status GameDb::remove_game(const std::string& game_id) {
+  Status st = exec("BEGIN IMMEDIATE", "remove_game begin");
+  if (!st) return st;
+  for (const char* sql : {"DELETE FROM launches WHERE game_id=?", "DELETE FROM compatibility WHERE game_id=?",
+                          "DELETE FROM installations WHERE game_id=?", "DELETE FROM games WHERE game_id=?"}) {
+    Stmt s(db_->h, sql);
+    if (!s.ok()) { exec("ROLLBACK", "remove_game rollback"); return sql_status(s.rc(), db_->h, "remove_game prepare"); }
+    s.bind_text(1, game_id);
+    st = s.run(db_->h, "remove_game");
+    if (!st) { exec("ROLLBACK", "remove_game rollback"); return st; }
+  }
+  return exec("COMMIT", "remove_game commit");
+}
+
 int64_t GameDb::launch_count(const std::string& game_id) {
   Stmt s(db_->h, "SELECT COUNT(*) FROM launches WHERE game_id=?");
   if (!s.ok()) return -1;
