@@ -5,3 +5,9 @@ build/
 pnr_data/
 .vscode/
 .idea/
+
+# PSN token and credentials: never commit
+**/psn/npsso.token
+npsso*
+*.npsso
+*.token
