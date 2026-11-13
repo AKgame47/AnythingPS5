@@ -4,6 +4,8 @@
 // and at its jail (PNR_JAIL_ROOT); calls then do real work natively in the
 // game process: kernel-style services over host equivalents, file calls
 // through the SAME jailed FileSystemService as the host-side PsFileTable.
+// (Application-level path routing, not a security boundary - see
+// compat/services.hpp.)
 // This is how the registry's prx-implemented promises get kept.
 // Taxonomy per AnyPS5 (GPL-2.0); implementation original. Status: Implemented, Tested.
 #include <cstdint>
