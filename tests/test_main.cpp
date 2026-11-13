@@ -1654,6 +1654,102 @@ int main() {
           d.instructions[1].pc==8,"audit: shared scalar literal consumed exactly once");
     CHECK(!pnr::shader::rdna_decode({0x8000ffff}).ok,"audit: shared literal truncation rejected");
   }
+
+  // --- Explicit uniform SGPR inputs via runtime Vulkan push constants ---
+  {
+    using namespace pnr::shader; using namespace pnr::graphics;
+    constexpr uint64_t base=0x1200001000ull;
+    // s1=s0 copy; s0 overwritten; v2=s1. Copies retain runtime uniform SSA.
+    const std::vector<uint32_t> scalar={0x7e0002ff,0x1000,0x7e0202ff,0x12,
+      0xbe810300,0xbe800387,0x7e040201,0xdc700000,0x007f0200,0xbf810000};
+    auto t=translate_compute_words(scalar,base,1,1,1);
+    CHECK(t.ok && t.required_uniform_words==1 && !t.stored_value_known,
+          "uniform: initial SGPR runtime input and scalar copy compile");
+    auto reject=[&](const std::vector<uint32_t>& code,uint32_t count,const char* label) {
+      auto r=translate_compute_words(code,base,1,1,count);
+      CHECK(!r.ok && r.spirv.empty(),label);
+    };
+    reject(scalar,0,"uniform: undeclared initial SGPR remains undefined");
+    reject(scalar,17,"uniform: oversized SGPR input count rejected");
+    auto w=scalar;w[4]=0xbed40300;
+    reject(w,1,"uniform: scalar move special destination rejected");
+    w=scalar;w[4]=0xbe810310;
+    reject(w,16,"uniform: SGPR beyond declared range rejected");
+    CHECK(SpirvModule::compute_u32({{U32Op::UniformInput,1}},1,0,1,1).empty(),
+          "uniform: emitter rejects out-of-range input index");
+    CHECK(SpirvModule::compute_u32({},1,0,1,17).empty(),
+          "uniform: emitter rejects oversized push block");
+    VulkanBackend vk;std::vector<uint32_t> io={99};
+    CHECK(!run_translated_compute(vk,t,&io) && io[0]==99,
+          "uniform: missing runtime data rejected before dispatch");
+    CHECK(!run_translated_compute(vk,t,&io,{1,2}) && io[0]==99,
+          "uniform: extra runtime data rejected before dispatch");
+    auto invalid=t;invalid.required_uniform_words=17;
+    CHECK(!run_translated_compute(vk,invalid,&io,std::vector<uint32_t>(17)),
+          "uniform: malformed required count rejected");
+    auto validate=[&](const ComputeTranslation& r) {
+      const char* val=std::getenv("PNR_SPIRV_VAL");
+      if(val && std::filesystem::exists(val)) {
+        const std::string path="/tmp/pnr_uniform_"+std::to_string(::getpid())+".spv";
+        {std::ofstream o(path,std::ios::binary);o.write(reinterpret_cast<const char*>(r.spirv.data()),r.spirv.size()*4);}
+        CHECK(std::system((std::string(val)+" --target-env vulkan1.0 "+path).c_str())==0,
+              "uniform: push constant module validates for Vulkan 1.0");
+        std::filesystem::remove(path);
+      }else std::puts("    note: uniform validator skipped (not configured)");
+    };
+    validate(t);
+    auto st=vk.open();
+    if(!st)std::printf("    note: uniform Vulkan skipped: %s\n",st.error.message.c_str());
+    else {
+      st=vk.create_instance("pnr-uniform-tests");CHECK(st,"uniform: Vulkan instance created");
+      if(st && !vk.devices().empty()) {
+        st=vk.create_device(0);CHECK(st,"uniform: compute device created");
+        if(st) {
+          for(uint32_t value:{0u,42u,0xffffffffu}) {
+            io={99};auto run=run_translated_compute(vk,t,&io,{value});
+            CHECK(run && io[0]==value,"uniform: changed push input, same module, copied SGPR readback exact");
+          }
+          // Highest allowed SGPR input s15, scalar to vector ALU source.
+          w={0x7e0002ff,0x1000,0x7e0202ff,0x12,0x7e040281,
+             (0x25u<<25u)|(2u<<17u)|(2u<<9u)|15u,
+             0xdc700000,0x007f0200,0xbf810000};
+          auto last=translate_compute_words(w,base,1,1,16);validate(last);
+          std::vector<uint32_t> inputs(16,0);inputs[15]=0xffffffff;io={99};
+          auto run=run_translated_compute(vk,last,&io,inputs);
+          CHECK(last.ok && run && io[0]==0,"uniform: s15 push input and uint32 wraparound execute");
+          // Uniform equality drives the existing strict branch subset.
+          w={0x7e0002ff,0x1000,0x7e0202ff,0x12,0x7e0402ff,111,
+             0xbf060100,0xbf840002,0x7e0402ff,222,
+             0xdc700000,0x007f0200,0xbf810000};
+          auto branch=translate_compute_words(w,base,1,1,2);validate(branch);
+          for(uint32_t b:{7u,8u}) {
+            io={0};run=run_translated_compute(vk,branch,&io,{7,b});
+            CHECK(branch.ok && run && io[0]==(b==7?222u:111u),
+                  "uniform: runtime SGPR equality selects both branch outcomes");
+          }
+          // Eight invocations, separate inputs/outputs, uniform increment.
+          auto add=[](uint32_t dst,uint32_t a,uint32_t b){return (0x25u<<25u)|(dst<<17u)|(b<<9u)|a;};
+          w={add(4,256,0),add(4,260,4),0x7e0402ff,0x1000,add(4,258,4),
+             0x7e0a02ff,0x12,0xdc300000,0x067f0004,
+             0x7e0402ff,32,add(4,258,4),add(6,0,6),
+             0xdc700000,0x007f0604,0xbf810000};
+          auto lanes=translate_compute_words(w,base,17,8,1);validate(lanes);
+          for(uint32_t increment:{0u,17u,0xffffffffu}) {
+            io.assign(17,0xa5a5a5a5);for(uint32_t j=0;j<8;++j)io[j]=j*3;
+            auto expected=io;for(uint32_t j=0;j<8;++j)expected[j+8]=io[j]+increment;
+            run=run_translated_compute(vk,lanes,&io,{increment});
+            CHECK(lanes.ok && run && io==expected,
+                  "uniform: push input broadcast to all invocations, exact disjoint outputs");
+          }
+          std::vector<uint8_t> bytes;for(auto word:w)for(unsigned j=0;j<4;++j)bytes.push_back(uint8_t(word>>(j*8)));
+          auto b=translate_compute_bytes(bytes,base,17,8,1);
+          CHECK(b.ok && b.spirv==lanes.spirv && b.required_uniform_words==1,
+                "uniform: byte entry preserves uniform input ABI");
+        }
+      }else CHECK(false,"uniform: physical device available");
+    }
+  }
+
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
