@@ -1450,6 +1450,81 @@ int main() {
     }
   }
 
+
+  // --- One bounded workgroup: v0=LocalInvocationIndex in explicit test ABI ---
+  {
+    using namespace pnr::shader; using namespace pnr::graphics;
+    constexpr uint64_t base=0x1200001000ull;
+    auto add=[](uint32_t dst,uint32_t src0,uint32_t src1) {
+      return (0x25u<<25u)|(dst<<17u)|(src1<<9u)|src0;
+    };
+    auto kernel=[&](uint32_t lanes) {
+      return std::vector<uint32_t>{
+        add(4,256,0),add(4,260,4), // v4=lane*4
+        0x7e0402ff,0x1000,add(4,258,4), // v4=base.low+lane*4
+        0x7e0a02ff,0x12, // v5=high
+        0xdc300000,0x067f0004, // v6=inputs[lane]
+        0x7e0402ff,lanes*4,add(4,258,4), // v4+=output offset
+        add(6,129,6), // v6+=1
+        0xdc700000,0x007f0604,0xbf810000};
+    };
+    auto reject=[&](const std::vector<uint32_t>& w,uint32_t lanes,const char* name) {
+      auto t=translate_compute_words(w,base,128,lanes);
+      CHECK(!t.ok && t.spirv.empty(),name);
+    };
+    reject(kernel(8),0,"lanes: zero workgroup size rejected");
+    reject(kernel(8),65,"lanes: oversized workgroup rejected");
+    auto w=kernel(8);w[10]=0; // output aliases inputs
+    reject(w,8,"lanes: input/output overlap rejected without barriers");
+    w=kernel(8);w[11]=0x7e0802ff;w.insert(w.begin()+12,0x1040);
+    reject(w,8,"lanes: constant colliding store addresses rejected");
+    w=kernel(8);w[0]=add(4,256,0);w[1]=0x7e080300; // only stride1
+    reject(w,8,"lanes: misaligned invocation stride rejected");
+    w=kernel(8);w[11]=0x7e080306; // v4=runtime input v6
+    reject(w,8,"lanes: unproven data-dependent parallel address rejected");
+    w=kernel(8);w[10]=0xfffffff0;
+    reject(w,8,"lanes: affine overflow rejected");
+    auto too_small=translate_compute_words(kernel(8),base,15,8);
+    CHECK(!too_small.ok && too_small.spirv.empty(),"lanes: final invocation beyond binding rejected");
+    CHECK(SpirvModule::compute_u32({{U32Op::InvocationIndex}},1,0,65).empty(),
+          "lanes: emitter rejects oversized workgroup");
+    VulkanBackend vk;auto st=vk.open();
+    if(!st)std::printf("    note: lanes Vulkan skipped: %s\n",st.error.message.c_str());
+    else {
+      st=vk.create_instance("pnr-lane-tests");CHECK(st,"lanes: Vulkan instance created");
+      if(st && !vk.devices().empty()) {
+        st=vk.create_device(0);CHECK(st,"lanes: compute device created");
+        if(st)for(uint32_t lanes:{2u,8u,64u}) {
+          const auto t=translate_compute_words(kernel(lanes),base,lanes*2+1,lanes);
+          CHECK(t.ok && t.local_size_x==lanes && t.guarded_memory,
+                "lanes: explicit local invocation ABI compiles");
+          const char* val=std::getenv("PNR_SPIRV_VAL");
+          if(val && std::filesystem::exists(val)) {
+            const std::string path="/tmp/pnr_lanes_"+std::to_string(::getpid())+".spv";
+            {std::ofstream o(path,std::ios::binary);o.write(reinterpret_cast<const char*>(t.spirv.data()),t.spirv.size()*4);}
+            CHECK(std::system((std::string(val)+" --target-env vulkan1.0 "+path).c_str())==0,
+                  "lanes: input BuiltIn and local-size module validate for Vulkan 1.0");
+            std::filesystem::remove(path);
+          }else std::puts("    note: lane validator skipped (not configured)");
+          for(uint32_t seed:{0u,0xffffffffu,0x12345678u}) {
+            std::vector<uint32_t> io(lanes*2+1,0xa5a5a5a5);
+            for(uint32_t j=0;j<lanes;++j)io[j]=seed+j;
+            auto expected=io;
+            for(uint32_t j=0;j<lanes;++j)expected[lanes+j]=uint32_t(io[j]+1);
+            const auto run=run_translated_compute(vk,t,&io);
+            CHECK(run && io==expected,
+                  "lanes: every invocation processes its element, inputs and sentinel unchanged");
+          }
+          std::vector<uint8_t> bytes;
+          for(auto word:kernel(lanes))for(unsigned j=0;j<4;++j)bytes.push_back(uint8_t(word>>(j*8)));
+          const auto b=translate_compute_bytes(bytes,base,lanes*2+1,lanes);
+          CHECK(b.ok && b.spirv==t.spirv && b.local_size_x==lanes,
+                "lanes: byte input preserves workgroup configuration");
+        }
+      } else CHECK(false,"lanes: physical device available");
+    }
+  }
+
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
