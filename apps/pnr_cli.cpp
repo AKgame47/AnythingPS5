@@ -11,6 +11,8 @@
 
 #include "compat/services.hpp"
 #include "core/runtime.hpp"
+#include "loader/import_resolver.hpp"
+#include "prx/prx.hpp"
 #include "library/game_db.hpp"
 #include "loader/native_loader.hpp"
 #include "package/importer.hpp"
@@ -173,6 +175,28 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args) {
   step("1-validate", "SUCCESS",
        exe + " is a valid x86-64 ELF (" +
            std::to_string(v.info.segments.size()) + " segments)");
+
+  // STEP 1b - IMPORT RESOLUTION (against the PRX taxonomy)
+  {
+    const pnr::prx::PrxRegistry prx;
+    pnr::loader::ImportResolution ir;
+    const auto st = pnr::loader::resolve_imports(exe, prx, &ir);
+    if (!st) {
+      step("1-imports", "FAILED", st.error.message);
+      return 2;
+    }
+    step("1-imports", "SUCCESS",
+         std::to_string(ir.imports.size()) + " imports: " +
+             std::to_string(ir.host) + " host-resolved, " +
+             std::to_string(ir.prx_implemented) + " prx-implemented, " +
+             std::to_string(ir.prx_declared) + " prx-declared-only, " +
+             std::to_string(ir.unknown) + " unknown");
+    for (const auto& e : ir.imports) {
+      if (e.klass != pnr::loader::ImportClass::Host)
+        std::printf("  [import] %-32s %s\n", e.name.c_str(),
+                    pnr::loader::import_class_name(e.klass));
+    }
+  }
 
   // STEP 2 - SYSTEM ANALYSIS
   const unsigned cores = std::thread::hardware_concurrency();
