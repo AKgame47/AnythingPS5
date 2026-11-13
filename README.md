@@ -33,14 +33,14 @@ licensed GPL-2.0.
 | Library | SQLite store of games, installs, launches and compatibility state |
 | Launcher core | `pnr-launcher`: list, show, launch, history, set compatibility, scan, import, remove, verify, doctor, clean, save export and restore |
 | Graphics | Offscreen Vulkan rendering on software Vulkan (lavapipe): triangle, spinning triangle, cube, lit, textured and lit-textured meshes, game-supplied meshes. Hand-authored SPIR-V, plus a restricted RDNA-to-SPIR-V translation path (experimental) |
-| PSN purchases (offline) | Unofficial NPSSO connector, first slice: local token store, saved-response import, owned-on-PSN rows kept separate from installed games, manual linking to compatibility. **No network code and no download feature** |
+| PSN purchases | Unofficial NPSSO connector: local token store, saved-response import, owned-on-PSN rows kept separate from installed games, manual linking to compatibility, and a live `psn sync` (libcurl loaded at runtime, TLS verified, Sony hosts only). **Live Sony behaviour is Untested; no download feature** |
 | Performance | Rule-based adaptive performance engine and laptop power-mode caps |
 
-Not done: live PSN sync (Untested), game downloads (no authorized mechanism found), real PS5 binaries, Sony APIs, a window or swapchain, hardware GPU
+Not done: verification of live PSN sync against real Sony (Untested), game downloads (no authorized mechanism found), real PS5 binaries, Sony APIs, a window or swapchain, hardware GPU
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **1819/1819 unit tests, 16/16 CTest suites** on a fresh Linux
+Test state: **1902/1902 unit tests, 16/16 CTest suites** on a fresh Linux
 Release `-Werror` build (details in the capability section below).
 
 ## Rendered output
@@ -200,11 +200,11 @@ compiles but cannot run ELF games.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**1819/1819 unit tests pass, 16/16 CTest suites pass** (unit, end-to-end native
+**1902/1902 unit tests pass, 16/16 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
-and on a build against the official Vulkan headers. ASan+UBSan: 1819/1819
+and on a build against the official Vulkan headers. ASan+UBSan: 1902/1902
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -950,11 +950,11 @@ $ pnr-launcher restore-saves ps-demo ./bad.tar
 restore REFUSED: not a valid archive: truncated header
 ```
 
-### PSN account connector (unofficial, offline first slice)
+### PSN account connector (unofficial)
 
-Full details: [docs/psn.md](docs/psn.md). **Status: Implemented, Tested
-against synthetic fixtures only. Live Sony calls: not implemented, Untested.
-This slice contains no network code.**
+Full details: [docs/psn.md](docs/psn.md). **Status: Implemented. Tested
+against synthetic fixtures, a scripted fake and a local test server only.
+`psn sync` (live) is Untested against real Sony until you run it with your own token.**
 
 Three different things, kept apart everywhere in PNR:
 
@@ -966,7 +966,8 @@ Credentials: no password is ever collected. You paste your own NPSSO token
 (how to get it: [docs/psn.md](docs/psn.md)) via stdin or a file, never as an
 argument. It is stored locally in a 0600 file, never printed, logged,
 committed or put in the database, and is meant to go only to Sony's official
-endpoints once a live transport exists. Windows file hardening is not done.
+endpoints (`psn sync`: exactly two hosts, https only, TLS verification always on,
+redirects to other hosts refused, tokens held in memory only). Windows file hardening is not done.
 
 Real captured session, using a **synthetic** response file
 (`examples/psn/synthetic_purchased_games.json`, hand-written, not from Sony)
@@ -974,7 +975,7 @@ and a dummy token. Paths shortened; `<library>` is the library folder:
 
 ```
 $ pnr-launcher psn status
-PSN CONNECTOR STATUS (offline core: contains no network code, nothing here contacts Sony)
+PSN CONNECTOR STATUS (this command is local; only `psn sync` contacts Sony, and that is Untested against real Sony)
 token file: <library>/psn/npsso.token
 token: absent
 owned entries: 0 (0 linked to a PNR game, 0 not in the last complete sync)
@@ -1032,7 +1033,7 @@ DISCONNECTED: local token file removed (zeroed, then deleted). Owned-on-PSN entr
 PNR cannot revoke the token at Sony. If you think it leaked, change your PSN password and check your account security settings.
 
 $ pnr-launcher psn status
-PSN CONNECTOR STATUS (offline core: contains no network code, nothing here contacts Sony)
+PSN CONNECTOR STATUS (this command is local; only `psn sync` contacts Sony, and that is Untested against real Sony)
 token file: <library>/psn/npsso.token
 token: absent
 owned entries: 2 (1 linked to a PNR game, 0 not in the last complete sync)
@@ -1083,7 +1084,7 @@ ape/         MODULE 05 - adaptive performance engine (classification, frame stat
 laptop/      MODULE 06 - laptop optimization manager (power modes, caps)
 package/     .pnrgame format: ustar, SHA-256, importer
 launcher/    MODULE 10 core - headless launcher core (list, details, launch, history, human compatibility, read-only scan, import/remove/verify, doctor, clean --orphans, saves export/restore)
-psn/         unofficial PSN connector, offline slice (token store, parser, owned-entitlement commands; no network code)
+psn/         unofficial PSN connector (token store, parser, owned-entitlement commands, live sync over runtime-loaded libcurl)
 library/     MODULE 09 - SQLite game/installation/compatibility/launch store
 services/    MODULE 08 - virtual filesystem, input, audio backends
 tools/       pnr_make_package - dev package builder
@@ -1107,8 +1108,8 @@ Planned (per the master prompt's structure): `graphics/`, `performance/`,
 | Item | Status |
 |---|---|
 | Headless launcher core (list, run, library care, install, doctor, saves backup) | Implemented, Tested |
-| PSN connector, offline slice (token store, saved-response import, owned rows, linking) | Implemented, Tested on synthetic fixtures |
-| PSN live transport (token exchange, library fetch, refresh) | Planned, needs approval; Untested against Sony |
+| PSN connector (token store, saved-response import, owned rows, linking) | Implemented, Tested on synthetic fixtures |
+| PSN live transport (`psn sync`: token exchange, paged library fetch, refresh, error mapping) | Implemented, Tested against a fake and a local server; **Untested against real Sony** |
 | Downloading purchased games | Blocked: no authorized mechanism found; PNR will not bypass DRM or licensing |
 | Desktop launcher UI | Planned |
 | Security manager with a real isolation boundary (seccomp, namespaces) | Planned (required before any untrusted code) |
