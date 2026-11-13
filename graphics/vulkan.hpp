@@ -22,6 +22,16 @@ struct VulkanDeviceInfo {
   bool software = false;  // VK_PHYSICAL_DEVICE_TYPE_CPU
 };
 
+// Mesh description for the 3D slice. Vertices are interleaved: pos_floats
+// position floats (2 or 3) then 3 colour floats. indices may be null (plain
+// vertex list). depth enables a D32_SFLOAT depth buffer (LESS, write on).
+struct MeshInput {
+  const std::vector<float>* vertices = nullptr;
+  uint32_t pos_floats = 2;
+  const std::vector<uint32_t>* indices = nullptr;
+  bool depth = false;
+};
+
 class VulkanBackend {
 public:
   VulkanBackend() = default;
@@ -75,12 +85,24 @@ public:
                             const float clear[4],
                             std::vector<std::vector<uint8_t>>* frames);
 
+  // 3D slice: indexed mesh (float3 position + float3 colour, uint32
+  // indices), depth buffer optional, per-frame vertex push constants
+  // (typically a column-major 4x4 MVP = 16 words). Headless, sequential.
+  Status render_mesh_frames_rgba(uint32_t width, uint32_t height,
+                                 const std::vector<uint32_t>& vert_spirv,
+                                 const std::vector<uint32_t>& frag_spirv,
+                                 const std::vector<float>& vertices,
+                                 const std::vector<uint32_t>& indices, bool depth,
+                                 const std::vector<std::vector<uint32_t>>& frame_push,
+                                 const float clear[4],
+                                 std::vector<std::vector<uint8_t>>* frames);
+
   void shutdown();
 
 private:
   Status render_core(uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
                      const std::vector<uint32_t>& fs, uint32_t vertex_count,
-                     const std::vector<float>* vertices,
+                     const MeshInput* mesh,
                      const std::vector<std::vector<uint32_t>>* frame_push,
                      const float clear[4], std::vector<std::vector<uint8_t>>* frames);
   void* lib_ = nullptr;
@@ -118,7 +140,8 @@ private:
   X(vkCreateRenderPass) X(vkDestroyRenderPass) X(vkCreateFramebuffer) \
   X(vkDestroyFramebuffer) X(vkCreateGraphicsPipelines) \
   X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCmdDraw) \
-  X(vkCmdCopyImageToBuffer) X(vkCmdBindVertexBuffers) X(vkResetFences)
+  X(vkCmdCopyImageToBuffer) X(vkCmdBindVertexBuffers) X(vkResetFences) \
+  X(vkGetPhysicalDeviceFormatProperties) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed)
 #define PNR_VK_MEMBER(name) void* name = nullptr;
   PNR_VK_LIST(PNR_VK_MEMBER)
 #undef PNR_VK_MEMBER
