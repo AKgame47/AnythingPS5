@@ -6,6 +6,7 @@
 // Status: Implemented (Linux/POSIX). Windows backend: Planned.
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,10 @@ struct LaunchResult {
 
 class NativeLoader {
 public:
+  // Optional hook run in the forked child just before exec (used by the sandbox).
+  // Returning false aborts the launch: the child prints the message and exits 125.
+  std::function<bool(std::string*)> child_setup;
+
   // Validates the binary, then fork()+execve() it as a child process,
   // waits for completion and measures wall time. Child inherits
   // stdout/stderr so game output stays visible (captured later).
