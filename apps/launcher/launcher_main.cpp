@@ -33,7 +33,8 @@ static void usage() {
             "  pnr-launcher export <game-id> <out.tar> [--json]   (back up saves)\n"
             "  pnr-launcher restore-saves <game-id> <in.tar> [--overwrite] [--json]\n"
             "  pnr-launcher store source add <id> <https-index-url> --rights <statement> | store source remove <id> [--yes] | store source list\n"
-            "  pnr-launcher store refresh [id] | store search [text] [--source id] | store show <source> <package> [--json]   (no downloads yet)\n"
+            "  pnr-launcher store get <source> <package> | store queue list|run [<source> <package>] | store queue pause|resume|cancel <source> <package> [--yes] | store install <source> <package>\n"
+            "  pnr-launcher store refresh [id] | store search [text] [--source id] | store show <source> <package> [--json]\n"
             "  pnr-launcher psn status [--json]   (local state; no network)\n"
             "  pnr-launcher psn set-token [--file PATH]   (token from stdin or a file, never argv)\n"
             "  pnr-launcher psn import-json <file> [--complete] [--json]   (saved purchased-games response)\n"
@@ -169,6 +170,29 @@ int main(int argc, char** argv) {
       else if (pos[0] == "refresh" && pos.size() <= 2) rc = pnr::store::cmd_refresh(reg, pos.size() == 2 ? pos[1] : "", json, &out);
       else if (pos[0] == "search" && pos.size() <= 2) rc = pnr::store::cmd_search(reg, pos.size() == 2 ? pos[1] : "", source, json, &out);
       else if (pos[0] == "show" && pos.size() == 3) rc = pnr::store::cmd_show(reg, pos[1], pos[2], json, &out);
+      else if (pos[0] == "get" && pos.size() == 3) { pnr::store::Queue qu(reg, reg.dir()); rc = pnr::store::cmd_get(qu, pos[1], pos[2], json, &out); }
+      else if (pos[0] == "queue" && pos.size() >= 2) {
+        pnr::store::Queue qu(reg, reg.dir());
+        if (pos[1] == "list" && pos.size() == 2) rc = pnr::store::cmd_queue_list(qu, json, &out);
+        else if (pos[1] == "run" && (pos.size() == 2 || pos.size() == 4)) rc = pnr::store::cmd_queue_run(qu, pos.size() == 4 ? pos[2] : "", pos.size() == 4 ? pos[3] : "", json, &out);
+        else if ((pos[1] == "pause" || pos[1] == "resume") && pos.size() == 4) rc = pnr::store::cmd_queue_pause(qu, pos[2], pos[3], pos[1] == "pause", json, &out);
+        else if (pos[1] == "cancel" && pos.size() == 4) rc = pnr::store::cmd_queue_cancel(qu, pos[2], pos[3], yes, json, &out);
+        else usage();
+      } else if (pos[0] == "install" && pos.size() == 3) {
+        pnr::store::Queue qu(reg, reg.dir());
+        std::string path, sha;
+        auto ps = qu.prepare_install(pos[1], pos[2], &path, &sha);
+        if (!ps) { out = "store error: " + ps.error.message + "\n"; rc = 1; }
+        else {
+          auto o = core.import_package(path);
+          std::fputs((json ? render_import_json(o) + "\n" : render_import_text(o)).c_str(), stdout);
+          if (o.ok) {
+            qu.mark_installed(pos[1], pos[2], o.game_id);
+            out = "installed from source '" + pos[1] + "', package '" + pos[2] + "', sha256 " + sha + " (verified against the source's index; the importer then ran its own package checks)\nnew games start as Untested; nothing claims it is playable\n";
+          }
+          rc = o.ok ? 0 : 1;
+        }
+      }
       else usage();
       std::fputs(out.c_str(), stdout);
     }
