@@ -3,6 +3,7 @@
 // verification always on, bounded response size. The guard runs BEFORE any
 // bytes leave the machine, so credentials cannot be sent to another host.
 #pragma once
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -21,13 +22,23 @@ struct HttpResponse {
   int status = 0;
   std::string body;
   std::string location;  // Location header, if any
+  std::string content_range, etag;  // response headers, for resumable downloads
+  long long content_length = -1;    // -1 = not sent
 };
+// Receives downloaded bytes with the response head (status, Content-Range,
+// ETag, Content-Length) already filled in. Return false to abort (disk
+// full, size limit, user cancel).
+using BodySink = std::function<bool(const HttpResponse& head, const char* data, size_t len)>;
 
 class HttpClient {
 public:
   virtual ~HttpClient() = default;
   // Returns a non-ok Status only when no HTTP response was obtained.
   virtual Status perform(const HttpRequest& req, HttpResponse* res) = 0;
+  // Streams a 200/206 body to `sink` (nothing is buffered, no size cap here:
+  // the caller's sink enforces limits). Other statuses are drained and
+  // discarded, with res->status set. Default: not supported.
+  virtual Status download(const HttpRequest& req, const BodySink& sink, HttpResponse* res);
 };
 
 constexpr const char* kAuthHost = "ca.account.sony.com";
@@ -44,6 +55,7 @@ class GuardedHttp : public HttpClient {
 public:
   GuardedHttp(HttpClient& inner, std::vector<std::string> allowed) : inner_(inner), allowed_(std::move(allowed)) {}
   Status perform(const HttpRequest& req, HttpResponse* res) override;
+  Status download(const HttpRequest& req, const BodySink& sink, HttpResponse* res) override;
   int blocked = 0;
 private:
   HttpClient& inner_;
