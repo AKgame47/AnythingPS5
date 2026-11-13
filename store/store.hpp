@@ -5,7 +5,7 @@
 // the store starts with NO sources. Every source is added by the user with
 // an https index URL and a rights statement. PNR cannot verify rights
 // statements; the user is responsible for the sources they add.
-// Not in this slice: downloads, install, signatures (Planned).
+// Downloads and install are in store/download.hpp. Signatures: Planned.
 #pragma once
 #include <string>
 #include <vector>
@@ -52,6 +52,7 @@ public:
   explicit Registry(std::string dir) : dir_(std::move(dir)) {}
   Status load();  // missing file = empty registry
   const std::vector<Source>& sources() const { return sources_; }
+  const std::string& dir() const { return dir_; }
   const Source* find(const std::string& id) const;
   Status add(const std::string& id, const std::string& url, const std::string& rights);
   Status remove(const std::string& id, bool* existed);  // also deletes its cached index
