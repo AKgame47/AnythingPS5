@@ -49,9 +49,10 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
     nodes.push_back({U32Op::Constant, o.value});
     return Reg{static_cast<uint32_t>(nodes.size()-1), o.value, o.value, 0};
   };
-  bool ended = false, stored = false, guarded = false, conditional = false, floating = false;
+  bool ended = false, stored = false, guarded = false, conditional = false, floating = false, full64 = false;
   struct Compare { uint32_t a,b; };
-  std::optional<Compare> scc;
+  Compare scc{};bool scc_defined=false;
+  uint32_t carry_flag=0;bool carry_defined=false;
   bool merge_active=false;
   uint32_t merge_pc=0;
   std::array<std::optional<Reg>,256> before_branch{};
@@ -82,19 +83,35 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       if(i.dst.kind!=RdnaOperandKind::ScalarReg || !v)
         return fail("unsupported/undefined scalar move"+at);
       sregs[i.dst.reg]=*v;
+    } else if(i.family==RdnaFamily::SOP2 &&
+              (i.opcode_id==0 || i.opcode_id==1 || i.opcode_id==4 || i.opcode_id==5)) {
+      if(local_size_x!=1) return fail("scalar carry arithmetic restricted to single invocation"+at);
+      auto a=source(i.src0),b=source(i.src1);
+      const bool use_carry=i.opcode_id>=4, sub=i.opcode_id==1 || i.opcode_id==5;
+      if(!a || !b || i.dst.kind!=RdnaOperandKind::ScalarReg || (use_carry && !carry_defined))
+        return fail("undefined scalar operands/carry or unsupported destination"+at);
+      uint32_t cin;
+      if(use_carry)cin=carry_flag;
+      else {nodes.push_back({U32Op::Constant,0});cin=uint32_t(nodes.size()-1);}
+      nodes.push_back({sub?U32Op::Sub:U32Op::Add,a->node,b->node});
+      auto tmp=uint32_t(nodes.size()-1);
+      nodes.push_back({sub?U32Op::Sub:U32Op::Add,tmp,cin});
+      sregs[i.dst.reg]=Reg{uint32_t(nodes.size()-1),{}};
+      nodes.push_back({sub?U32Op::BorrowSub:U32Op::CarryAdd,a->node,b->node,cin});
+      carry_flag=uint32_t(nodes.size()-1);carry_defined=true;scc_defined=false;
     } else if(i.family==RdnaFamily::SOPC && i.opcode_id==6) {
       if(local_size_x!=1) return fail("scalar comparison restricted to one invocation"+at);
       auto a=source(i.src0),b=source(i.src1);
       if(!a || !b) return fail("undefined compare source"+at);
-      scc=Compare{a->node,b->node};
+      scc=Compare{a->node,b->node};scc_defined=true;carry_defined=false;
     } else if(i.family==RdnaFamily::SOPP && i.opcode_id==4) {
-      if(local_size_x!=1 || conditional || !scc || i.simm<=0)
+      if(local_size_x!=1 || conditional || !scc_defined || i.simm<=0)
         return fail("unsupported branch: needs single forward SCC0 with defined compare"+at);
       bool boundary=false;
       for(const auto& target:d.instructions) boundary |= target.pc==i.branch_target;
       if(!boundary) return fail("branch target is not an instruction boundary"+at);
       merge_active=true;merge_pc=i.branch_target;before_branch=regs;assigned.fill(false);
-      branch_compare=*scc;conditional=true;
+      branch_compare=scc;conditional=true;
     } else if (i.family == RdnaFamily::VOP1 && i.opcode_id == 1) {
       const auto v = source(i.src0);
       if (!v) return fail("undefined VGPR or unsupported v_mov source" + at);
@@ -150,29 +167,23 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       if (!load && stored) return fail("multiple stores are not supported" + at);
       if (i.memory_addr == 255) return fail("address register pair overflow" + at);
       auto lo = regs[i.memory_addr], hi = regs[i.memory_addr + 1];
-      if (!lo || !hi || !hi->constant)
-        return fail("undefined address or dynamic high address word" + at);
-      bool dynamic = !lo->constant;
-      uint32_t index = 0;
-      if (dynamic) {
-        // Bounded low-word indexing only. No implicit carry or truncation
-        // of a 64-bit pointer; unsupported shapes fail at translation time.
-        if (*hi->constant != uint32_t(base >> 32u))
-          return fail("runtime address high word differs from binding" + at);
-        if (uint64_t(uint32_t(base)) + size > 0x100000000ull)
-          return fail("runtime binding crosses a 32-bit address boundary" + at);
-        if (i.memory_offset)
-          return fail("runtime address with immediate offset not supported" + at);
-        guarded = true;
-      } else {
-        uint64_t addr = uint64_t(*lo->constant) | (uint64_t(*hi->constant) << 32u);
-        const uint64_t offset = i.memory_offset;
-        if (addr > UINT64_MAX - offset) return fail("address plus offset overflows" + at);
-        addr += offset;
-        if (addr < base || addr - base >= size || (addr - base) % 4)
-          return fail("memory access is outside/alignment-invalid for SSBO range" + at);
-        index = static_cast<uint32_t>((addr - base) / 4);
+      if (!lo || !hi) return fail("undefined address VGPR pair"+at);
+      bool wide_dynamic=!hi->constant;
+      bool dynamic=wide_dynamic || !lo->constant;
+      const bool use64=dynamic && (wide_dynamic || *hi->constant!=uint32_t(base>>32u) ||
+                           uint64_t(uint32_t(base))+size>0x100000000ull || i.memory_offset);
+      uint32_t index=0;
+      if(dynamic)guarded=true;
+      else {
+        uint64_t addr=uint64_t(*lo->constant)|(uint64_t(*hi->constant)<<32u);
+        if(addr>UINT64_MAX-i.memory_offset)return fail("address plus offset overflows"+at);
+        addr+=i.memory_offset;
+        if(addr<base || addr-base>=size || (addr-base)%4)
+          return fail("memory access outside/alignment-invalid for SSBO range"+at);
+        index=uint32_t((addr-base)/4);
       }
+      full64 |= use64;
+      if(use64 && local_size_x>1) return fail("64-bit dynamic pointer mode restricted to one invocation"+at);
       if (local_size_x > 1) {
         // Prove all invocation addresses before allowing parallel access.
         // This prevents output collisions and read/write data races in
@@ -191,13 +202,15 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
         }
       }
       if (load) {
-        nodes.push_back({dynamic ? U32Op::GuardedLoad : U32Op::Load,
+        if(use64)nodes.push_back({U32Op::GuardedLoad64,lo->node,hi->node,0,i.memory_offset});
+        else nodes.push_back({dynamic ? U32Op::GuardedLoad : U32Op::Load,
                          dynamic ? lo->node : index});
         regs[i.dst.reg] = Reg{static_cast<uint32_t>(nodes.size()-1), {}};
       } else {
         auto data = regs[i.memory_data];
         if (!data) return fail("undefined store data VGPR" + at);
-        nodes.push_back({dynamic ? U32Op::GuardedStore : U32Op::Store,
+        if(use64)nodes.push_back({U32Op::GuardedStore64,lo->node,hi->node,data->node,i.memory_offset});
+        else nodes.push_back({dynamic ? U32Op::GuardedStore : U32Op::Store,
                          data->node, dynamic ? lo->node : index});
         stored = true; value = dynamic ? std::optional<uint32_t>{} : data->constant;
       }
@@ -213,6 +226,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
     if(read.first<=writes->last && writes->first<=read.last)
       return fail("multi-invocation load/output ranges overlap; barriers not supported");
   ComputeTranslation r;
+  r.full64_pointers=full64;
   r.host_float32=floating;
   r.required_uniform_words=uniform_words;
   r.conditional_selection = conditional;
@@ -221,7 +235,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   r.required_buffer_words = buffer_words;
   r.stored_value_known = value.has_value();
   r.stored_value = value.value_or(0); // meaningful only when known=true
-  r.spirv = graphics::SpirvModule::compute_u32(nodes, buffer_words, uint32_t(base), local_size_x, uniform_words);
+  r.spirv = graphics::SpirvModule::compute_u32(nodes, buffer_words, uint32_t(base), local_size_x, uniform_words, uint32_t(base>>32u));
   if (r.spirv.empty()) return fail("invalid internal uint IR");
   r.ok = true;
   return r;
