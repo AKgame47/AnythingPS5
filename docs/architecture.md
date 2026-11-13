@@ -45,9 +45,9 @@ developer-controlled test application and no graphics.
 | 02a | PS NID support | `loader/nid.*` | Implemented (SHA-1 + NID computation + seed resolver; algorithm adapted from AnyPS5, GPL-2.0, attribution in file headers), Tested |
 | 02b | PRX system libraries | `prx/` | Implemented (libkernel: usleep, sleep, alloc, free, create_thread, map_memory, munmap, mtypeprotect, query_memory_protection over POSIX mmap; jailed file calls (open/read/write/close/lseek/fstat) over FileSystemService; libSceLibcInternal: printf bounded subset, malloc, free, memcpy, memset, strlen, strcmp; bound by NID; taxonomy per AnyPS5 core/libs/prx, implementations original), Tested |
 | 02c | Import resolution | `loader/import_resolver.*` | Implemented (DT_NEEDED + undefined .dynsym parsed bounds-checked; every import classified host / prx-implemented / prx-declared / unknown and reported at launch), Tested |
-| 02d | PS-ABI shim + PS-style demo | Implemented / Tested | `libpnr_psabi.so` exports real sce functions (heap, sleep, thread, mmap family, jailed file calls over `PsFileTable`); `examples/ps_demo.cpp` is a PS-style binary whose imports all classify prx-implemented and dispatch through the shim at launch (`LD_PRELOAD` + `PNR_JAIL_ROOT`) |
+| 02d | PS-ABI shim + PS-style demo | Implemented / Tested | `libpnr_psabi.so` exports real sce functions (heap, sleep, thread, mmap family, jailed file calls over `PsFileTable`); `examples/ps_demo.cpp` is a PS-style binary whose imports all classify prx-implemented and dispatch through the shim at launch (`LD_LIBRARY_PATH` + `PNR_JAIL_ROOT`) |
 | 03 | Compatibility Layer | `compat/` | Implemented (memory, timing, filesystem, threads), Tested |
-| 04 | Graphics Engine (Vulkan) | `graphics/` | Blocked in sandbox (no GPU/Vulkan); Planned |
+| 04 | Graphics Engine (Vulkan) | `graphics/` | Implemented (first slice): dlopen Vulkan backend (instance/device/compute queue/SSBO/pipeline/dispatch/readback) + word-level SPIR-V emission (compute write-back shape), Tested on software Vulkan (Mesa lavapipe); render passes + full stages Planned |
 | 05 | Adaptive Performance Engine | `performance/` | Planned |
 | 06 | Laptop Optimization Manager | `performance/laptop` | Planned |
 | 05 | Adaptive Performance Engine | `ape/` | Implemented (deterministic rules: CPU/RAM class heuristic, frame stats, closed-loop keep/revert controller), Tested |
@@ -57,7 +57,7 @@ developer-controlled test application and no graphics.
 | 08 | Game Services (audio/input/storage) | `services/` | Planned (save-data storage exists inside `compat`) |
 | 09 | Game Manager (library) | `library/` | SQLite data layer Implemented, Tested; UI Planned | Run-by-id (`pnr run <id>`) resolves installed games with per-game jails, launch history, and honest compatibility advancement (Untested -> Launches Only); UI Planned.
 | 10 | Desktop Launcher UI | `apps/launcher` | Planned (CLI exists: `apps/pnr_cli.cpp`) |
-| 11 | Security Manager | `security/` | Partial (process isolation, fs jail, package traversal/checksum rejection implemented; sandboxing Planned) |
+| 11 | Security Manager | `security/` | Partial (process isolation, application-level file path routing, package traversal/checksum rejection implemented). The current "jail" is virtual path routing, NOT an OS-enforced security sandbox: direct host syscalls bypass it. OS-enforced sandboxing (seccomp/namespaces/job objects) with adversarial tests is Planned here |
 | - | Installer (.pnrgame) | `package/` | Implemented (tar+SHA-256, importer, registration), Tested |
 
 ## 4. Component diagram (current build)
@@ -133,7 +133,7 @@ OS- and loader-agnostic.
   reverse of registration.
 - MemoryService tracks every live allocation (pointer → size) and reports
   outstanding bytes; the demo proves return to zero.
-- FileSystemService owns a jail root; all virtual paths resolve inside it.
+- FileSystemService owns a jail root; all virtual paths resolve inside it. This is application-level path routing, not a security boundary: code that calls the host directly bypasses it.
 
 ## 9. Roadmap dependency graph (phases)
 
