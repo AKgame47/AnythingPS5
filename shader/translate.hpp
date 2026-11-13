@@ -11,6 +11,7 @@ struct ComputeTranslation {
   bool ok = false;
   std::string error;
   std::vector<uint32_t> spirv; // empty on EVERY failure
+  bool full64_pointers = false; // runtime pair guard/carry-aware FLAT offset
   bool host_float32 = false; // Vulkan host FP policy, not PS5 exact modes
   uint32_t required_uniform_words = 0; // initial s0..sN-1, runtime push constants
   bool conditional_selection = false; // restricted forward SCC0 skip
@@ -26,10 +27,11 @@ struct ComputeTranslation {
 // memory must have provable aligned affine addresses; store stride=4 and
 // input/output ranges cannot overlap. No shared-memory/barrier/wave model.
 // Constant guest addresses + unsigned FLAT offsets are checked statically.
-// Runtime low-word addresses (constant high word matching base) are guarded
-// in emitted SPIR-V: OOB/misaligned loads=0, stores skip. Runtime immediates
-// must be zero and the binding cannot cross a 32-bit low-word boundary.
-// Not full 64-bit dynamic addressing or GPU virtual memory.
+// Runtime low/high address pairs are guarded in single-invocation mode,
+// including FLAT offset carry and bindings crossing a low-word boundary.
+// OOB/misaligned/offset-overflow loads=0, stores skip. Scalar unsigned
+// add/addc and sub/subb provide pair arithmetic; no GPU virtual memory.
+// Multi-invocation mode retains conservative affine low-word restrictions.
 // Host must bind at least required_buffer_words words; zero/oversize ranges
 // and base+size overflow fail. Legacy callers default to a single word.
 // Supports v_mov, flat_load/store_dword, uint32 add/sub/and/or/xor.
