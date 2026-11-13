@@ -11,14 +11,17 @@ struct ComputeTranslation {
   bool ok = false;
   std::string error;
   std::vector<uint32_t> spirv; // empty on EVERY failure
+  bool guarded_memory = false; // invalid runtime loads=0 / stores skipped
   uint32_t required_buffer_words = 0; // host io must contain at least this many
   bool stored_value_known = false; // false for runtime-dependent results
   uint32_t stored_value = 0; // inspect only when stored_value_known
 };
 // Explicit test ABI: one active invocation, straight-line VGPR SSA.
-// Aligned constant guest addresses plus unsigned FLAT offsets map to the
-// supplied fixed SSBO range (1..65536 words). Every memory access is range
-// checked at translation time. No dynamic addresses or GPU virtual memory.
+// Constant guest addresses + unsigned FLAT offsets are checked statically.
+// Runtime low-word addresses (constant high word matching base) are guarded
+// in emitted SPIR-V: OOB/misaligned loads=0, stores skip. Runtime immediates
+// must be zero and the binding cannot cross a 32-bit low-word boundary.
+// Not full 64-bit dynamic addressing or GPU virtual memory.
 // Host must bind at least required_buffer_words words; zero/oversize ranges
 // and base+size overflow fail. Legacy callers default to a single word.
 // Supports v_mov, flat_load/store_dword, uint32 add/sub/and/or/xor.
