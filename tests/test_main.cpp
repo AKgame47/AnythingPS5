@@ -8,7 +8,12 @@
 
 #include "compat/services.hpp"
 #include "core/runtime.hpp"
+#include "library/game_db.hpp"
 #include "loader/native_loader.hpp"
+#include "package/importer.hpp"
+#include "package/sha256.hpp"
+#include "package/tar.hpp"
+#include "platform/os.hpp"
 
 static int g_pass = 0, g_fail = 0;
 
@@ -216,6 +221,138 @@ int main() {
     auto cap = rt.capabilities().query("graphics.vulkan");
     CHECK(cap && !cap->supported,
           "runtime: Vulkan honestly reported unsupported here");
+  }
+
+  // --- SHA-256 ---
+  {
+    CHECK(pnr::pkg::sha256_hex("abc") ==
+              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          "sha256: published 'abc' vector");
+    CHECK(pnr::pkg::sha256_hex("") ==
+              "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "sha256: published empty vector");
+    std::string big(1000000, 'a');
+    CHECK(pnr::pkg::sha256_hex(big) ==
+              "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+          "sha256: published million-a vector");
+  }
+
+  // --- tar roundtrip ---
+  {
+    std::vector<pnr::pkg::TarEntry> entries = {
+        {"manifest.pnr", {'a', '=', 'b'}},
+        {"bin/game", std::vector<uint8_t>(2000, 0x5A)},
+        {"assets/readme.txt", {'h', 'i'}}};
+    CHECK(pnr::pkg::tar_write("/tmp/pnr_rt.pnrgame", entries),
+          "tar: write ok");
+    std::vector<pnr::pkg::TarEntry> back;
+    CHECK(pnr::pkg::tar_read("/tmp/pnr_rt.pnrgame", back) && back.size() == 3,
+          "tar: read back 3 entries");
+    CHECK(back.size() == 3 && back[1].name == "bin/game" &&
+              back[1].data.size() == 2000 && back[1].data[1999] == 0x5A,
+          "tar: payload bytes survive roundtrip");
+    std::vector<pnr::pkg::TarEntry> bad = {{"../evil", {'x'}}};
+    CHECK(!pnr::pkg::tar_write("/tmp/pnr_bad.pnrgame", bad),
+          "tar: traversal name rejected at write");
+  }
+
+  // --- platform abstraction ---
+  {
+    auto host = pnr::platform::make_host_platform();
+    CHECK(host->name() == "linux", "platform: linux backend");
+    CHECK(host->cpu_logical_cores() >= 1, "platform: core count sane");
+    auto mem = host->memory();
+    CHECK(mem && mem->total_bytes > 0, "platform: memory info real");
+    double a = host->monotonic_seconds();
+    double b = host->monotonic_seconds();
+    CHECK(b >= a, "platform: monotonic clock");
+    auto pr = host->launch_process("/bin/true", {});
+    CHECK(pr.started && pr.finished && pr.exit_code == 0,
+          "platform: supervised launch");
+  }
+
+  // --- library database ---
+  {
+    std::remove("/tmp/pnr_test_library.db");
+    std::remove("/tmp/pnr_test_library.db-wal");
+    std::remove("/tmp/pnr_test_library.db-shm");
+    pnr::library::GameDb db;
+    CHECK(db.open("/tmp/pnr_test_library.db"), "db: open + schema");
+    CHECK(db.add_game({0, "demo-game", "PNR Demo Game", "0.1.0", "pnr-dev"}),
+          "db: add game");
+    auto g = db.get_game("demo-game");
+    CHECK(g && g->title == "PNR Demo Game", "db: get game");
+    CHECK(db.set_installation(
+              {"demo-game", "/tmp/wherever", "0.1.0", "verified"}),
+          "db: set installation");
+    auto inst = db.get_installation("demo-game");
+    CHECK(inst && inst->integrity == "verified", "db: get installation");
+    CHECK(db.set_compatibility({"demo-game", "Untested", "imported"}),
+          "db: set compatibility");
+    auto c = db.get_compatibility("demo-game");
+    CHECK(c && c->state == "Untested", "db: compatibility stays honest");
+    CHECK(db.record_launch("demo-game", 0, 0.012), "db: record launch");
+    CHECK(db.launch_count("demo-game") == 1, "db: launch count");
+    CHECK(db.list_games().size() == 1, "db: list");
+    db.close();
+  }
+
+  // --- importer end-to-end + tamper rejection ---
+  {
+    const std::string root = "/tmp/pnr_import_root";
+    std::remove((root + "/library.db").c_str());
+    pnr::library::GameDb db;
+    CHECK(db.open(root + "/library.db"), "import: db open");
+
+    pnr::pkg::Manifest m;
+    m.id = "selftest-game";
+    m.title = "Selftest Game";
+    m.version = "1.0.0";
+    m.executable = "bin/game";
+    auto st = pnr::pkg::build_package(
+        "/tmp/pnr_selftest.pnrgame", m,
+        {{"bin/game", self_exe()}, {"assets/note.txt", "/etc/hostname"}});
+    CHECK(st, "import: package built");
+
+    auto r = pnr::pkg::import_package("/tmp/pnr_selftest.pnrgame", root, db);
+    CHECK(r.status, "import: clean package imports");
+    if (r.status) {
+      CHECK(!r.install_path.empty(), "import: install path set");
+      auto c = db.get_compatibility("selftest-game");
+      CHECK(c && c->state == "Untested",
+            "import: compatibility starts Untested");
+      auto inst = db.get_installation("selftest-game");
+      CHECK(inst && inst->integrity == "verified",
+            "import: integrity recorded verified");
+      // The imported executable must actually run.
+      pnr::loader::NativeLoader loader;
+      auto lr = loader.launch(inst->path + "/bin/game", {});
+      CHECK(lr.started && lr.finished,
+            "import: imported binary launches natively");
+    }
+
+    // Tampered package: flip one payload byte inside the tar.
+    {
+      std::vector<pnr::pkg::TarEntry> entries;
+      pnr::pkg::tar_read("/tmp/pnr_selftest.pnrgame", entries);
+      for (auto& e : entries)
+        if (e.name == "bin/game" && e.data.size() > 100) e.data[100] ^= 0xFF;
+      pnr::pkg::tar_write("/tmp/pnr_tampered.pnrgame", entries);
+      auto bad = pnr::pkg::import_package("/tmp/pnr_tampered.pnrgame",
+                                          "/tmp/pnr_import_root2", db);
+      CHECK(!bad.status &&
+                bad.status.error.message.find("MISMATCH") != std::string::npos,
+            "import: tampered payload rejected by checksum");
+    }
+
+    // Not a package at all.
+    {
+      const char* junk = "/tmp/pnr_not_a_pkg.bin";
+      { std::ofstream(junk) << "definitely not a tar archive at all......"; }
+      auto bad = pnr::pkg::import_package(junk, "/tmp/pnr_import_root3", db);
+      CHECK(!bad.status, "import: non-package rejected cleanly");
+    }
+    db.close();
   }
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
