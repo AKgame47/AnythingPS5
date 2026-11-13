@@ -22,6 +22,7 @@
 #include "graphics/spirv.hpp"
 #include "graphics/vulkan.hpp"
 #include "library/game_db.hpp"
+#include "shader/rdna.hpp"
 #include "loader/native_loader.hpp"
 #include "loader/nid.hpp"
 #include "prx/prx.hpp"
@@ -913,6 +914,117 @@ int main() {
                         .c_str());
       CHECK(io[0] == 42, "vk: shader wrote 42 into the SSBO and readback matches");
       vk.shutdown();
+    }
+  }
+
+  // --- MODULE 04: RDNA instruction decoder (synthetic words) ---
+  {
+    using pnr::shader::RdnaFamily;
+    using pnr::shader::RdnaOperandKind;
+    using pnr::shader::rdna_decode;
+    using pnr::shader::rdna_family_of;
+
+    // family detection across the encoding space
+    CHECK(rdna_family_of(0xBF810000) == RdnaFamily::SOPP, "rdna: SOPP family");
+    CHECK(rdna_family_of(0x80020304) == RdnaFamily::SOP2, "rdna: SOP2 family");
+    CHECK(rdna_family_of(0xBE800305) == RdnaFamily::SOP1, "rdna: SOP1 family");
+    CHECK(rdna_family_of(0xB0021234) == RdnaFamily::SOPK, "rdna: SOPK family");
+    CHECK(rdna_family_of(0xBF000201) == RdnaFamily::SOPC, "rdna: SOPC family");
+    CHECK(rdna_family_of(0x7E000301) == RdnaFamily::VOP1, "rdna: VOP1 family");
+    CHECK(rdna_family_of(0x4A020702) == RdnaFamily::VOP2, "rdna: VOP2 family");
+    CHECK(rdna_family_of(0xD5230000) == RdnaFamily::VOP3, "rdna: VOP3 family");
+    CHECK(rdna_family_of(0xE0000000) == RdnaFamily::MUBUF, "rdna: MUBUF family");
+    CHECK(rdna_family_of(0xC0000000) == RdnaFamily::Unknown,
+          "rdna: unknown family not guessed");
+
+    // s_endpgm decodes with name
+    {
+      auto r = rdna_decode({0xBF810000});
+      CHECK(r.ok && r.instructions.size() == 1 &&
+                r.instructions[0].mnemonic == "s_endpgm" &&
+                r.instructions[0].supported,
+            "rdna: s_endpgm named and supported");
+    }
+    // s_branch with negative offset: target = pc + 4 + simm*4
+    {
+      auto r = rdna_decode({0xBF82FFFE});
+      CHECK(r.ok && r.instructions[0].mnemonic == "s_branch" &&
+                r.instructions[0].branch_target == 0xFFFFFFFCu,
+            "rdna: s_branch negative target wraps honestly");
+    }
+    // SOP2 s_add_u32 s2, s4, s3
+    {
+      auto r = rdna_decode({0x80020304});
+      const auto& i = r.instructions[0];
+      CHECK(r.ok && i.mnemonic == "s_add_u32" &&
+                i.dst.kind == RdnaOperandKind::ScalarReg && i.dst.reg == 2 &&
+                i.src0.reg == 4 && i.src1.reg == 3,
+            "rdna: s_add_u32 operands decoded");
+    }
+    // SOPK s_movk_i32 s2, 0x1234
+    {
+      auto r = rdna_decode({0xB0021234});
+      const auto& i = r.instructions[0];
+      CHECK(r.ok && i.mnemonic == "s_movk_i32" && i.dst.reg == 2 &&
+                i.simm == 0x1234,
+            "rdna: s_movk_i32 decoded");
+    }
+    // VOP2 v_add_nc_u32 v1, v2, v3
+    {
+      auto r = rdna_decode({0x4A020702});
+      const auto& i = r.instructions[0];
+      CHECK(r.ok && i.mnemonic == "v_add_nc_u32" &&
+                i.dst.kind == RdnaOperandKind::VectorReg && i.dst.reg == 1 &&
+                i.src0.kind == RdnaOperandKind::VectorReg && i.src0.reg == 2 &&
+                i.src1.reg == 3,
+            "rdna: v_add_nc_u32 operands decoded");
+    }
+    // VOP2 with inline constant: v_add_nc_u32 v0, 5, v1
+    {
+      auto r = rdna_decode({0x4A000285});
+      const auto& i = r.instructions[0];
+      CHECK(r.ok && i.src0.kind == RdnaOperandKind::InlineIntConst &&
+                i.src0.signed_value == 5,
+            "rdna: inline integer constant decoded");
+    }
+    // VOP1 literal constant consumes the next word
+    {
+      auto r = rdna_decode({0x7E0602FF, 0xDEADBEEF});
+      const auto& i = r.instructions[0];
+      CHECK(r.ok && i.mnemonic == "v_mov_b32" && i.word_count == 2 &&
+                i.src0.kind == RdnaOperandKind::LiteralConst &&
+                i.src0.value == 0xDEADBEEF,
+            "rdna: literal constant second word");
+    }
+    // VOP3 is 2 words and honestly unsupported (no named table yet)
+    {
+      auto r = rdna_decode({0xD5230000, 0x00000000});
+      CHECK(r.ok && r.instructions[0].family == RdnaFamily::VOP3 &&
+                r.instructions[0].word_count == 2 &&
+                !r.instructions[0].supported,
+            "rdna: VOP3 structurally decoded, marked unsupported");
+    }
+    // memory family: 2 words, unsupported, walking continues
+    {
+      auto r = rdna_decode({0xE0000000, 0x00000000, 0xBF810000});
+      CHECK(r.ok && r.instructions.size() == 2 &&
+                r.instructions[0].word_count == 2 &&
+                !r.instructions[0].supported &&
+                r.instructions[1].mnemonic == "s_endpgm",
+            "rdna: 64-bit family skipped correctly");
+    }
+    // honest failures: unknown family, truncated 64-bit, truncated literal
+    CHECK(!rdna_decode({0xC0000000}).ok, "rdna: unknown family errors");
+    CHECK(!rdna_decode({0xD5230000}).ok, "rdna: truncated VOP3 errors");
+    CHECK(!rdna_decode({0x7E0602FF}).ok, "rdna: truncated literal errors");
+    // a real-shaped mini program
+    {
+      auto r = rdna_decode({0xBE800305, 0x7E000301, 0xBF810000});
+      CHECK(r.ok && r.instructions.size() == 3 &&
+                r.instructions[0].pc == 0 && r.instructions[1].pc == 4 &&
+                r.instructions[2].pc == 8 && r.instructions[0].supported &&
+                r.instructions[1].supported && r.instructions[2].supported,
+            "rdna: mini program fully decoded with pcs");
     }
   }
 
