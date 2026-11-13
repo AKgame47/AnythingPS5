@@ -1,4 +1,5 @@
 #include "graphics/spirv.hpp"
+#include <array>
 
 namespace pnr::graphics {
 
@@ -157,11 +158,20 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   }
   std::vector<uint32_t> no_contraction;
   std::vector<uint32_t> ids(nodes.size(), 0), indices(nodes.size(), 0);
+  std::vector<std::array<uint32_t,5>> copy_constants(nodes.size());
+  std::vector<uint32_t> final_source(nodes.size()),final_dest(nodes.size());
   for (size_t i = 0; i < nodes.size(); ++i) {
     const auto& n = nodes[i];
     if (n.op == U32Op::Constant) {
       ids[i] = next++;
       inst(m, spv::OpConstant, {6, ids[i], n.a});
+    } else if(n.op==U32Op::LoopCopy) {
+      if(n.d>1 || (!n.d && (!n.c || n.c>64)) || n.g>2047 || n.h>2047 ||
+         uint64_t(guest_base_low)+uint64_t(buffer_words)*4>0x100000000ull)return {};
+      const std::array<uint32_t,5> values={n.d?0:n.c,n.e,n.f,n.g,n.h};
+      for(size_t k=0;k<5;++k) {
+        copy_constants[i][k]=next++;inst(m,spv::OpConstant,{6,copy_constants[i][k],values[k]});
+      }
     } else if(n.op==U32Op::LoopAdd) {
       if(!n.c || n.c>64)return {};
       indices[i]=next++;inst(m,spv::OpConstant,{6,indices[i],n.c});
@@ -216,6 +226,54 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
       inst(m,245,{6,ids[i],ids[n.c],yes,ids[n.d],no});
       current_label=merge;
       continue;
+    }
+    if(n.op==U32Op::LoopCopySource || n.op==U32Op::LoopCopyDest) {
+      if(n.a>=i || nodes[n.a].op!=U32Op::LoopCopy || !final_source[n.a] || !final_dest[n.a])return {};
+      ids[i]=n.op==U32Op::LoopCopySource?final_source[n.a]:final_dest[n.a];continue;
+    }
+    if(n.op==U32Op::LoopCopy) {
+      if(n.a>=i || n.b>=i || !ids[n.a] || !ids[n.b])return {};
+      if(n.d && (loop_count_uniform==16 || n.c>=i || !ids[n.c] ||
+         nodes[n.c].op!=U32Op::UniformInput || nodes[n.c].a!=loop_count_uniform))return {};
+      const auto& kc=copy_constants[i];
+      const uint32_t header=next++,body=next++,cont=next++,merge=next++;
+      const uint32_t src=next++,dst=next++,count=next++,last=next++;
+      const uint32_t srcnext=next++,dstnext=next++,countnext=next++,lastnext=next++,cond=next++;
+      inst(m,249,{header});inst(m,spv::OpLabel,{header});
+      inst(m,245,{6,src,ids[n.a],current_label,srcnext,cont});
+      inst(m,245,{6,dst,ids[n.b],current_label,dstnext,cont});
+      inst(m,245,{6,count,10,current_label,countnext,cont});
+      inst(m,245,{6,last,10,current_label,lastnext,cont});
+      inst(m,176,{15,cond,count,n.d?ids[n.c]:kc[0]});
+      inst(m,246,{merge,cont,0});inst(m,250,{cond,body,merge});
+      inst(m,spv::OpLabel,{body});current_label=body;
+      // Each pointer is constructed only in its valid structured branch,
+      // inside the loop body, even though translator already proved range.
+      auto access=[&](uint32_t address,uint32_t offset,bool load,uint32_t data) {
+        uint32_t effective=next++,nowrap=next++,ge=next++,le=next++,mask=next++,aligned=next++;
+        uint32_t range=next++,ok1=next++,valid=next++,yes=next++,done=next++;
+        inst(m,128,{6,effective,address,offset});inst(m,174,{15,nowrap,effective,address});
+        inst(m,174,{15,ge,effective,16});inst(m,178,{15,le,effective,17});
+        inst(m,199,{6,mask,effective,18});inst(m,170,{15,aligned,mask,10});
+        inst(m,167,{15,range,ge,le});inst(m,167,{15,ok1,range,aligned});inst(m,167,{15,valid,ok1,nowrap});
+        inst(m,247,{done,0});inst(m,250,{valid,yes,done});inst(m,spv::OpLabel,{yes});
+        uint32_t delta=next++,index=next++,ptr=next++,loaded=0;
+        inst(m,130,{6,delta,effective,16});inst(m,194,{6,index,delta,19});
+        inst(m,spv::OpAccessChain,{8,ptr,2,10,index});
+        if(load){loaded=next++;inst(m,61,{6,loaded,ptr});}else inst(m,spv::OpStore,{ptr,data});
+        inst(m,249,{done});inst(m,spv::OpLabel,{done});
+        uint32_t result=0;
+        if(load){result=next++;inst(m,245,{6,result,loaded,yes,10,current_label});}
+        current_label=done;return result;
+      };
+      const uint32_t loaded=access(src,kc[3],true,0);
+      access(dst,kc[4],false,loaded);
+      inst(m,128,{6,lastnext,loaded,10}); // identity, defined for loop backedge
+      inst(m,249,{cont});inst(m,spv::OpLabel,{cont});
+      inst(m,128,{6,srcnext,src,kc[1]});inst(m,128,{6,dstnext,dst,kc[2]});
+      inst(m,128,{6,countnext,count,27});inst(m,249,{header});
+      inst(m,spv::OpLabel,{merge});current_label=merge;
+      ids[i]=last;final_source[i]=src;final_dest[i]=dst;continue;
     }
     if(n.op==U32Op::LoopAdd || n.op==U32Op::LoopAddUniform) {
       const bool runtime=n.op==U32Op::LoopAddUniform;
