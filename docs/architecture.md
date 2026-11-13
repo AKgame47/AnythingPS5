@@ -175,3 +175,5 @@ s0..s15) and runs one dispatch per clip component. The readback feeds
 test ABI: no vertex-stage inputs, exports or parameter cache, no Sony
 driver state. The single-store translator limit is why it takes four
 dispatches. Float results follow host Vulkan policy.
+
+`pnrGfxSetMesh` / `pnrGfxDrawMesh` / `pnrGfxMeshDraws` let a game supply its own vertices (x,y,z,r,g,b) and triangle indices. The shim validates and copies them (1..24 vertices because the RDNA kernel uses one lane per vertex, 3..384 indices, finite floats, in-range indices) and keeps the previous mesh when an upload fails. `ps_mesh_demo` exercises this under `pnr run`. Not a Sony API.
