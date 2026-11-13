@@ -313,7 +313,7 @@ touches nothing in the library.
   dispatch environment.
 
 
-## IF-GRAPH-03 Restricted compute translation (v9)
+## IF-GRAPH-03 Restricted compute translation (v10)
 
 Status: Experimental, Implemented (strict subset), Tested.
 
@@ -321,7 +321,7 @@ Status: Experimental, Implemented (strict subset), Tested.
   little-endian words without alignment assumptions; partial words fail.
   `translate_compute_words(words, guest_base, buffer_words=1, local_size_x=1, uniform_words=0, guest_base_high=0)` is the word-level entry point.
 - Result: `ok`, diagnostic `error`, `spirv`, `stored_value_known`,
-  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`, `required_uniform_words`, `host_float32`, `full64_pointers`. Every failure returns empty SPIR-V. `stored_value` is
+  `stored_value`, `required_buffer_words`, `guarded_memory`, `local_size_x`, `conditional_selection`, `required_uniform_words`, `host_float32`, `full64_pointers`, `structured_loop`. Every failure returns empty SPIR-V. `stored_value` is
   meaningful only when `stored_value_known` is true; runtime results are
   never invented by the compiler.
 - Explicit test ABI: one workgroup with 1..64 invocations, one fixed-size uint array SSBO at set 0/binding 0.
@@ -624,3 +624,52 @@ consume one word, with PC/truncation regression checks.
   special destinations, compare/carry SCC mismatch, workgroup mode and
   malformed IR. Existing guard tests now accept formerly rejected full64
   shapes but test actual runtime policy in this corpus.
+
+
+### Strict counted accumulator loops
+
+- A separate experimental shape recognizes exactly five consecutive decoded
+  instructions: s_mov_b32 sCounter, N; v_add_nc_u32 vAccum, delta, vAccum;
+  s_sub_u32 sCounter, sCounter, 1; s_cmp_eq_u32 sCounter, 0;
+  s_cbranch_scc0 back-to-add. N must be a literal or inline constant 1..64.
+  Backedge must name the decoded add's exact byte PC (including literals).
+  Zero is rejected: this is a do-while guest pattern, so zero would underflow
+  instead of representing a zero-trip loop. Counts >64 or runtime SGPR
+  counts are rejected, never clamped or silently unrolled.
+- Accumulator must be defined before the loop. Delta may be an initialized
+  VGPR, ordinary SGPR, literal or inline integer, but must not be accumulator
+  itself or the changing scalar counter. Delta values may differ by lane;
+  count and control are uniform. Only this single uint32 add is allowed in
+  the body. No loop-body memory, scalar effects beyond the counter, nested
+  or repeated loops, combined conditional selection, alternate compare,
+  decrement or branch modes, early exits or general CFG are supported.
+- Real SPIR-V OpLoopMerge has distinct header/body/continue/merge blocks.
+  Header Phi nodes carry iteration and accumulator values; body emits IAdd;
+  continue increments the loop iteration. Loop result is the final Phi
+  accumulator. Arithmetic is modulo 2^32. This is not compile-time result
+  evaluation or host execution of guest iterations. Requires no new device
+  capability. structured_loop=true marks successful loop translation.
+- At exit the guest scalar counter is exactly zero, comparison SCC is true
+  and arithmetic carry SCC is invalidated, as after the guest comparison.
+  Other registers keep immutable SSA values. No address-affine facts are
+  invented for the accumulator result. In multi-mode, using it as a pointer
+  fails the usual proof; single-mode may still use emitted bounds guards.
+  Memory outside the loop retains all bounded-SSBO/alignment/alias rules.
+- Low-level LoopAdd IR has a=earlier initial node, b=earlier delta node,
+  c=literal count 1..64. Undefined/forward/store-result references and invalid
+  counts fail emission. The translator accepts one loop only; the low-level
+  emitter is not itself a guest CFG verifier or an alias-proof interface.
+- 21 modules validate for Vulkan 1.0 and run on lavapipe: sixteen combinations
+  of local size/count 1,2,8,16,64 (local sizes 1/2/8/64, counts 1/2/16/64),
+  plus inline/literal operand forms, runtime uniform delta, exit counter and
+  post-loop guarded-load composition. Whole-buffer tests compare every lane,
+  inputs and sentinel with wraparound seeds. Byte API retains exact SPIR-V
+  and loop metadata. The tests assert actual OpLoopMerge emission.
+- Negative cases cover zero/huge/runtime counts, self/changing/undefined
+  delta, undefined accumulator, non-in-place or unsupported body, incorrect
+  decrement/counter/compare/backedge, special registers/modifiers, repeated
+  loops, loop+conditional region, stale carry, malformed IR references/count,
+  unproven loop-derived pointer and overlapping input/output.
+- Scalar decrement/equality/SCC0 meanings follow the AMD RDNA ISA:
+  https://gpuopen.com/download/RDNA_Shader_ISA_25September2020.pdf
+  No wave/EXEC/divergent loop semantics or commercial-shader ABI is implied.
