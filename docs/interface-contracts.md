@@ -464,3 +464,11 @@ Status: Experimental, Implemented (strict subset), Tested.
   base module and focused output checks for the additional shapes.
 - No general PS5 branch, VCC/EXEC, scalar ALU flags, wave convergence,
   divergent multi-invocation control flow or commercial shader support.
+
+
+## Shader audit fixtures
+
+`pnr_shader_checks` runs compact synthetic fixtures and deterministic mutation
+diagnostics; CTest name `pnr_shader_fixtures`. See `shader-audit.md` for exact
+coverage, sanitizer scope and reproduction. Shared scalar literal selectors
+consume one word, with PC/truncation regression checks.
