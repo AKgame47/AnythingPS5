@@ -122,6 +122,9 @@ set_target_properties(ps_lit_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 add_executable(ps_tex_demo examples/ps_tex_demo.cpp)
 target_link_libraries(ps_tex_demo PRIVATE pnr_psabi)
 set_target_properties(ps_tex_demo PROPERTIES BUILD_RPATH "$ORIGIN")
+add_executable(ps_littex_demo examples/ps_littex_demo.cpp)
+target_link_libraries(ps_littex_demo PRIVATE pnr_psabi)
+set_target_properties(ps_littex_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 add_executable(ps_cube_demo examples/ps_cube_demo.cpp)
 target_link_libraries(ps_cube_demo PRIVATE pnr_psabi)
 set_target_properties(ps_cube_demo PROPERTIES BUILD_RPATH "$ORIGIN")
@@ -137,6 +140,7 @@ target_compile_definitions(pnr_tests PRIVATE
   PNR_PS_MESH_DEMO_PATH="$<TARGET_FILE:ps_mesh_demo>"
   PNR_PS_LIT_DEMO_PATH="$<TARGET_FILE:ps_lit_demo>"
   PNR_PS_TEX_DEMO_PATH="$<TARGET_FILE:ps_tex_demo>"
+  PNR_PS_LITTEX_DEMO_PATH="$<TARGET_FILE:ps_littex_demo>"
   PNR_PSABI_DIR="$<TARGET_FILE_DIR:pnr_psabi>")
 target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics pnr_shader)
 
@@ -146,6 +150,7 @@ add_test(NAME pnr_cube_run COMMAND pnr run $<TARGET_FILE:ps_cube_demo>)
 add_test(NAME pnr_mesh_run COMMAND pnr run $<TARGET_FILE:ps_mesh_demo>)
 add_test(NAME pnr_lit_run COMMAND pnr run $<TARGET_FILE:ps_lit_demo>)
 add_test(NAME pnr_tex_run COMMAND pnr run $<TARGET_FILE:ps_tex_demo>)
+add_test(NAME pnr_littex_run COMMAND pnr run $<TARGET_FILE:ps_littex_demo>)
 set_tests_properties(pnr_cube_run PROPERTIES
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   PASS_REGULAR_EXPRESSION "RESULT: RUN OK"
@@ -154,6 +159,10 @@ set_tests_properties(pnr_mesh_run PROPERTIES
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   PASS_REGULAR_EXPRESSION "RESULT: RUN OK"
   FAIL_REGULAR_EXPRESSION "FAILED;BLOCKED;ps_mesh_demo: FAIL;SKIPPED   demo app")
+set_tests_properties(pnr_littex_run PROPERTIES
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  PASS_REGULAR_EXPRESSION "RESULT: RUN OK"
+  FAIL_REGULAR_EXPRESSION "FAILED;BLOCKED;ps_littex_demo: FAIL;SKIPPED   demo app")
 set_tests_properties(pnr_tex_run PROPERTIES
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   PASS_REGULAR_EXPRESSION "RESULT: RUN OK"
