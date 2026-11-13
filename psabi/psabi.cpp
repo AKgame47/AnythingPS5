@@ -23,6 +23,10 @@
 #include <unistd.h>
 
 #include "compat/services.hpp"
+#include "graphics/demo/cube_shaders.hpp"
+#include "graphics/demo/spin_shaders.hpp"
+#include "graphics/mat4.hpp"
+#include "graphics/vulkan.hpp"
 
 namespace {
 pnr::compat::FileSystemService& jail() {
@@ -35,9 +39,96 @@ pnr::compat::FileSystemService& jail() {
 struct Mapping { void* start; std::size_t size; };
 std::mutex g_mu;
 std::vector<Mapping>& maps() { static std::vector<Mapping> m; return m; }
+
+// ---- PNR graphics extension (NOT Sony API names) ------------------------
+// pnrGfx* calls give a game an offscreen, headless 3D cube renderer backed
+// by the Vulkan backend. "Present" writes a PPM into the game's jail; there
+// is no swapchain or display. Status: Implemented, Tested on software Vulkan.
+struct Gfx {
+  pnr::graphics::VulkanBackend vk;
+  bool up = false;
+  uint32_t w = 0, h = 0, frames = 0;
+  std::vector<float> verts;
+  std::vector<uint32_t> idx, vs, fs;
+  std::vector<uint8_t> last;
+  std::string error;
+};
+Gfx& gfx() {
+  static Gfx* g = new Gfx();  // intentionally leaked: no driver teardown at exit
+  return *g;
+}
 }  // namespace
 
 extern "C" {
+
+const char* pnrGfxLastError() { return gfx().error.c_str(); }
+
+std::int32_t pnrGfxInit(std::uint32_t w, std::uint32_t h) {
+  Gfx& g = gfx();
+  if (g.up) return 0;
+  if (w == 0 || h == 0 || w > 1024 || h > 1024) {
+    g.error = "pnrGfxInit: size must be 1..1024";
+    return -2;
+  }
+  if (auto st = g.vk.open(); !st) { g.error = st.error.message; return -10; }
+  if (auto st = g.vk.create_instance("pnr-game"); !st) { g.error = st.error.message; return -11; }
+  if (g.vk.devices().empty()) { g.error = "no Vulkan device"; return -11; }
+  if (auto st = g.vk.create_device(0); !st) { g.error = st.error.message; return -12; }
+  pnr::graphics::cube_mesh(&g.verts, &g.idx);
+  g.vs.assign(std::begin(cube_vert), std::end(cube_vert));
+  g.fs.assign(std::begin(spin_frag), std::end(spin_frag));
+  g.w = w; g.h = h; g.up = true;
+  return 0;
+}
+
+// Renders one frame of the unit cube rotated by pitch (X) then yaw (Y).
+// Returns the number of non-background pixels, or a negative error.
+std::int32_t pnrGfxDrawCube(float yaw, float pitch) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  using namespace pnr::graphics;
+  const Mat4 P = mat4_perspective(1.0471976f, (float)g.w / (float)g.h, 0.1f, 10.0f);
+  const Mat4 T = mat4_translate(0, 0, -3);
+  const Mat4 M = mat4_mul(mat4_rotate_x(pitch), mat4_rotate_y(yaw));
+  std::vector<std::vector<uint32_t>> push{mat4_words(mat4_mul(P, mat4_mul(T, M)))};
+  const float black[4] = {0, 0, 0, 1};
+  std::vector<std::vector<uint8_t>> out;
+  auto st = g.vk.render_mesh_frames_rgba(g.w, g.h, g.vs, g.fs, g.verts, g.idx, true,
+                                         push, black, &out);
+  if (!st || out.size() != 1) { g.error = st ? "no frame" : st.error.message; return -3; }
+  g.last = std::move(out[0]);
+  ++g.frames;
+  std::int32_t cov = 0;
+  for (size_t i = 0; i + 3 < g.last.size(); i += 4)
+    if (g.last[i] | g.last[i + 1] | g.last[i + 2]) ++cov;
+  return cov;
+}
+
+// "Present": write the last frame as a binary PPM at a jail path. Returns
+// bytes written or a negative error. No display is involved.
+std::int64_t pnrGfxPresentToFile(const char* path) {
+  Gfx& g = gfx();
+  std::string host;
+  if (!g.up || g.last.empty()) { g.error = "nothing rendered yet"; return -1; }
+  if (path == nullptr || !jail().resolve(path, host)) { g.error = "bad jail path"; return -2; }
+  const auto slash = host.find_last_of('/');
+  if (slash != std::string::npos && slash > 0) {
+    std::error_code ec;
+    std::filesystem::create_directories(host.substr(0, slash), ec);
+    if (ec) { g.error = "cannot create jail directory"; return -3; }
+  }
+  std::string data = "P6\n" + std::to_string(g.w) + " " + std::to_string(g.h) + "\n255\n";
+  for (size_t i = 0; i + 3 < g.last.size(); i += 4) data.append(reinterpret_cast<const char*>(&g.last[i]), 3);
+  FILE* f = std::fopen(host.c_str(), "wb");
+  if (!f) { g.error = "cannot open output"; return -3; }
+  const size_t n = std::fwrite(data.data(), 1, data.size(), f);
+  std::fclose(f);
+  return n == data.size() ? (std::int64_t)n : -3;
+}
+
+std::uint32_t pnrGfxFramesRendered() { return gfx().frames; }
+
+
 
 void* sceKernelAlloc(std::size_t size) {
   return size == 0 ? nullptr : std::malloc(size);
