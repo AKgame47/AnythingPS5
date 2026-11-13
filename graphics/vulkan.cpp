@@ -120,7 +120,9 @@ std::string VulkanBackend::device_name() const {
 }
 
 Status VulkanBackend::run_compute_words(const std::vector<uint32_t>& spirv,
-                                        std::vector<uint32_t>* io) {
+                                        std::vector<uint32_t>* io,
+                                        const std::vector<uint32_t>& uniforms) {
+  if(uniforms.size()>16) return fail("vulkan", "uniform push constants limited to 16 words");
   if (!device_ || !io || io->empty())
     return fail("vulkan", "run_compute_words needs a device and a non-empty buffer");
   const VkDeviceSize bytes = io->size() * sizeof(uint32_t);
@@ -202,10 +204,13 @@ Status VulkanBackend::run_compute_words(const std::vector<uint32_t>& spirv,
       device_, &lci, nullptr, &dlayout);
   if (r != VK_SUCCESS) return fail("vulkan", "vkCreateDescriptorSetLayout");
 
+  VkPushConstantRange push_range{VK_SHADER_STAGE_COMPUTE_BIT,0,
+                                  static_cast<uint32_t>(uniforms.size()*4)};
   VkPipelineLayoutCreateInfo plci{};
   plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
   plci.setLayoutCount = 1;
   plci.pSetLayouts = &dlayout;
+  if(!uniforms.empty()) {plci.pushConstantRangeCount=1;plci.pPushConstantRanges=&push_range;}
   VkPipelineLayout playout = 0;
   r = fn<VkResult (*)(VkDevice, const VkPipelineLayoutCreateInfo*, void*,
                       VkPipelineLayout*)>(vkCreatePipelineLayout)(
@@ -293,6 +298,10 @@ Status VulkanBackend::run_compute_words(const std::vector<uint32_t>& spirv,
               const VkDescriptorSet*, uint32_t, const uint32_t*)>(
       vkCmdBindDescriptorSets)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, playout,
                                0, 1, &dset, 0, nullptr);
+  if(!uniforms.empty())
+    fn<void (*)(VkCommandBuffer,VkPipelineLayout,VkFlags,uint32_t,uint32_t,const void*)>(
+      vkCmdPushConstants)(cmd,playout,VK_SHADER_STAGE_COMPUTE_BIT,0,
+                          static_cast<uint32_t>(uniforms.size()*4),uniforms.data());
   fn<void (*)(VkCommandBuffer, uint32_t, uint32_t, uint32_t)>(vkCmdDispatch)(
       cmd, 1, 1, 1);
   fn<VkResult (*)(VkCommandBuffer)>(vkEndCommandBuffer)(cmd);
