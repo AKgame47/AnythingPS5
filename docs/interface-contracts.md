@@ -229,7 +229,8 @@ MISMATCH. Non-packages fail at archive validation.
 - `bind(nid, &fn, &error) -> SCE_OK` for implemented symbols; `SCE_KERNEL_ERROR_EINVAL` for declared-only symbols (known but not implemented); `SCE_KERNEL_ERROR_UNKNOWN` for NIDs outside the taxonomy. Never silently substitutes.
 - Implemented (libkernel): `sceKernelUsleep`, `sceKernelSleep`, `sceKernelAlloc`, `sceKernelFree`, `sceKernelCreateThread` (detached host thread; handle/join API is Planned).
 - Implemented (libSceLibcInternal): `printf` (BOUNDED formatter: %d %i %u %x %s %c %% only, max 8 variadic args - the honest limit of a NID trampoline; unsupported specifiers pass through literally), `malloc`, `free`, `memcpy`, `memset`, `strlen`, `strcmp`.
-- Declared-only (honest, no host implementation): `sceKernelMapMemory`, `sceKernelMTypeprotect`.
+- Implemented (libkernel memory): `sceKernelMapMemory` (anonymous private mmap only), `sceKernelMunmap` (full/head/tail unmap of own mappings; middle-split EINVAL), `sceKernelMTypeprotect` (mprotect on own mappings), `sceKernelQueryMemoryProtection` (own mappings only - foreign ranges return EINVAL, never guessed).
+- Declared-only (honest, no host implementation): `sceKernelReserveVirtualRange`, `sceKernelAvailableFlexibleMemorySize`.
 
 ## IF-IMP-01 Import Resolution (v1) — Implemented, Tested
 
