@@ -30,6 +30,8 @@ enum : int {
   kErrRateLimited = 211,    // HTTP 429
   kErrServer = 212,         // HTTP 5xx
   kErrNetwork = 213,        // no response at all (reserved for the transport slice)
+  kErrTransport = 214,      // libcurl missing, TLS verification failed, or other transport failure
+  kErrBlockedHost = 215,    // URL refused by the host allow-list (not Sony's official hosts, or not https)
   kErrBadJson = 220,        // response is not valid JSON
   kErrSchema = 221,         // valid JSON, not the expected shape (API change?)
   kErrSonyErrors = 222,     // response carried a GraphQL errors array and no data
