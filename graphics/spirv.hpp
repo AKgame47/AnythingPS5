@@ -50,7 +50,8 @@ inline constexpr uint32_t DecorBinding = 33;
 }  // namespace spv
 
 // Small straight-line uint IR. Operands index earlier nodes (SSA), not
-// guest registers. Load/Store address the first SSBO word only. The emitter
+// guest registers. Load.a is a word index; Store.a is a value node and
+// Store.b is a word index. Indices must be less than buffer_words. The emitter
 // returns empty for malformed IR instead of emitting invalid SPIR-V.
 enum class U32Op { Constant, Load, Add, Sub, And, Or, Xor, Store };
 struct U32Node { U32Op op; uint32_t a = 0, b = 0; };
@@ -61,7 +62,8 @@ public:
   // end-to-end shape: enough to prove emission, validation, upload and
   // execution for real, and the honest base wider emission grows from.
   static std::vector<uint32_t> compute_write_u32(uint32_t value);
-  static std::vector<uint32_t> compute_u32(const std::vector<U32Node>& nodes);
+  static std::vector<uint32_t> compute_u32(const std::vector<U32Node>& nodes,
+                                           uint32_t buffer_words = 1);
 };
 
 // Pack a NUL-terminated string into SPIR-V words (little-endian, padded).
