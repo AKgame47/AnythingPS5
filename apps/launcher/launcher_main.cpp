@@ -13,6 +13,7 @@
 
 #include "launcher/launcher_core.hpp"
 #include "sandbox/sandbox.hpp"
+#include "research/research.hpp"
 #include "scan/scan.hpp"
 #include "psn/psn_cli.hpp"
 #include "store/store_cli.hpp"
@@ -38,6 +39,9 @@ static void usage() {
             "  pnr-launcher store source add <id> <https-index-url> --rights <statement> | store source remove <id> [--yes] | store source list\n"
             "  pnr-launcher store get <source> <package> | store queue list|run [<source> <package>] | store queue pause|resume|cancel <source> <package> [--yes] | store install <source> <package>\n"
             "  pnr-launcher store refresh [id] | store search [text] [--source id] | store show <source> <package> [--json]\n"
+            "  pnr-launcher research log add <text> | log list [--limit N] | log verify   (append-only, hash-chained)\n"
+            "  pnr-launcher research fetch <https-url> <out-file> --rights <statement> [--sha256 HEX] [--force]   (user-supplied URL only)\n"
+            "  pnr-launcher research inspect <file> [--log]   (read-only; recognises PNR formats, never opens Sony packages)\n"
             "  pnr-launcher psn status [--json]   (local state; no network)\n"
             "  pnr-launcher psn set-token [--file PATH]   (token from stdin or a file, never argv)\n"
             "  pnr-launcher psn import-json <file> [--complete] [--json]   (saved purchased-games response)\n"
@@ -53,7 +57,8 @@ int main(int argc, char** argv) {
   bool json = false;
   std::vector<std::string> pos, gameargs;
   bool after = false, complete = false, forget = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
-  bool sandbox_on = false, allow_flagged = false;
+  bool sandbox_on = false, allow_flagged = false, force = false, log_it = false;
+  std::string sha256_arg;
   std::string note, limit_s = "20", file, platform, rights, source;
   for (size_t i = 1; i < a.size(); ++i) {
     if (after) gameargs.push_back(a[i]);
@@ -62,6 +67,9 @@ int main(int argc, char** argv) {
     else if (a[i] == "--yes") yes = true;
     else if (a[i] == "--sandbox") sandbox_on = true;
     else if (a[i] == "--allow-flagged") allow_flagged = true;
+    else if (a[i] == "--force") force = true;
+    else if (a[i] == "--log") log_it = true;
+    else if (a[i] == "--sha256" && i + 1 < a.size()) sha256_arg = a[++i];
     else if (a[i] == "--overwrite") overwrite = true;
     else if (a[i] == "--orphans") orphans = true;
     else if (a[i] == "--complete") complete = true;
@@ -192,6 +200,11 @@ int main(int argc, char** argv) {
   } else if (a[0] == "sandbox" && pos.size() == 1 && pos[0] == "probe") {
     std::fputs(pnr::sandbox::describe(pnr::sandbox::probe()).c_str(), stdout);
     rc = 0;
+  } else if (a[0] == "research" && !pos.empty()) {
+    pnr::research::CliOptions ro; ro.rights = rights; ro.expect_sha256 = sha256_arg; ro.limit = limit_s; ro.json = json; ro.force = force; ro.log_it = log_it;
+    std::string out;
+    rc = pnr::research::cmd_research(pos, ro, pnr::store::store_dir_for(dbp ? dbp : "./pnr_data/library.db") + "/research", &out);
+    std::fputs(out.c_str(), rc == 0 ? stdout : (rc == 64 ? stdout : stderr));
   } else if (a[0] == "store" && !pos.empty()) {
     pnr::store::Registry reg(pnr::store::store_dir_for(dbp ? dbp : "./pnr_data/library.db"));
     std::string out;
