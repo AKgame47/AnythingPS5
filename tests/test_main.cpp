@@ -798,6 +798,39 @@ int main() {
     std::filesystem::remove_all(fsroot);
   }
 
+  // --- SHOWCASE: PS-style demo binary dispatched through the PS-ABI shim ---
+  {
+#ifdef PNR_PS_DEMO_PATH
+    const std::string jail = "/tmp/pnr_psdemo_jail_" + std::to_string(::getpid());
+    std::filesystem::remove_all(jail);
+    pnr::loader::NativeLoader loader;
+    auto lr = loader.launch(PNR_PS_DEMO_PATH, {},
+                            {"PNR_JAIL_ROOT=" + jail,
+                             std::string("LD_LIBRARY_PATH=") + PNR_PSABI_DIR});
+    CHECK(lr.validated && lr.started && lr.finished,
+          "psdemo: launched and finished");
+    CHECK(!lr.signaled && lr.exit_code == 0,
+          "psdemo: all sce calls dispatched, exit 0");
+    // and the proof the game wrote really sits inside the jail
+    std::ifstream proof(jail + "/psdemo_proof.txt");
+    std::string content((std::istreambuf_iterator<char>(proof)),
+                        std::istreambuf_iterator<char>());
+    CHECK(content == "proof the sce file calls work",
+          "psdemo: jailed proof file has exact content");
+    // its imports classify prx-implemented with the launch-time registry
+    pnr::prx::PrxRegistry reg;
+    pnr::compat::FileSystemService gfs(jail);
+    pnr::prx::PsFileTable gtab(gfs);
+    reg.install_file_calls(&gtab);
+    pnr::loader::ImportResolution ir;
+    CHECK(pnr::loader::resolve_imports(PNR_PS_DEMO_PATH, reg, &ir),
+          "psdemo: imports resolve");
+    CHECK(ir.prx_implemented >= 14 && ir.unknown == 0,
+          "psdemo: every sce import is implemented");
+    std::filesystem::remove_all(jail);
+#endif
+  }
+
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
