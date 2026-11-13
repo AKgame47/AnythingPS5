@@ -3,6 +3,7 @@
 #include "graphics/rdna_vertex.hpp"
 #include "graphics/demo/clip_shaders.hpp"
 #include "graphics/demo/cube_shaders.hpp"
+#include "graphics/demo/lit_shaders.hpp"
 #include "graphics/demo/spin_shaders.hpp"
 #include <cmath>
 #include <cstdio>
@@ -76,6 +77,27 @@ void pnr_rdna_vertex_tests(int& pass,int& fail) {
       std::ofstream o(pp,std::ios::binary);o<<"P6\n"<<W*N<<" "<<H<<"\n255\n";
       for(uint32_t y=0;y<H;++y)for(uint32_t k=0;k<N;++k)for(uint32_t x=0;x<W;++x)o.write(reinterpret_cast<const char*>(&got[k][(y*W+x)*4]),3);
     }
+  }
+  // ---- per-vertex Lambert dot via the translated dot3 kernel ----
+  {
+    auto tk=pnr::shader::translate_compute_words(rdna_dot3_kernel(24),kRdnaVertexBase,96,24,3);
+    check(tk.ok&&tk.host_float32&&tk.required_uniform_words==3,"rdna-light: dot3 kernel translates (float32, 3 uniform words)");
+    std::vector<float> nrm;for(size_t i=0;i<24;++i){double a=0.37*i,b=0.21*i+0.5;nrm.push_back((float)(std::cos(a)*std::cos(b)));nrm.push_back((float)std::sin(b));nrm.push_back((float)(std::sin(a)*std::cos(b)));}
+    const float L[3]={0.3f,-0.5f,0.8124f};std::vector<float> dd;
+    auto s=rdna_light_dots(vk,nrm,L,&dd);
+    float worst=0;bool ok=bool(s)&&dd.size()==24;
+    for(size_t i=0;ok&&i<24;++i){float r=(L[0]*nrm[i*3]+L[1]*nrm[i*3+1])+L[2]*nrm[i*3+2];worst=std::max(worst,std::fabs(r-dd[i]));}
+    std::printf("  rdna-light: max |kernel - CPU float dot| over 24 normals = %.3g\n",(double)worst);
+    check(ok&&worst<1e-6f,"rdna-light: translated dot3 matches the CPU float dot (<1e-6)");
+    check(!rdna_light_dots(vk,{},L,&dd).ok,"rdna-light: empty normals rejected");
+    check(!rdna_light_dots(vk,std::vector<float>(75,0.0f),L,&dd).ok,"rdna-light: more than 24 normals rejected");
+    check(!rdna_light_dots(vk,nrm,L,nullptr).ok,"rdna-light: null output rejected");
+    std::vector<uint8_t> img;std::vector<std::vector<uint8_t>> frs;
+    std::vector<uint32_t> lvs(std::begin(lit_clip_vert),std::end(lit_clip_vert)),lh(std::begin(lit_hand_vert),std::end(lit_hand_vert)),lf(std::begin(lit_frag),std::end(lit_frag));
+    check(!vk.render_lit_clip_mesh_rgba(W,H,lvs,lf,std::vector<float>(9),idx,true,black,&img).ok,"rdna-light: lit clip vertex data not multiple of 8 floats rejected");
+    check(!vk.render_lit_clip_mesh_rgba(W,H,lvs,lf,std::vector<float>(8),idx,true,black,nullptr).ok,"rdna-light: lit clip null image rejected");
+    check(!vk.render_lit_mesh_frames_rgba(W,H,lh,lf,std::vector<float>(10),idx,true,{std::vector<uint32_t>(20)},black,&frs).ok,"rdna-light: lit mesh vertex data not multiple of 9 floats rejected");
+    check(!vk.render_lit_mesh_frames_rgba(W,H,lh,lf,std::vector<float>(9*24),idx,true,{std::vector<uint32_t>(33)},black,&frs).ok,"rdna-light: lit push constants over 32 words rejected");
   }
   std::vector<float> clip;
   check(!rdna_transform_points(vk,{},mat4_words(mat4_identity()),&clip).ok,"rdna-vertex: empty point list rejected");
