@@ -164,7 +164,7 @@ criterion in `docs/feasibility-report.md` §8.
 
 ## Game-driven rendering
 
-`libpnr_psabi.so` exports a small PNR extension, `pnrGfxInit`, `pnrGfxDrawCube`, `pnrGfxPresentToFile`, `pnrGfxFramesRendered`, `pnrGfxLastError`. They are PNR names, not Sony APIs, and the import resolver classifies any `pnr*` import as `pnr-extension`. A game calls them from its own frame loop; the shim runs the 3D draw path in the game process and "presents" by writing a PPM through the game's jail. `pnr run` step 5 reports the offscreen renderer (or BLOCKED without a Vulkan device) and step 8 counts the frame files. No swapchain, display, audio or input here, and the draw path is the hand-authored cube pipeline; translated RDNA vertex output is not connected yet (next slice).
+`libpnr_psabi.so` exports a small PNR extension, `pnrGfxInit`, `pnrGfxDrawCube`, `pnrGfxPresentToFile`, `pnrGfxFramesRendered`, `pnrGfxLastError`. They are PNR names, not Sony APIs, and the import resolver classifies any `pnr*` import as `pnr-extension`. A game calls them from its own frame loop; the shim runs the 3D draw path in the game process and "presents" by writing a PPM through the game's jail. `pnr run` step 5 reports the offscreen renderer (or BLOCKED without a Vulkan device) and step 8 counts the frame files. No swapchain, display, audio or input here, and `pnrGfxDrawCube` is the hand-authored cube pipeline. `pnrGfxDrawCubeRdna` and `pnrGfxRdnaFramesRendered` route the vertex stage through the translated-RDNA compute-as-vertex bridge below (PNR test ABI, not a real vertex stage); `ps_cube_demo` presents those frames and byte-compares them with the hand-authored reference.
 
 ## Compute-as-vertex bridge (Experimental)
 
