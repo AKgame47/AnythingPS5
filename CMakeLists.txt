@@ -22,11 +22,17 @@ target_include_directories(pnr_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(pnr_loader loader/elf_parser.cpp loader/native_loader.cpp loader/nid.cpp)
 
 add_library(pnr_prx prx/prx.cpp prx/prx_file.cpp loader/import_resolver.cpp)
+
+add_library(pnr_psabi SHARED psabi/psabi.cpp)
+target_link_libraries(pnr_psabi PRIVATE pnr_compat)
+set_target_properties(pnr_psabi PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(pnr_prx PUBLIC pnr_loader pnr_compat)
 target_link_libraries(pnr_loader PUBLIC pnr_core)
 
 # MODULE 03 - compatibility services
 add_library(pnr_compat compat/services.cpp)
+# PIC: pnr_compat also links into the pnr_psabi shared library.
+set_target_properties(pnr_compat PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(pnr_compat PUBLIC pnr_core)
 
 # MODULE 05 - adaptive performance engine (deterministic rules)
@@ -95,10 +101,18 @@ target_link_libraries(pnr_make_package PRIVATE pnr_package pnr_library pnr_core)
 
 # Developer-controlled native test application ("demo game" v0)
 add_executable(pnr_test_app examples/test_app.cpp)
+add_executable(ps_demo examples/ps_demo.cpp)
+target_link_libraries(ps_demo PRIVATE pnr_psabi)
+set_target_properties(ps_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
 add_executable(pnr_tests tests/test_main.cpp)
+
+# Let the tests launch the real PS-style demo binary.
+target_compile_definitions(pnr_tests PRIVATE
+  PNR_PS_DEMO_PATH="$<TARGET_FILE:ps_demo>"
+  PNR_PSABI_DIR="$<TARGET_FILE_DIR:pnr_psabi>")
 target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx)
 
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
