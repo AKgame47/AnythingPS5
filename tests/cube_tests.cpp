@@ -8,6 +8,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <filesystem>
+#include <sstream>
+#include <unistd.h>
+#include "loader/import_resolver.hpp"
+#include "loader/native_loader.hpp"
+#include "prx/prx.hpp"
 void pnr_cube_tests(int& pass,int& fail) {
   using namespace pnr::graphics;
   auto check=[&](bool ok,const char* label){if(ok)++pass;else ++fail;std::printf("%s %s\n",ok?"PASS":"FAIL",label);};
@@ -120,6 +126,38 @@ void pnr_cube_tests(int& pass,int& fail) {
       }
     }
   }
+  // ---- the real program path: a game process drives the rotation ----
+#ifdef PNR_PS_CUBE_DEMO_PATH
+  {
+    const std::string jail="/tmp/pnr_cubedemo_jail_"+std::to_string(::getpid());
+    std::filesystem::remove_all(jail);
+    pnr::loader::NativeLoader loader;
+    auto lr=loader.launch(PNR_PS_CUBE_DEMO_PATH,{},{"PNR_JAIL_ROOT="+jail,std::string("LD_LIBRARY_PATH=")+PNR_PSABI_DIR});
+    check(lr.validated&&lr.started&&lr.finished&&!lr.signaled&&lr.exit_code==0,"cube game: ps_cube_demo launched as a game process, exit 0");
+    // frames the game presented must equal the harness render of the same MVPs
+    constexpr uint32_t N=8;bool all_same=true;uint32_t found=0;
+    std::vector<std::vector<uint32_t>> push;
+    for(uint32_t k=0;k<N;++k){Mat4 m=mat4_mul(mat4_rotate_x(0.5f),mat4_rotate_y(k*2.0f*(float)M_PI/N));push.push_back(mat4_words(mat4_mul(P,mat4_mul(T,m))));}
+    std::vector<std::vector<uint8_t>> ref;
+    bool rendered=bool(vk.render_mesh_frames_rgba(W,H,vs,fs,verts,idx,true,push,black,&ref))&&ref.size()==N;
+    for(uint32_t k=0;k<N&&rendered;++k){
+      char name[64];std::snprintf(name,sizeof name,"/frames/cube_%02u.ppm",k);
+      std::ifstream f(jail+name,std::ios::binary);
+      if(!f){all_same=false;continue;}
+      ++found;
+      std::stringstream ss;ss<<f.rdbuf();std::string d=ss.str();
+      const std::string hdr="P6\n96 96\n255\n";
+      if(d.size()!=hdr.size()+W*H*3||d.compare(0,hdr.size(),hdr)!=0){all_same=false;continue;}
+      for(uint32_t i=0;i<W*H;++i)for(int c=0;c<3;++c)
+        if((uint8_t)d[hdr.size()+i*3+c]!=ref[k][i*4+c])all_same=false;
+    }
+    check(rendered&&found==N,"cube game: all 8 presented PPM files exist inside the game's jail");
+    check(rendered&&all_same,"cube game: presented frames are byte-identical to the harness render of the same MVPs");
+    pnr::prx::PrxRegistry reg;pnr::loader::ImportResolution ir;
+    check(pnr::loader::resolve_imports(PNR_PS_CUBE_DEMO_PATH,reg,&ir)&&ir.pnr_extension==5&&ir.unknown==0,"cube game: pnrGfx* imports classify as pnr-extension (not host, not sce)");
+    std::filesystem::remove_all(jail);
+  }
+#endif
   // ---- honest rejection paths ----
   {
     std::vector<std::vector<uint8_t>> j;std::vector<std::vector<uint32_t>> one{mat4_words(mat4_identity())};
