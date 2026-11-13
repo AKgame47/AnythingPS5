@@ -10,6 +10,7 @@ namespace pnr::store {
 
 int cmd_source_add(Registry& r, const std::string& id, const std::string& url, const std::string& rights, bool json, std::string* out);
 int cmd_source_remove(Registry& r, const std::string& id, bool yes, bool json, std::string* out);
+int cmd_source_pin(Registry& r, const std::string& id, const std::string& pubkey_hex, bool json, std::string* out);  // "none" unpins
 int cmd_source_list(Registry& r, bool json, std::string* out);
 // `client` null = libcurl with TLS verification (tests inject a fake).
 int cmd_refresh(Registry& r, const std::string& id_or_empty, bool json, std::string* out, psn::HttpClient* client = nullptr);
