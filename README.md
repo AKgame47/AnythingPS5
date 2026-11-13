@@ -27,6 +27,8 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | `.pnrgame` package format: ustar + SHA-256 manifests, builder | Implemented, Tested |
 | Controlled importer: checksum verification, ELF validation, traversal protection, library registration | Implemented, Tested |
 | Game library metadata: SQLite store (games, installations, compatibility, launches) | Implemented, Tested |
+| Library run by game id: `pnr run <id>` resolves the installed package, gives the game its own jail, records the launch, and honestly advances compatibility Untested to Launches Only on a clean exit | Implemented, Tested |
+
 | CLI driving the full 10-step launch workflow with honest per-step results | Implemented, Tested |
 | Developer-controlled demo app running only on compat services | Implemented, Tested |
 | Vulkan graphics backend | Blocked in the dev sandbox (no GPU); Planned (Phase 2) |
@@ -40,7 +42,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**194/194 unit tests pass, 3/3 CTest suites pass** (unit, end-to-end native
+**198/198 unit tests pass, 4/4 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
 game). No benchmarks exist yet; none are claimed.
 
@@ -206,6 +208,77 @@ Every `sceKernel*` import classifies **prx-implemented** and the calls do
 real work through the shim: heap via `malloc`, anonymous memory via
 `mmap`/`mprotect`, files through the jailed file service (the proof file
 lands inside `./pnr_data/jail`), and a real measured sleep + thread.
+
+### The full game journey, by id
+
+A sce-only binary packages, imports, and runs by its library id - the same
+journey a real game would take. Captured verbatim:
+
+```text
+=== $ pnr_make_package psdemo.pnrgame ps-demo "PNR PS Demo" 0.1.0 bin/game bin/game=./ps_demo ===
+built psdemo.pnrgame (id=ps-demo version=0.1.0)
+
+=== $ pnr import psdemo.pnrgame ===
+IMPORT OK: PNR PS Demo 0.1.0 (x86-64)
+  id=ps-demo
+  installed=./pnr_data/games/ps-demo-0.1.0
+  compatibility=Untested (no execution test yet)
+
+=== $ pnr run ps-demo ===
+ps_demo: heap alloc/fill/free ok
+ps_demo: map/protect/unmap ok
+ps_demo: jailed file write/stat/seek/read ok
+ps_demo: usleep measured 20066us
+ps_demo: thread ran
+ps_demo: ALL SCE CALLS DISPATCHED OK
+[1-validate] SUCCESS   ./pnr_data/games/ps-demo-0.1.0/bin/game is a valid x86-64 ELF (13 segments)
+[1-imports] SUCCESS   22 imports: 8 host-resolved, 14 prx-implemented, 0 prx-declared-only, 0 unknown
+  [import] sceKernelMTypeprotect            prx-implemented
+  [import] sceKernelMapMemory               prx-implemented
+  [import] sceKernelMunmap                  prx-implemented
+  [import] sceKernelCreateThread            prx-implemented
+  [import] sceKernelWrite                   prx-implemented
+  [import] sceKernelOpen                    prx-implemented
+  [import] sceKernelFstat                   prx-implemented
+  [import] sceKernelLseek                   prx-implemented
+  [import] sceKernelFree                    prx-implemented
+  [import] strcmp                           prx-implemented
+  [import] sceKernelUsleep                  prx-implemented
+  [import] sceKernelClose                   prx-implemented
+  [import] sceKernelRead                    prx-implemented
+  [import] sceKernelAlloc                   prx-implemented
+[2-analysis] SUCCESS   logical cores=2; Vulkan=unavailable in sandbox (recorded, not guessed)
+[3-config] SUCCESS   default profile 'balanced' (no game profile found; defaults used openly)
+  [event] lifecycle -> VALIDATING
+  [event] lifecycle -> INITIALIZING
+  [event] lifecycle -> READY
+[4-runtime] SUCCESS   compat memory/fs/thread services up
+[5-graphics] BLOCKED   no Vulkan device in this environment; demo app is non-graphical. Blocked is reported, not papered over.
+[6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
+--- game output begin ---
+  [event] lifecycle -> RUNNING
+  [monitor] wall=0.023s exit=0
+--- game output end ---
+[7-start] SUCCESS   game ran natively in child process, exit code 0
+[8-monitor] SUCCESS   wall time + exit status measured (frame-time telemetry needs the graphics phase)
+[9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
+  [event] lifecycle -> STOPPING
+  [event] lifecycle -> TERMINATED
+[10-shutdown] SUCCESS   resources released, 0 errors recorded
+RESULT: RUN OK (real native execution)
+[library] launch recorded; compatibility=Launches Only (exit 0, gameplay unverified)
+
+=== $ pnr games ===
+PNR PS Demo  v0.1.0  [Launches Only]
+    ./pnr_data/games/ps-demo-0.1.0
+```
+
+The run needs no path: `pnr run ps-demo` resolves the installed package
+from the library, jails the game at `./pnr_data/jail/ps-demo`, and records
+the launch. Compatibility moves `Untested -> Launches Only` on a clean
+exit - "it started and finished" and nothing more; playability is never
+claimed. The sce shim itself is provided by the runtime (like firmware
+modules), not shipped inside the package.
 
 ## Windows build
 
