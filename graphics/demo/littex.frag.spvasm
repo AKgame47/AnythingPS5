@@ -1,0 +1,61 @@
+; PNR hand-authored lit textured fragment shader: rgb = texel.rgb * colour *
+; (0.25 + 0.75 * max(d, 0)), alpha 1. Texture at set 0 binding 0. GPL-2.0.
+               OpCapability Shader
+          %ext = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %inCol %inD %inUV %outCol
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %inCol Location 0
+               OpDecorate %inD Location 1
+               OpDecorate %inUV Location 2
+               OpDecorate %outCol Location 0
+               OpDecorate %tex DescriptorSet 0
+               OpDecorate %tex Binding 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+         %v2 = OpTypeVector %float 2
+         %v3 = OpTypeVector %float 3
+         %v4 = OpTypeVector %float 4
+         %f0 = OpConstant %float 0
+         %f1 = OpConstant %float 1
+       %famb = OpConstant %float 0.25
+      %fdiff = OpConstant %float 0.75
+        %img = OpTypeImage %float 2D 0 0 0 1 Unknown
+        %smp = OpTypeSampledImage %img
+       %pusm = OpTypePointer UniformConstant %smp
+        %pi2 = OpTypePointer Input %v2
+        %pi3 = OpTypePointer Input %v3
+        %pif = OpTypePointer Input %float
+        %po4 = OpTypePointer Output %v4
+        %tex = OpVariable %pusm UniformConstant
+      %inCol = OpVariable %pi3 Input
+        %inD = OpVariable %pif Input
+       %inUV = OpVariable %pi2 Input
+     %outCol = OpVariable %po4 Output
+       %main = OpFunction %void None %fn
+          %e = OpLabel
+          %s = OpLoad %smp %tex
+         %uv = OpLoad %v2 %inUV
+          %t = OpImageSampleImplicitLod %v4 %s %uv
+          %c = OpLoad %v3 %inCol
+          %d = OpLoad %float %inD
+         %dc = OpExtInst %float %ext FMax %d %f0
+         %dm = OpFMul %float %dc %fdiff
+          %k = OpFAdd %float %famb %dm
+         %t0 = OpCompositeExtract %float %t 0
+         %t1 = OpCompositeExtract %float %t 1
+         %t2 = OpCompositeExtract %float %t 2
+         %c0 = OpCompositeExtract %float %c 0
+         %c1 = OpCompositeExtract %float %c 1
+         %c2 = OpCompositeExtract %float %c 2
+         %a0 = OpFMul %float %t0 %c0
+         %a1 = OpFMul %float %t1 %c1
+         %a2 = OpFMul %float %t2 %c2
+          %r = OpFMul %float %a0 %k
+          %g = OpFMul %float %a1 %k
+          %b = OpFMul %float %a2 %k
+        %out = OpCompositeConstruct %v4 %r %g %b %f1
+               OpStore %outCol %out
+               OpReturn
+               OpFunctionEnd
