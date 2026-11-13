@@ -21,7 +21,11 @@ static void usage() {
             "  pnr-launcher scan <dir> [--json]   (read-only; imports and runs nothing)\n"
             "  pnr-launcher import <file.pnrgame> [--json]\n"
             "  pnr-launcher remove <game-id> [--keep-saves] [--yes] [--json]\n"
-            "  pnr-launcher verify <game-id> [--json]");
+            "  pnr-launcher verify <game-id> [--json]\n"
+            "  pnr-launcher doctor [--json]   (read-only health report)\n"
+            "  pnr-launcher clean --orphans [--yes] [--json]   (orphan install dirs only; dry run by default)\n"
+            "  pnr-launcher export <game-id> <out.tar> [--json]   (back up saves)\n"
+            "  pnr-launcher restore-saves <game-id> <in.tar> [--overwrite] [--json]");
 }
 
 int main(int argc, char** argv) {
@@ -29,13 +33,15 @@ int main(int argc, char** argv) {
   if (a.empty()) { usage(); return 64; }
   bool json = false;
   std::vector<std::string> pos, gameargs;
-  bool after = false, have_note = false, yes = false, keep = false;
+  bool after = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
   std::string note, limit_s = "20";
   for (size_t i = 1; i < a.size(); ++i) {
     if (after) gameargs.push_back(a[i]);
     else if (a[i] == "--") after = true;
     else if (a[i] == "--json") json = true;
     else if (a[i] == "--yes") yes = true;
+    else if (a[i] == "--overwrite") overwrite = true;
+    else if (a[i] == "--orphans") orphans = true;
     else if (a[i] == "--keep-saves") keep = true;
     else if (a[i] == "--note" && i + 1 < a.size()) note = a[++i], have_note = true;
     else if (a[i] == "--limit" && i + 1 < a.size()) limit_s = a[++i];
@@ -109,6 +115,27 @@ int main(int argc, char** argv) {
     auto o = core.verify(pos[0]);
     std::fputs((json ? render_verify_json(pos[0], o) + "\n" : render_verify_text(pos[0], o)).c_str(), stdout);
     rc = !o.found ? 2 : o.ok ? 0 : 1;
+  } else if (a[0] == "doctor" && pos.empty()) {
+    auto r = core.doctor();
+    std::fputs((json ? render_doctor_json(r) + "\n" : render_doctor_text(r)).c_str(), stdout);
+    rc = r.ok ? 0 : 2;
+  } else if (a[0] == "clean" && pos.empty() && orphans) {
+    auto o = core.clean_orphans(yes);
+    std::fputs((json ? render_clean_json(o) + "\n" : render_clean_text(o)).c_str(), stdout);
+    bool bad = !o.ok;
+    for (const auto& i : o.items) if (!i.error.empty()) bad = true;
+    rc = bad ? 1 : o.needs_confirmation ? 3 : 0;
+  } else if (a[0] == "clean" && pos.empty()) {
+    std::fputs("launcher: clean needs --orphans (it removes only orphan install directories)\n", stderr);
+    rc = 64;
+  } else if (a[0] == "export" && pos.size() == 2) {
+    auto o = core.export_saves(pos[0], pos[1]);
+    std::fputs((json ? render_saves_json("export", o) + "\n" : render_saves_text("export", o)).c_str(), stdout);
+    rc = o.ok ? 0 : 1;
+  } else if (a[0] == "restore-saves" && pos.size() == 2) {
+    auto o = core.restore_saves(pos[0], pos[1], overwrite);
+    std::fputs((json ? render_saves_json("restore", o) + "\n" : render_saves_text("restore", o)).c_str(), stdout);
+    rc = o.ok ? 0 : 1;
   } else usage();
   core.close();
   return rc;
