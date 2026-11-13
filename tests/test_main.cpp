@@ -41,6 +41,7 @@ void pnr_launcher_tests(int& pass,int& fail);
 void pnr_launcher_mgmt_tests(int& pass,int& fail);
 void pnr_launcher_install_tests(int& pass,int& fail);
 void pnr_launcher_care_tests(int& pass,int& fail);
+void pnr_psn_tests(int& pass,int& fail);
 
 static int g_pass = 0, g_fail = 0;
 
@@ -2059,6 +2060,7 @@ int main() {
   pnr_launcher_mgmt_tests(g_pass,g_fail);
   pnr_launcher_install_tests(g_pass,g_fail);
   pnr_launcher_care_tests(g_pass,g_fail);
+  pnr_psn_tests(g_pass,g_fail);
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
