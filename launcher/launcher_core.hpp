@@ -146,6 +146,7 @@ bool valid_compat_state(const std::string& s);
 class LauncherCore {
 public:
   Status open(const std::string& db_path);
+  library::GameDb& db() { return db_; }
   void close();
   std::vector<GameEntry> list();
   // Exact game id only; never a prefix or fuzzy match.
