@@ -21,6 +21,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | PS NID computation + symbol lookup (SHA-1 based; algorithm adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5), GPL-2.0) | Implemented, Tested |
 | PRX system-library layer: libkernel (usleep/sleep/alloc/free/thread/mmap/mprotect/munmap/query; jailed file calls open/read/write/close/lseek/fstat) + libSceLibcInternal (printf-bounded/malloc/free/memcpy/memset/strlen/strcmp) bound by NID; taxonomy per AnyPS5, original implementations | Implemented, Tested |
 | Loader import resolution: ELF dynamic imports classified host / prx-implemented / prx-declared / unknown at launch; unimplemented never faked | Implemented, Tested |
+| PS-ABI shim + PS-style demo: `libpnr_psabi.so` exports real sce functions (alloc/free, usleep, thread, mmap family, jailed file I/O); `ps_demo` imports only sce* + libc and `pnr run` dispatches every sce import for real | Implemented, Tested |
 | Compat services: memory, timing, jailed filesystem, threads | Implemented, Tested |
 | Host OS abstraction (IF-OS): Linux backend (CPU/memory/power/process launch) | Implemented (Linux), Tested |
 | `.pnrgame` package format: ustar + SHA-256 manifests, builder | Implemented, Tested |
@@ -39,7 +40,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**189/189 unit tests pass, 3/3 CTest suites pass** (unit, end-to-end native
+**194/194 unit tests pass, 3/3 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
 game). No benchmarks exist yet; none are claimed.
 
@@ -150,6 +151,61 @@ machine define `PNR_USE_SYSTEM_SQLITE3` and use the system header.
 `pnr run` prints the master workflow's ten steps with explicit
 SUCCESS / FAILED / BLOCKED / SKIPPED markers — a BLOCKED graphics step is
 reported, never hidden.
+
+### `pnr run ./ps_demo` - the PS-style showcase
+
+`ps_demo` imports only `sceKernel*` (plus plain libc) symbols. The CLI
+preloads the PS-ABI shim (`LD_PRELOAD`), sets `PNR_JAIL_ROOT`, classifies
+the binary's imports, and runs it natively. Captured verbatim:
+
+```text
+ps_demo: heap alloc/fill/free ok
+ps_demo: map/protect/unmap ok
+ps_demo: jailed file write/stat/seek/read ok
+ps_demo: usleep measured 20066us
+ps_demo: thread ran
+ps_demo: ALL SCE CALLS DISPATCHED OK
+[1-validate] SUCCESS   ./ps_demo is a valid x86-64 ELF (13 segments)
+[1-imports] SUCCESS   22 imports: 8 host-resolved, 14 prx-implemented, 0 prx-declared-only, 0 unknown
+  [import] sceKernelMTypeprotect            prx-implemented
+  [import] sceKernelMapMemory               prx-implemented
+  [import] sceKernelMunmap                  prx-implemented
+  [import] sceKernelCreateThread            prx-implemented
+  [import] sceKernelWrite                   prx-implemented
+  [import] sceKernelOpen                    prx-implemented
+  [import] sceKernelFstat                   prx-implemented
+  [import] sceKernelLseek                   prx-implemented
+  [import] sceKernelFree                    prx-implemented
+  [import] strcmp                           prx-implemented
+  [import] sceKernelUsleep                  prx-implemented
+  [import] sceKernelClose                   prx-implemented
+  [import] sceKernelRead                    prx-implemented
+  [import] sceKernelAlloc                   prx-implemented
+[2-analysis] SUCCESS   logical cores=2; Vulkan=unavailable in sandbox (recorded, not guessed)
+[3-config] SUCCESS   default profile 'balanced' (no game profile found; defaults used openly)
+  [event] lifecycle -> VALIDATING
+  [event] lifecycle -> INITIALIZING
+  [event] lifecycle -> READY
+[4-runtime] SUCCESS   compat memory/fs/thread services up
+[5-graphics] BLOCKED   no Vulkan device in this environment; demo app is non-graphical. Blocked is reported, not papered over.
+[6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
+--- game output begin ---
+  [event] lifecycle -> RUNNING
+  [monitor] wall=0.023s exit=0
+--- game output end ---
+[7-start] SUCCESS   game ran natively in child process, exit code 0
+[8-monitor] SUCCESS   wall time + exit status measured (frame-time telemetry needs the graphics phase)
+[9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
+  [event] lifecycle -> STOPPING
+  [event] lifecycle -> TERMINATED
+[10-shutdown] SUCCESS   resources released, 0 errors recorded
+RESULT: RUN OK (real native execution)
+```
+
+Every `sceKernel*` import classifies **prx-implemented** and the calls do
+real work through the shim: heap via `malloc`, anonymous memory via
+`mmap`/`mprotect`, files through the jailed file service (the proof file
+lands inside `./pnr_data/jail`), and a real measured sleep + thread.
 
 ## Windows build
 
