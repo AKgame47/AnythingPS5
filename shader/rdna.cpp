@@ -240,15 +240,18 @@ const char* family_mnemonic(RdnaFamily f, uint32_t op) {
 // Returns false when the literal word is missing (honest truncation error).
 bool apply_literal(const std::vector<uint32_t>& code, size_t& wi,
                    RdnaInstruction& in, std::string& err) {
-  for (RdnaOperand* o : {&in.src0, &in.src1}) {
-    if (o->kind != RdnaOperandKind::LiteralConst) continue;
-    if (wi + in.word_count >= code.size()) {
-      err = "truncated literal constant after pc=" + std::to_string(in.pc);
-      return false;
-    }
-    o->value = code[wi + in.word_count];
-    o->signed_value = static_cast<int32_t>(o->value);
-    ++in.word_count;
+  // A literal word is shared by all literal source selectors in one
+  // instruction, not consumed once per operand.
+  const bool needed=in.src0.kind==RdnaOperandKind::LiteralConst ||
+                    in.src1.kind==RdnaOperandKind::LiteralConst;
+  if (!needed) return true;
+  if (wi+in.word_count>=code.size()) {
+    err="truncated literal constant after pc="+std::to_string(in.pc);
+    return false;
+  }
+  const uint32_t literal=code[wi+in.word_count++];
+  for(RdnaOperand* o:{&in.src0,&in.src1}) if(o->kind==RdnaOperandKind::LiteralConst) {
+    o->value=literal; o->signed_value=static_cast<int32_t>(literal);
   }
   return true;
 }
