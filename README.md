@@ -35,6 +35,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | RDNA shader decoder: all encoding families detected, field extraction for scalar+vector families, named mnemonic subset (scalar/vector partial), literals/64-bit words/truncation handled honestly; taxonomy adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5) (GPL-2.0) | Implemented (subset), Tested (synthetic words); SDWA/DPP + image/memory payload fields Planned |
 | RDNA bytes to SPIR-V: v_mov, flat_load_dword, uint32 add/sub/and/or/xor, one flat_store_dword + s_endpgm; SSA runtime data, explicit 1..64-invocation workgroup/bounded SSBO ABI (v0=local index in multi-invocation mode, disjoint affine outputs), static offsets plus runtime low-address bounds/alignment guards (invalid load=0/store=skip), checked host buffer length | Experimental, Tested (synthetic bytes, spirv-val, lavapipe readback for constant and runtime inputs); no commercial shaders, full 64-bit dynamic addressing or wave semantics |
 | Restricted conditional selection: single-invocation readfirstlane/scalar equality + one forward SCC0 skip over move-only body, branch/Phi merge | Experimental, Tested (runtime taken/fallthrough, spirv-val, lavapipe); no loops, nested branches, conditional memory effects or multi-invocation branch semantics |
+| Scalar/uniform inputs: initial s0..s15 from explicit runtime push constants, scalar copies, vector ALU broadcast and uniform-driven single-invocation selection | Experimental, Tested (changed uniforms on same SPIR-V, Vulkan shim + official headers, lavapipe); not a Sony user-data ABI |
 | Adaptive Performance Engine (deterministic rules, hardware class heuristic, closed-loop controller) | Implemented, Tested |
 | Laptop Optimization Manager (battery/balanced/max-performance caps) | Implemented, Tested |
 | Game services: virtual filesystem (jailed areas, per-game/user save isolation) | Implemented, Tested |
@@ -45,7 +46,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**467/467 unit tests pass, 5/5 CTest suites pass** (unit, end-to-end native
+**493/493 unit tests pass, 5/5 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
 game, plus compact shader fixtures/mutation diagnostics). Clean Release
 build with `-Werror` passes. ASan+UBSan unit/fixture runs pass with leak
