@@ -356,6 +356,12 @@ RdnaDecodeResult rdna_decode(const std::vector<uint32_t>& code) {
         in.memory_addr = w1 & 0xffu;
         in.memory_data = (w1 >> 8u) & 0xffu;
         in.memory_saddr = (w1 >> 16u) & 0x7fu;
+        if (in.opcode_id == 0x0cu) {
+          in.dst.kind = RdnaOperandKind::VectorReg;
+          in.dst.reg = w1 >> 24u;
+          in.mnemonic = "flat_load_dword";
+          in.supported = true;
+        }
         if (in.opcode_id == 0x1cu) {
           in.mnemonic = "flat_store_dword";
           in.supported = true; // named/decoded, not general execution support
