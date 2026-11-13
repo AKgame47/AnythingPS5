@@ -261,6 +261,7 @@ RdnaDecodeResult rdna_decode(const std::vector<uint32_t>& code) {
   while (wi < code.size()) {
     const uint32_t word = code[wi];
     RdnaInstruction in;
+    in.raw0 = word;
     in.pc = static_cast<uint32_t>(wi * 4);
     in.family = rdna_family_of(word);
     if (in.family == RdnaFamily::Unknown) {
@@ -279,6 +280,7 @@ RdnaDecodeResult rdna_decode(const std::vector<uint32_t>& code) {
       return r;
     }
 
+    if (in.word_count == 2) in.raw1 = code[wi + 1];
     switch (in.family) {
       case RdnaFamily::SOPP: {
         in.opcode_id = (word >> 16u) & 0x7fu;
@@ -344,6 +346,20 @@ RdnaDecodeResult rdna_decode(const std::vector<uint32_t>& code) {
         in.src1.kind = RdnaOperandKind::VectorReg;
         in.src1.reg = (word >> 9u) & 0xffu;
         in.dst.kind = RdnaOperandKind::VccLo;
+        break;
+      }
+      case RdnaFamily::FLAT: {
+        const uint32_t w1 = code[wi + 1];
+        in.opcode_id = (word >> 18u) & 0x7fu;
+        in.memory_offset = word & 0xfffu;
+        in.memory_segment = (word >> 14u) & 3u;
+        in.memory_addr = w1 & 0xffu;
+        in.memory_data = (w1 >> 8u) & 0xffu;
+        in.memory_saddr = (w1 >> 16u) & 0x7fu;
+        if (in.opcode_id == 0x1cu) {
+          in.mnemonic = "flat_store_dword";
+          in.supported = true; // named/decoded, not general execution support
+        }
         break;
       }
       case RdnaFamily::VOP3: {
