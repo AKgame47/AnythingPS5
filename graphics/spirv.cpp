@@ -149,6 +149,21 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
     if (n.op == U32Op::InvocationIndex) {
       ids[i]=next++; inst(m, 61, {6, ids[i], 21}); continue;
     }
+    if (n.op == U32Op::SelectEqual) {
+      for (uint32_t ref : {n.a,n.b,n.c,n.d})
+        if (ref>=i || !ids[ref]) return {};
+      const uint32_t cmp=next++, yes=next++, no=next++, merge=next++;
+      inst(m,170,{15,cmp,ids[n.a],ids[n.b]});
+      inst(m,247,{merge,0});
+      inst(m,250,{cmp,yes,no});
+      inst(m,spv::OpLabel,{yes}); inst(m,249,{merge});
+      inst(m,spv::OpLabel,{no}); inst(m,249,{merge});
+      inst(m,spv::OpLabel,{merge});
+      ids[i]=next++;
+      inst(m,245,{6,ids[i],ids[n.c],yes,ids[n.d],no});
+      current_label=merge;
+      continue;
+    }
     if (n.op == U32Op::GuardedLoad || n.op == U32Op::GuardedStore) {
       const bool load = n.op == U32Op::GuardedLoad;
       const uint32_t addr_node = load ? n.a : n.b;
