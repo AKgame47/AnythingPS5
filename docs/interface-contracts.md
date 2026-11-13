@@ -229,3 +229,9 @@ MISMATCH. Non-packages fail at archive validation.
 - `bind(nid, &fn, &error) -> SCE_OK` for implemented symbols; `SCE_KERNEL_ERROR_EINVAL` for declared-only symbols (known but not implemented); `SCE_KERNEL_ERROR_UNKNOWN` for NIDs outside the taxonomy. Never silently substitutes.
 - Implemented today (libkernel): `sceKernelUsleep`, `sceKernelSleep`, `sceKernelAlloc`, `sceKernelFree`, `sceKernelCreateThread` (detached host thread; handle/join API is Planned).
 - Declared-only (honest, no host implementation): `sceKernelAlloc` family extensions and `libSceLibcInternal` (printf, malloc, free, memcpy, memset, strlen, strcmp).
+
+## IF-IMP-01 Import Resolution (v1) — Implemented, Tested
+
+- `resolve_imports(path, registry, &out) -> Status`: bounds-checked parse of the ELF dynamic section (DT_NEEDED) and undefined .dynsym symbols; malformed files fail with a specific error, never a crash.
+- Each undefined symbol is classified: `host` (native library satisfies it), `prx-implemented` (taxonomy + working implementation), `prx-declared` (in taxonomy, not implemented - reported honestly), or `unknown` (PS-style sce* name outside the taxonomy).
+- `pnr run` prints the classification summary and every non-host import before launch; nothing is silently substituted.
