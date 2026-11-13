@@ -67,7 +67,16 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
         if(!before_branch[reg] || !regs[reg]) return fail("conditional VGPR undefined on skipped path"+at);
         nodes.push_back({U32Op::SelectEqual,branch_compare.a,branch_compare.b,
                          regs[reg]->node,before_branch[reg]->node});
-        regs[reg]=Reg{uint32_t(nodes.size()-1),{}};
+        // A uniform decision may select lane-varying data. Keep an address
+        // proof only when BOTH alternatives have the exact same affine map.
+        Reg merged{uint32_t(nodes.size()-1),{}};
+        if(regs[reg]->constant==before_branch[reg]->constant)
+          merged.constant=regs[reg]->constant;
+        if(regs[reg]->origin==before_branch[reg]->origin &&
+           regs[reg]->stride==before_branch[reg]->stride) {
+          merged.origin=regs[reg]->origin;merged.stride=regs[reg]->stride;
+        }
+        regs[reg]=merged;
       }
       merge_active=false;
     }
@@ -100,12 +109,14 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       nodes.push_back({sub?U32Op::BorrowSub:U32Op::CarryAdd,a->node,b->node,cin});
       carry_flag=uint32_t(nodes.size()-1);carry_defined=true;scc_defined=false;
     } else if(i.family==RdnaFamily::SOPC && i.opcode_id==6) {
-      if(local_size_x!=1) return fail("scalar comparison restricted to one invocation"+at);
+      // Multi-mode SGPRs originate only from push constants/scalar moves.
+      // readfirstlane and scalar carry ALU remain rejected there, so this
+      // comparison is workgroup-uniform, never an invented lane SCC.
       auto a=source(i.src0),b=source(i.src1);
       if(!a || !b) return fail("undefined compare source"+at);
       scc=Compare{a->node,b->node};scc_defined=true;carry_defined=false;
     } else if(i.family==RdnaFamily::SOPP && i.opcode_id==4) {
-      if(local_size_x!=1 || conditional || !scc_defined || i.simm<=0)
+      if(conditional || !scc_defined || i.simm<=0)
         return fail("unsupported branch: needs single forward SCC0 with defined compare"+at);
       bool boundary=false;
       for(const auto& target:d.instructions) boundary |= target.pc==i.branch_target;
