@@ -313,19 +313,20 @@ touches nothing in the library.
   dispatch environment.
 
 
-## IF-GRAPH-03 Restricted integer-compute translation (v2)
+## IF-GRAPH-03 Restricted integer-compute translation (v3)
 
 Status: Experimental, Implemented (strict subset), Tested.
 
-- `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base)` parses
+- `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base, buffer_words=1)` parses
   little-endian words without alignment assumptions; partial words fail.
-  `translate_compute_words(words, guest_base)` is the word-level entry point.
+  `translate_compute_words(words, guest_base, buffer_words=1)` is the word-level entry point.
 - Result: `ok`, diagnostic `error`, `spirv`, `stored_value_known`,
-  `stored_value`. Every failure returns empty SPIR-V. `stored_value` is
+  `stored_value`, `required_buffer_words`. Every failure returns empty SPIR-V. `stored_value` is
   meaningful only when `stored_value_known` is true; runtime results are
   never invented by the compiler.
-- Explicit test ABI: one active invocation, one 32-bit SSBO at set 0/binding 0.
-  The caller's 64-bit guest base maps to exactly word zero of this binding.
+- Explicit test ABI: one active invocation, one fixed-size uint array SSBO at set 0/binding 0.
+  Caller supplies the 64-bit guest base and 1..65536-word extent.
+  The base maps to word zero; all accesses must stay in this byte range.
   It is not a host pointer, a PS5 ABI, or general GPU address translation.
 - Accepted instructions: `v_mov_b32` (literal/inline integer/defined VGPR),
   `flat_load_dword`, `v_add_nc_u32`, `v_sub_nc_u32`, `v_and_b32`, `v_or_b32`,
@@ -334,13 +335,24 @@ Status: Experimental, Implemented (strict subset), Tested.
   definitions after source overwrite; destination/source aliasing is safe.
   Runtime SSBO loads become OpLoad and arithmetic becomes real SPIR-V
   integer ALU, with uint32 wraparound. No host precomputation of loaded data.
-- Address VGPR pairs must be defined constant moves equal to guest_base.
+- Address VGPR pairs must be defined constant moves. Add the unsigned
+  11-bit FLAT byte offset, then check addition overflow, lower/upper bounds
+  and four-byte alignment before generating an array index. Guest base must
+  be aligned; zero/oversized extent and base+range overflow are rejected.
   ALU/load-dependent addresses remain rejected, even constant-only ALU.
-  FLAT scalar address must be 0x7f, all offset/segment/cache/LDS/reserved
-  fields zero; load VDATA/store VDST must be zero.
-- `graphics::SpirvModule::compute_u32(nodes)` emits the straight-line uint
+  FLAT scalar address must be 0x7f, all segment/cache/LDS/reserved
+  fields zero (including offset bit 11); load VDATA/store VDST must be zero.
+- `graphics::SpirvModule::compute_u32(nodes, buffer_words=1)` emits the straight-line uint
   IR. Invalid forward references or reads from Store nodes return empty.
-  Instruction order is preserved; constant declarations precede functions.
+  Load.a and Store.b are checked word indices; malformed/out-of-range
+  accesses produce no module. SPIR-V uses a fixed-size uint array with
+  ArrayStride=4, inside the existing BufferBlock struct. Instruction order
+  is preserved; constant declarations precede functions.
+- `run_translated_compute(backend, translation, io)` is the checked dispatch
+  route. It verifies a successful translation and io length at least
+  required_buffer_words before Vulkan. Null/short buffers fail unchanged.
+  Raw VulkanBackend dispatch remains a low-level API with caller-owned
+  buffer sizing; use the checked route for translated kernels.
 - Rejects undefined registers, unsupported sources/instructions/modifiers,
   other addresses, additional stores, missing termination and trailing code.
   No wave/EXEC, asynchronous waitcnt, general barriers, resource descriptors,
@@ -352,4 +364,8 @@ Status: Experimental, Implemented (strict subset), Tested.
   runtime inputs without recompilation (including overflow/underflow).
   Readback must match uint32 arithmetic and leave a neighboring word intact.
   SSA copy/overwrite, source order, literal ALU and dependent ALU chains are
-  tested too. Missing validator/loader prints a skip, not a tested claim.
+  tested too. Multi-word tests load two independent runtime inputs, add,
+  store a separate output and check every other word remains unchanged.
+  Last legal word at FLAT offset 2044 is executed; invalid ranges, overflow,
+  misalignment, reserved offsets, null/short host buffers are rejected.
+  Missing validator/loader prints a skip, not a tested claim.
