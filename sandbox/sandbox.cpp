@@ -192,6 +192,10 @@ template <class F> bool in_child(F fn) {
   int st = 0; while (::waitpid(p, &st, 0) < 0 && errno == EINTR) {}
   return WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
+static volatile pid_t g_sb_child = 0;
+static void sb_forward(int sig) { if (g_sb_child > 0) { ::kill(g_sb_child, sig); ::alarm(5); } }
+static void sb_force_kill(int) { if (g_sb_child > 0) ::kill(g_sb_child, SIGKILL); }
+
 static bool enter_impl(const Policy* pol, std::string* err) {
   std::string e, newroot;
   if (pol) {
@@ -209,12 +213,21 @@ static bool enter_impl(const Policy* pol, std::string* err) {
   pid_t child = ::fork();
   if (child < 0) { *err = "fork failed"; cleanup(); return false; }
   if (child > 0) {  // intermediate: wait for the game (PID 1 of the new namespace) and mirror its fate
+    // E-follow-up: a plain TERM/INT/HUP used to kill this process alone, leaving the game orphaned and the
+    // mountpoint dir behind. Forward the signal, give the game 5 s, then SIGKILL it (PID 1 of a namespace
+    // ignores TERM it has no handler for). Cleanup below then runs. A SIGKILL on this process cannot be handled,
+    // but the game has PR_SET_PDEATHSIG=SIGKILL so it dies too; only the empty mountpoint dir can remain.
+    g_sb_child = child;
+    struct sigaction sa; std::memset(&sa, 0, sizeof sa); sa.sa_handler = sb_forward; ::sigemptyset(&sa.sa_mask);
+    ::sigaction(SIGTERM, &sa, nullptr); ::sigaction(SIGINT, &sa, nullptr); ::sigaction(SIGHUP, &sa, nullptr);
+    sa.sa_handler = sb_force_kill; ::sigaction(SIGALRM, &sa, nullptr);
     int st = 0; while (::waitpid(child, &st, 0) < 0 && errno == EINTR) {}
     cleanup();
     if (WIFSIGNALED(st)) { ::signal(WTERMSIG(st), SIG_DFL); ::kill(::getpid(), WTERMSIG(st)); _exit(128 + WTERMSIG(st)); }
     _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 1);
   }
   // grandchild: PID 1 in the new PID namespace
+  ::prctl(PR_SET_PDEATHSIG, SIGKILL);   // if the intermediate dies (even by SIGKILL) the whole namespace goes with it
   if (pol) {
     if (!build_root(*pol, newroot, err)) return false;
   } else {
