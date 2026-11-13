@@ -126,9 +126,11 @@ Status build_package(
   return tar_write(out_path, entries);
 }
 
-ImportResult import_package(const std::string& package_path,
-                            const std::string& library_root,
-                            pnr::library::GameDb& db) {
+// dry=true runs every validation step and stops before touching the disk
+// or the library (used by inspect_package).
+static ImportResult import_impl(const std::string& package_path,
+                                const std::string& library_root,
+                                pnr::library::GameDb* db, bool dry) {
   ImportResult r;
 
   std::vector<TarEntry> entries;
@@ -212,6 +214,8 @@ ImportResult import_package(const std::string& package_path,
     }
   }
 
+  if (dry) { r.status = Status::Ok(); return r; }
+
   // Extract payload (not manifest/checksums) into the library root.
   std::string dest = library_root + "/games/" + r.manifest.id + "-" +
                      r.manifest.version;
@@ -238,19 +242,32 @@ ImportResult import_package(const std::string& package_path,
 
   // Register in the library database. Compatibility starts at Untested:
   // importing never asserts playability.
-  st = db.add_game({0, r.manifest.id, r.manifest.title, r.manifest.version,
+  st = db->add_game({0, r.manifest.id, r.manifest.title, r.manifest.version,
                     "pnr-dev"});
   if (!st) { r.status = st; return r; }
-  st = db.set_installation({r.manifest.id, dest, r.manifest.version,
+  st = db->set_installation({r.manifest.id, dest, r.manifest.version,
                             "verified", r.manifest.executable});
   if (!st) { r.status = st; return r; }
-  st = db.set_compatibility(
-      {r.manifest.id, "Untested",
-       "imported .pnrgame; no execution test yet"});
-  if (!st) { r.status = st; return r; }
+  // A state a person set survives a re-import; only automatic state resets.
+  if (!db->compat_is_human_set(r.manifest.id)) {
+    st = db->set_compatibility(
+        {r.manifest.id, "Untested",
+         "imported .pnrgame; no execution test yet"});
+    if (!st) { r.status = st; return r; }
+  }
 
   r.status = Status::Ok();
   return r;
+}
+
+ImportResult import_package(const std::string& package_path,
+                            const std::string& library_root,
+                            pnr::library::GameDb& db) {
+  return import_impl(package_path, library_root, &db, false);
+}
+
+ImportResult inspect_package(const std::string& package_path) {
+  return import_impl(package_path, "", nullptr, true);
 }
 
 }  // namespace pnr::pkg
