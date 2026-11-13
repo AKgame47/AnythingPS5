@@ -1,8 +1,9 @@
-# PNR Unofficial Store: core (slice A1)
+# PNR Unofficial Store: core and downloads (slices A1, A2)
 
 Status: **Implemented + Tested (local fakes only).** Sources, index
-validation, refresh and search work. **There is no download, install or
-update yet** (next slice). Nothing here has been run against a real source.
+validation, refresh, search, downloads and install work. **Tested only
+against fakes and a local Range server. Never run against a real source.**
+There is no update path yet.
 
 ## What it is
 
@@ -70,10 +71,22 @@ A label says what PNR can *handle*. It says nothing about whether a game runs: c
 - Remove deletes the source's cached index and never touches installed games.
 - A refresh failure (transport, HTTP error, bad index) changes nothing.
 
+## Downloads and install (slice A2)
+
+Commands: `store get <src> <pkg>` (queue), `store queue list|run|pause|resume|cancel`
+(`cancel` is a dry run unless `--yes`), `store install <src> <pkg>`.
+
+- Streaming to `<store>/downloads/<src>/<pkg>.part` with a `.state` file. Resume uses `Range` with `If-Range`; a 206 must carry a matching `Content-Range`; a 200 or 416 restarts from zero.
+- Bounded retries with backoff, a free-disk precheck, host limited to the index host.
+- Size and sha256 are enforced before the final rename. A mismatch deletes the data. If the index hash changes, the old partial is discarded.
+- Install re-hashes the file, accepts only `verified` or `installed` entries and only `pnr-package` kind, and uses the existing package importer. Other kinds are refused.
+- Limits: hash only, no signatures, no scanning, no sandbox, Linux only. The libcurl streaming options (including low-speed abort) are hand-declared and were verified only against libcurl 7.81 and a local server.
+- Tests: `tests/download_tests.cpp` (fake and local Range server) and the `pnr_store_workflow` CTest (tampered, foreign-kind and unverified refusals, good install).
+
 ## What is NOT done (honest list)
 
-- **No download manager, install or update path yet.** `sha256` and `size` are validated and shown, but nothing is fetched or checked against them until the download slice.
+- **No update path yet.** Downloads and install exist (see below) but were only tested against fakes and a local server.
 - **No signatures.** Integrity today means the hash in the index. If the source is malicious or compromised, its hash proves nothing. Per-source pinned Ed25519 keys are Planned.
-- No malware scanning and no sandbox (security slice, Planned). Until then `pnr run` is for trusted developer-built demos only.
+- No malware scanning and no sandbox (security slice, Planned). A verified hash does not mean a package is safe. Until then `pnr run` is for trusted developer-built demos only.
 - Rights and licences are declared text. PNR does not verify them.
 - No artwork, categories browsing UI, DLC, developer submission flow or Windows build/test yet. Linux only.
