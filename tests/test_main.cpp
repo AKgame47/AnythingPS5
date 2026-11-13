@@ -21,6 +21,8 @@
 #include "library/game_db.hpp"
 #include "loader/native_loader.hpp"
 #include "loader/nid.hpp"
+#include "prx/prx.hpp"
+#include <atomic>
 #include "package/importer.hpp"
 #include "package/sha256.hpp"
 #include "package/tar.hpp"
@@ -544,6 +546,63 @@ int main() {
           "nid: resolver round-trips printf");
     CHECK(pnr::loader::nid::resolve_nid("XXXXXXXXXXX").empty(),
           "nid: unknown NID -> empty");
+  }
+
+  // --- PRX system-library layer (taxonomy per AnyPS5 core/libs/prx) ---
+  {
+    pnr::prx::PrxRegistry reg;
+    CHECK(!reg.symbols().empty(), "prx: taxonomy populated");
+    bool any_impl = false;
+    for (const auto& s : reg.symbols()) any_impl = any_impl || s.implemented;
+    CHECK(any_impl, "prx: at least one implemented symbol");
+
+    // libkernel: sceKernelUsleep really sleeps (host-backed)
+    {
+      const auto t0 = std::chrono::steady_clock::now();
+      CHECK(pnr::prx::sceKernelUsleep(20000) == pnr::prx::SCE_OK,
+            "prx: usleep returns SCE_OK");
+      const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::steady_clock::now() - t0).count();
+      CHECK(us >= 15000, "prx: usleep actually slept");
+    }
+    // libkernel: alloc/free round-trip
+    {
+      void* p = pnr::prx::sceKernelAlloc(128);
+      CHECK(p != nullptr, "prx: alloc returns memory");
+      std::memset(p, 0xAB, 128);
+      CHECK(pnr::prx::sceKernelFree(p) == pnr::prx::SCE_OK, "prx: free ok");
+      CHECK(pnr::prx::sceKernelAlloc(0) == nullptr, "prx: alloc(0) -> nullptr");
+    }
+    // libkernel: thread creation really runs the entry
+    {
+      std::atomic<int> hits{0};
+      auto* entry = +[](void* a) { ++*static_cast<std::atomic<int>*>(a); };
+      CHECK(pnr::prx::sceKernelCreateThread("t", entry, &hits) == pnr::prx::SCE_OK,
+            "prx: create thread SCE_OK");
+      for (int i = 0; i < 100 && hits.load() == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      CHECK(hits.load() == 1, "prx: thread entry executed");
+      CHECK(pnr::prx::sceKernelCreateThread("t", nullptr, nullptr) ==
+                pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+            "prx: null entry rejected");
+    }
+    // NID binding: implemented symbol binds, declared-only and unknown are honest
+    {
+      const std::string nid_sleep =
+          pnr::loader::nid::compute_nid("sceKernelUsleep", "libkernel");
+      std::function<std::int64_t(const std::vector<std::int64_t>&)> fn;
+      std::string err;
+      CHECK(reg.bind(nid_sleep, &fn, &err) == pnr::prx::SCE_OK,
+            "prx: bind implemented NID");
+      CHECK(fn({1000}) == pnr::prx::SCE_OK, "prx: bound trampoline runs");
+      const std::string nid_printf =
+          pnr::loader::nid::compute_nid("printf", "libSceLibcInternal");
+      CHECK(reg.find(nid_printf) != nullptr, "prx: printf in taxonomy");
+      CHECK(reg.bind(nid_printf, &fn, &err) == pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+            "prx: declared-only bind is honest EINVAL");
+      CHECK(reg.bind("ZZZZZZZZZZZ", &fn, &err) == pnr::prx::SCE_KERNEL_ERROR_UNKNOWN,
+            "prx: unknown NID -> UNKNOWN");
+    }
   }
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
