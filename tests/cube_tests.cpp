@@ -152,9 +152,9 @@ void pnr_cube_tests(int& pass,int& fail) {
         if((uint8_t)d[hdr.size()+i*3+c]!=ref[k][i*4+c])all_same=false;
     }
     check(rendered&&found==N,"cube game: all 8 presented PPM files exist inside the game's jail");
-    check(rendered&&all_same,"cube game: presented frames are byte-identical to the harness render of the same MVPs");
+    check(rendered&&all_same,"cube game: presented frames (RDNA-translated vertex path) are byte-identical to the harness hand-authored-VS render of the same MVPs");
     pnr::prx::PrxRegistry reg;pnr::loader::ImportResolution ir;
-    check(pnr::loader::resolve_imports(PNR_PS_CUBE_DEMO_PATH,reg,&ir)&&ir.pnr_extension==5&&ir.unknown==0,"cube game: pnrGfx* imports classify as pnr-extension (not host, not sce)");
+    check(pnr::loader::resolve_imports(PNR_PS_CUBE_DEMO_PATH,reg,&ir)&&ir.pnr_extension==7&&ir.unknown==0,"cube game: pnrGfx* imports classify as pnr-extension (not host, not sce)");
     std::filesystem::remove_all(jail);
   }
 #endif
