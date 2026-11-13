@@ -811,3 +811,7 @@ other loop-memory patterns remain rejected.
   increments/counter/compare/backedge, dynamic/unproven/mismatched-high pairs,
   zero/oversized/undeclared count, short full-domain runtime extent, boundary
   crossing, repeated/combined regions, extra outside store and malformed IR.
+
+## render_offscreen_rgba
+
+`Status render_offscreen_rgba(w, h, vert_spirv, frag_spirv, vertex_count, clear[4], &rgba)`. Size 1..4096 per axis; vertex_count a nonzero multiple of 3, at most 3000; shaders use entry point `main`; output is w*h*4 bytes, row-major, top row first, RGBA8 UNORM. Fails with an error naming the stage when no graphics queue exists or the driver rejects the SPIR-V. Headless only: no swapchain or presentation.
