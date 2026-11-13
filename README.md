@@ -19,6 +19,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | ELF64 binary parser + validator (bounds-checked, specific errors) | Implemented, Tested |
 | Native loader: validated binaries executed in a supervised separate process | Implemented (Linux), Tested |
 | PS NID computation + symbol lookup (SHA-1 based; algorithm adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5), GPL-2.0) | Implemented, Tested |
+| PRX system-library layer: libkernel subset (usleep/sleep/alloc/free/thread) bound by NID; taxonomy per AnyPS5, original implementations | Implemented, Tested |
 | Compat services: memory, timing, jailed filesystem, threads | Implemented, Tested |
 | Host OS abstraction (IF-OS): Linux backend (CPU/memory/power/process launch) | Implemented (Linux), Tested |
 | `.pnrgame` package format: ustar + SHA-256 manifests, builder | Implemented, Tested |
@@ -37,7 +38,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**124/124 unit tests pass, 3/3 CTest suites pass** (unit, end-to-end native
+**139/139 unit tests pass, 3/3 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
 game). No benchmarks exist yet; none are claimed.
 
@@ -179,7 +180,8 @@ demo, not a real PS5 runtime - the release notes say exactly what works.
 ```
 apps/        pnr CLI now; desktop launcher + diagnostics later
 core/        MODULE 01 - runtime, lifecycle, events, config, capabilities
-loader/      MODULE 02 - ELF parser (A), native loader (B), format adapters (C, planned)
+loader/      MODULE 02 - ELF parser (A), native loader (B), NID support, format adapters (C, planned)
+prx/         MODULE 02 companion - PS system-library layer bound by NID (libkernel subset implemented)
 compat/      MODULE 03 - memory, timing, filesystem, thread services
 platform/    MODULE 07 - host OS abstraction, Linux + Windows backends (Windows launch blocked)
 ape/         MODULE 05 - adaptive performance engine (classification, frame stats, controller)
