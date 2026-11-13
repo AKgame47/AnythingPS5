@@ -1,3 +1,4 @@
+#include <cstring>
 #include "library/game_db.hpp"
 
 #include "library/sqlite3_shim.h"
@@ -32,6 +33,31 @@ Status GameDb::exec(const char* sql, const char* what) {
   return Status::Ok();
 }
 
+// Older databases predate the executable column; add it once.
+static Status migrate_installations(sqlite3* h) {
+  sqlite3_stmt* st = nullptr;
+  if (sqlite3_prepare_v2(h, "PRAGMA table_info(installations)", -1, &st,
+                         nullptr) != SQLITE_OK)
+    return Status::Fail(90, "library.db", "schema probe failed");
+  bool has_exec = false;
+  while (sqlite3_step(st) == SQLITE_ROW) {
+    const char* n = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
+    if (n && std::strcmp(n, "executable") == 0) has_exec = true;
+  }
+  sqlite3_finalize(st);
+  if (has_exec) return Status::Ok();
+  sqlite3_stmt* a = nullptr;
+  if (sqlite3_prepare_v2(
+          h, "ALTER TABLE installations ADD COLUMN executable TEXT NOT NULL DEFAULT ''",
+          -1, &a, nullptr) != SQLITE_OK)
+    return Status::Fail(91, "library.db", "schema migration failed");
+  const int rc = sqlite3_step(a);
+  sqlite3_finalize(a);
+  if (rc != SQLITE_DONE)
+    return Status::Fail(92, "library.db", "schema migration step failed");
+  return Status::Ok();
+}
+
 Status GameDb::open(const std::string& path) {
   close();
   // Ensure the parent directory exists so SQLite can create the file.
@@ -45,14 +71,16 @@ Status GameDb::open(const std::string& path) {
                            nullptr);
   if (rc != SQLITE_OK)
     return Status::Fail(rc, "library.db", "open failed: " + path);
-  return exec(
+  {
+    Status st = exec(
       "PRAGMA journal_mode=WAL;"
       "CREATE TABLE IF NOT EXISTS games("
       " game_id TEXT PRIMARY KEY, title TEXT NOT NULL,"
       " version TEXT NOT NULL, platform TEXT NOT NULL);"
       "CREATE TABLE IF NOT EXISTS installations("
       " game_id TEXT PRIMARY KEY, path TEXT NOT NULL,"
-      " version TEXT NOT NULL, integrity TEXT NOT NULL);"
+      " version TEXT NOT NULL, integrity TEXT NOT NULL,"
+      " executable TEXT NOT NULL DEFAULT '');"
       "CREATE TABLE IF NOT EXISTS compatibility("
       " game_id TEXT PRIMARY KEY, state TEXT NOT NULL, notes TEXT);"
       "CREATE TABLE IF NOT EXISTS launches("
@@ -60,6 +88,9 @@ Status GameDb::open(const std::string& path) {
       " exit_code INTEGER NOT NULL, wall_seconds REAL NOT NULL,"
       " at REAL NOT NULL);",
       "schema");
+    if (!st) return st;
+  }
+  return migrate_installations(db_->h);
 }
 
 void GameDb::close() {
@@ -146,19 +177,21 @@ std::vector<GameRecord> GameDb::list_games() {
 
 Status GameDb::set_installation(const InstallationRecord& inst) {
   Stmt s(db_->h, "INSERT OR REPLACE INTO installations"
-                 "(game_id,path,version,integrity) VALUES(?,?,?,?)");
+                 "(game_id,path,version,integrity,executable)"
+                 " VALUES(?,?,?,?,?)");
   if (!s.ok()) return sql_status(s.rc(), db_->h, "set_installation prepare");
   s.bind_text(1, inst.game_id);
   s.bind_text(2, inst.path);
   s.bind_text(3, inst.version);
   s.bind_text(4, inst.integrity);
+  s.bind_text(5, inst.executable);
   return s.run(db_->h, "set_installation");
 }
 
 std::optional<InstallationRecord> GameDb::get_installation(
     const std::string& game_id) {
-  Stmt s(db_->h, "SELECT game_id,path,version,integrity FROM installations"
-                 " WHERE game_id=?");
+  Stmt s(db_->h, "SELECT game_id,path,version,integrity,executable"
+                 " FROM installations WHERE game_id=?");
   if (!s.ok()) return std::nullopt;
   s.bind_text(1, game_id);
   if (!s.step_row()) return std::nullopt;
@@ -167,6 +200,7 @@ std::optional<InstallationRecord> GameDb::get_installation(
   r.path = s.text(1);
   r.version = s.text(2);
   r.integrity = s.text(3);
+  r.executable = s.text(4);
   return r;
 }
 
