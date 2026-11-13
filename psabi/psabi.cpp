@@ -25,7 +25,9 @@
 #include "compat/services.hpp"
 #include "graphics/demo/cube_shaders.hpp"
 #include "graphics/demo/spin_shaders.hpp"
+#include "graphics/demo/clip_shaders.hpp"
 #include "graphics/mat4.hpp"
+#include "graphics/rdna_vertex.hpp"
 #include "graphics/vulkan.hpp"
 
 namespace {
@@ -47,9 +49,9 @@ std::vector<Mapping>& maps() { static std::vector<Mapping> m; return m; }
 struct Gfx {
   pnr::graphics::VulkanBackend vk;
   bool up = false;
-  uint32_t w = 0, h = 0, frames = 0;
-  std::vector<float> verts;
-  std::vector<uint32_t> idx, vs, fs;
+  uint32_t w = 0, h = 0, frames = 0, rdna_frames = 0;
+  std::vector<float> verts, xyz, col;
+  std::vector<uint32_t> idx, vs, fs, cvs;
   std::vector<uint8_t> last;
   std::string error;
 };
@@ -75,22 +77,43 @@ std::int32_t pnrGfxInit(std::uint32_t w, std::uint32_t h) {
   if (g.vk.devices().empty()) { g.error = "no Vulkan device"; return -11; }
   if (auto st = g.vk.create_device(0); !st) { g.error = st.error.message; return -12; }
   pnr::graphics::cube_mesh(&g.verts, &g.idx);
+  for (size_t i = 0; i + 5 < g.verts.size(); i += 6)
+    for (int k = 0; k < 3; ++k) { g.xyz.push_back(g.verts[i + k]); g.col.push_back(g.verts[i + 3 + k]); }
+  g.cvs.assign(std::begin(clip_vert), std::end(clip_vert));
   g.vs.assign(std::begin(cube_vert), std::end(cube_vert));
   g.fs.assign(std::begin(spin_frag), std::end(spin_frag));
   g.w = w; g.h = h; g.up = true;
   return 0;
 }
 
-// Renders one frame of the unit cube rotated by pitch (X) then yaw (Y).
+}  // extern "C"
+
+namespace {
+std::int32_t coverage(const std::vector<uint8_t>& img) {
+  std::int32_t cov = 0;
+  for (size_t i = 0; i + 3 < img.size(); i += 4)
+    if (img[i] | img[i + 1] | img[i + 2]) ++cov;
+  return cov;
+}
+pnr::graphics::Mat4 cube_mvp(const Gfx& g, float yaw, float pitch) {
+  using namespace pnr::graphics;
+  const Mat4 P = mat4_perspective(1.0471976f, (float)g.w / (float)g.h, 0.1f, 10.0f);
+  const Mat4 T = mat4_translate(0, 0, -3);
+  const Mat4 M = mat4_mul(mat4_rotate_x(pitch), mat4_rotate_y(yaw));
+  return mat4_mul(P, mat4_mul(T, M));
+}
+}  // namespace
+
+extern "C" {
+
+// Renders one frame of the unit cube rotated by pitch (X) then yaw (Y) with
+// the hand-authored MVP vertex shader.
 // Returns the number of non-background pixels, or a negative error.
 std::int32_t pnrGfxDrawCube(float yaw, float pitch) {
   Gfx& g = gfx();
   if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
   using namespace pnr::graphics;
-  const Mat4 P = mat4_perspective(1.0471976f, (float)g.w / (float)g.h, 0.1f, 10.0f);
-  const Mat4 T = mat4_translate(0, 0, -3);
-  const Mat4 M = mat4_mul(mat4_rotate_x(pitch), mat4_rotate_y(yaw));
-  std::vector<std::vector<uint32_t>> push{mat4_words(mat4_mul(P, mat4_mul(T, M)))};
+  std::vector<std::vector<uint32_t>> push{mat4_words(cube_mvp(g, yaw, pitch))};
   const float black[4] = {0, 0, 0, 1};
   std::vector<std::vector<uint8_t>> out;
   auto st = g.vk.render_mesh_frames_rgba(g.w, g.h, g.vs, g.fs, g.verts, g.idx, true,
@@ -98,11 +121,35 @@ std::int32_t pnrGfxDrawCube(float yaw, float pitch) {
   if (!st || out.size() != 1) { g.error = st ? "no frame" : st.error.message; return -3; }
   g.last = std::move(out[0]);
   ++g.frames;
-  std::int32_t cov = 0;
-  for (size_t i = 0; i + 3 < g.last.size(); i += 4)
-    if (g.last[i] | g.last[i + 1] | g.last[i + 2]) ++cov;
-  return cov;
+  return coverage(g.last);
 }
+
+// Same cube, but the vertex stage is a translated RDNA-style compute kernel
+// (compute-as-vertex-stage, PNR test ABI, NOT a real vertex-stage ABI): four
+// dispatches produce clip-space positions that the draw path consumes
+// through a pass-through vertex shader. Returns covered pixels or negative.
+std::int32_t pnrGfxDrawCubeRdna(float yaw, float pitch) {
+  Gfx& g = gfx();
+  if (!g.up) { g.error = "pnrGfxInit first"; return -1; }
+  using namespace pnr::graphics;
+  std::vector<float> clip;
+  auto st = rdna_transform_points(g.vk, g.xyz, mat4_words(cube_mvp(g, yaw, pitch)), &clip);
+  if (!st) { g.error = st.error.message; return -4; }
+  std::vector<float> cv;
+  for (size_t i = 0; i < 24; ++i) {
+    for (int c = 0; c < 4; ++c) cv.push_back(clip[i * 4 + c]);
+    for (int c = 0; c < 3; ++c) cv.push_back(g.col[i * 3 + c]);
+  }
+  const float black[4] = {0, 0, 0, 1};
+  std::vector<uint8_t> img;
+  st = g.vk.render_clip_mesh_rgba(g.w, g.h, g.cvs, g.fs, cv, g.idx, true, black, &img);
+  if (!st) { g.error = st.error.message; return -3; }
+  g.last = std::move(img);
+  ++g.frames; ++g.rdna_frames;
+  return coverage(g.last);
+}
+
+std::uint32_t pnrGfxRdnaFramesRendered() { return gfx().rdna_frames; }
 
 // "Present": write the last frame as a binary PPM at a jail path. Returns
 // bytes written or a negative error. No display is involved.
