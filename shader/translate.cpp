@@ -29,7 +29,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
     nodes.push_back({U32Op::Constant, o.value});
     return Reg{static_cast<uint32_t>(nodes.size()-1), o.value};
   };
-  bool ended = false, stored = false;
+  bool ended = false, stored = false, guarded = false;
   std::optional<uint32_t> value;
   for (const auto& i : d.instructions) {
     const auto at = " at pc=" + std::to_string(i.pc);
@@ -51,8 +51,8 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
         case 0x1d: op = U32Op::Xor; break;
       }
       nodes.push_back({op, a->node, b->node});
-      // Emit arithmetic even on constants. Conservatively disallow its
-      // result as an address until address analysis is implemented.
+      // ALU values are runtime SSA, even on constant inputs. Address
+      // uses therefore go through emitted low-word guards below.
       regs[i.dst.reg] = Reg{static_cast<uint32_t>(nodes.size()-1), {}};
     } else if (i.family == RdnaFamily::FLAT &&
                (i.opcode_id == 0x1c || i.opcode_id == 0x0c)) {
@@ -65,23 +65,39 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       if (!load && stored) return fail("multiple stores are not supported" + at);
       if (i.memory_addr == 255) return fail("address register pair overflow" + at);
       auto lo = regs[i.memory_addr], hi = regs[i.memory_addr + 1];
-      if (!lo || !hi || !lo->constant || !hi->constant)
-        return fail("undefined/dynamic address VGPR pair" + at);
-      uint64_t addr = uint64_t(*lo->constant) | (uint64_t(*hi->constant) << 32u);
-      const uint64_t offset = i.memory_offset;
-      if (addr > UINT64_MAX - offset) return fail("address plus offset overflows" + at);
-      addr += offset;
-      if (addr < base || addr - base >= size || (addr - base) % 4)
-        return fail("memory access is outside/alignment-invalid for SSBO range" + at);
-      const uint32_t index = static_cast<uint32_t>((addr - base) / 4);
+      if (!lo || !hi || !hi->constant)
+        return fail("undefined address or dynamic high address word" + at);
+      bool dynamic = !lo->constant;
+      uint32_t index = 0;
+      if (dynamic) {
+        // Bounded low-word indexing only. No implicit carry or truncation
+        // of a 64-bit pointer; unsupported shapes fail at translation time.
+        if (*hi->constant != uint32_t(base >> 32u))
+          return fail("runtime address high word differs from binding" + at);
+        if (uint64_t(uint32_t(base)) + size > 0x100000000ull)
+          return fail("runtime binding crosses a 32-bit address boundary" + at);
+        if (i.memory_offset)
+          return fail("runtime address with immediate offset not supported" + at);
+        guarded = true;
+      } else {
+        uint64_t addr = uint64_t(*lo->constant) | (uint64_t(*hi->constant) << 32u);
+        const uint64_t offset = i.memory_offset;
+        if (addr > UINT64_MAX - offset) return fail("address plus offset overflows" + at);
+        addr += offset;
+        if (addr < base || addr - base >= size || (addr - base) % 4)
+          return fail("memory access is outside/alignment-invalid for SSBO range" + at);
+        index = static_cast<uint32_t>((addr - base) / 4);
+      }
       if (load) {
-        nodes.push_back({U32Op::Load, index});
+        nodes.push_back({dynamic ? U32Op::GuardedLoad : U32Op::Load,
+                         dynamic ? lo->node : index});
         regs[i.dst.reg] = Reg{static_cast<uint32_t>(nodes.size()-1), {}};
       } else {
         auto data = regs[i.memory_data];
         if (!data) return fail("undefined store data VGPR" + at);
-        nodes.push_back({U32Op::Store, data->node, index});
-        stored = true; value = data->constant;
+        nodes.push_back({dynamic ? U32Op::GuardedStore : U32Op::Store,
+                         data->node, dynamic ? lo->node : index});
+        stored = true; value = dynamic ? std::optional<uint32_t>{} : data->constant;
       }
     } else if (i.family == RdnaFamily::SOPP && i.opcode_id == 1) {
       if (i.raw0 != 0xbf810000u) return fail("unsupported s_endpgm immediate" + at);
@@ -91,10 +107,11 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
   if (!ended) return fail("missing final s_endpgm");
   if (!stored) return fail("missing flat_store_dword");
   ComputeTranslation r;
+  r.guarded_memory = guarded;
   r.required_buffer_words = buffer_words;
   r.stored_value_known = value.has_value();
   r.stored_value = value.value_or(0); // meaningful only when known=true
-  r.spirv = graphics::SpirvModule::compute_u32(nodes, buffer_words);
+  r.spirv = graphics::SpirvModule::compute_u32(nodes, buffer_words, uint32_t(base));
   if (r.spirv.empty()) return fail("invalid internal uint IR");
   r.ok = true;
   return r;
