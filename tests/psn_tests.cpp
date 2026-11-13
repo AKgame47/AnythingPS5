@@ -207,7 +207,7 @@ void pnr_psn_tests(int& pass, int& fail) {
     const std::string tp = dir + "/cmd/psn/npsso.token";
     std::string out, all;
     auto grab = [&](int rc, const char* label, int want) { all += out; return rc == want ? true : (std::printf("  rc=%d for %s: %s\n", rc, label, out.c_str()), false); };
-    check(grab(cmd_status(db, tp, false, &out), "status", 0) && has(out, "token: absent") && has(out, "no network code"), "cmd: status without a token says absent and offline");
+    check(grab(cmd_status(db, tp, false, &out), "status", 0) && has(out, "token: absent") && has(out, "only `psn sync` contacts Sony"), "cmd: status without a token says absent and local");
     check(grab(cmd_set_token(tp, "garbage", false, &out), "bad set-token", 1) && has(out, "token-format") && !has(out, "garbage"), "cmd: set-token with garbage is refused, not echoed");
     check(grab(cmd_set_token(tp, kTok + "\n", false, &out), "set-token", 0) && mode_of(tp) == 0600, "cmd: set-token stores an owner-only file");
     check(grab(cmd_status(db, tp, false, &out), "status", 0) && has(out, "token: present") && has(out, "never printed"), "cmd: status says present");
