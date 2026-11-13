@@ -83,10 +83,20 @@ Commands: `store get <src> <pkg>` (queue), `store queue list|run|pause|resume|ca
 - Limits: hash only, no signatures, no scanning, no sandbox, Linux only. The libcurl streaming options (including low-speed abort) are hand-declared and were verified only against libcurl 7.81 and a local server.
 - Tests: `tests/download_tests.cpp` (fake and local Range server) and the `pnr_store_workflow` CTest (tampered, foreign-kind and unverified refusals, good install).
 
+## Signatures (slice B1)
+
+- `store source pin <id> <64-hex Ed25519 public key>` pins a key for a source (`none` unpins). `store source list` shows the pin.
+- A package in a pinned source needs a `signature` field (128 hex) in the index. It signs the text `pnr-store-v1\n<source id>\n<package id>\n<version>\n<sha256>\n<size>\n`, so a signature cannot be moved to another package, source, version, hash or size.
+- `store install` refuses a pinned source's package that is unsigned or whose signature fails. A malformed `signature` field rejects the whole index.
+- Unpinned sources stay hash-only and are labelled "unsigned (hash only)".
+- The verifier is in-tree (`crypto/ed25519.*`, RFC 8032 pure Ed25519, SHA-512), tested with the RFC 8032 section 7.1 vectors, bit-flip, wrong-key and non-canonical-S cases. It is not constant-time, which is fine because it only handles public data. PNR holds no signing keys; `ed25519_sign` exists for tests and publisher tooling.
+- What a signature means: the holder of the pinned key produced this package entry. It says nothing about whether the package is safe, and trust in the key is your decision.
+- Limits: checked at install time only. `pnr run` does not re-check signatures yet, and there is no key rotation or revocation yet. Tested against fakes only.
+
 ## What is NOT done (honest list)
 
 - **No update path yet.** Downloads and install exist (see below) but were only tested against fakes and a local server.
-- **No signatures.** Integrity today means the hash in the index. If the source is malicious or compromised, its hash proves nothing. Per-source pinned Ed25519 keys are Planned.
+- **Signatures are opt-in per source (slice B1).** Without a pinned key, integrity means only the hash in the index. If the source is malicious or compromised, its hash proves nothing.
 - No malware scanning and no sandbox (security slice, Planned). A verified hash does not mean a package is safe. Until then `pnr run` is for trusted developer-built demos only.
 - Rights and licences are declared text. PNR does not verify them.
 - No artwork, categories browsing UI, DLC, developer submission flow or Windows build/test yet. Linux only.
