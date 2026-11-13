@@ -18,7 +18,10 @@ static void usage() {
             "  pnr-launcher compat show <game-id> [--json]\n"
             "  pnr-launcher compat set <game-id> <state> [--note TEXT]\n"
             "  pnr-launcher history <game-id> [--limit N] [--json]\n"
-            "  pnr-launcher scan <dir> [--json]   (read-only; imports and runs nothing)");
+            "  pnr-launcher scan <dir> [--json]   (read-only; imports and runs nothing)\n"
+            "  pnr-launcher import <file.pnrgame> [--json]\n"
+            "  pnr-launcher remove <game-id> [--keep-saves] [--yes] [--json]\n"
+            "  pnr-launcher verify <game-id> [--json]");
 }
 
 int main(int argc, char** argv) {
@@ -26,12 +29,14 @@ int main(int argc, char** argv) {
   if (a.empty()) { usage(); return 64; }
   bool json = false;
   std::vector<std::string> pos, gameargs;
-  bool after = false, have_note = false;
+  bool after = false, have_note = false, yes = false, keep = false;
   std::string note, limit_s = "20";
   for (size_t i = 1; i < a.size(); ++i) {
     if (after) gameargs.push_back(a[i]);
     else if (a[i] == "--") after = true;
     else if (a[i] == "--json") json = true;
+    else if (a[i] == "--yes") yes = true;
+    else if (a[i] == "--keep-saves") keep = true;
     else if (a[i] == "--note" && i + 1 < a.size()) note = a[++i], have_note = true;
     else if (a[i] == "--limit" && i + 1 < a.size()) limit_s = a[++i];
     else pos.push_back(a[i]);
@@ -92,6 +97,18 @@ int main(int argc, char** argv) {
     auto s = core.scan(pos[0], &rep);
     if (!s) { std::fprintf(stderr, "launcher: scan failed: %s\n", s.error.message.c_str()); rc = 2; }
     else { std::fputs((json ? render_scan_json(rep) + "\n" : render_scan_text(rep)).c_str(), stdout); rc = 0; }
+  } else if (a[0] == "import" && pos.size() == 1) {
+    auto o = core.import_package(pos[0]);
+    std::fputs((json ? render_import_json(o) + "\n" : render_import_text(o)).c_str(), stdout);
+    rc = o.ok ? 0 : 1;
+  } else if (a[0] == "remove" && pos.size() == 1) {
+    auto o = core.remove(pos[0], keep, yes);
+    std::fputs((json ? render_remove_json(pos[0], o) + "\n" : render_remove_text(pos[0], o)).c_str(), stdout);
+    rc = o.removed ? 0 : !o.found ? 2 : o.needs_confirmation ? 3 : 1;
+  } else if (a[0] == "verify" && pos.size() == 1) {
+    auto o = core.verify(pos[0]);
+    std::fputs((json ? render_verify_json(pos[0], o) + "\n" : render_verify_text(pos[0], o)).c_str(), stdout);
+    rc = !o.found ? 2 : o.ok ? 0 : 1;
   } else usage();
   core.close();
   return rc;
