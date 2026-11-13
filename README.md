@@ -10,7 +10,7 @@ licensed GPL-2.0.
 > firmware, SDK code, keys or game files are used, and no DRM is bypassed.
 > Everything below runs on Linux x86-64, headless, with developer-built demo
 > programs. There is **no GUI yet** and no window or display output. The file
-> "jail" is application-level path routing, **not a security sandbox**.
+> "jail" is application-level path routing, **not a security sandbox**. **Optional Linux sandbox since slice B2: `launch --sandbox` (partial isolation, filesystem NOT isolated, see docs/sandbox.md).**
 
 **Contents:**
 [What it does](#what-it-does) -
@@ -40,7 +40,7 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2064/2064 unit tests, 17/17 CTest suites** on a fresh Linux
+Test state: **2077/2077 unit tests, 17/17 CTest suites** on a fresh Linux
 Release `-Werror` build (details in the capability section below).
 
 ## Rendered output
@@ -200,11 +200,11 @@ compiles but cannot run ELF games.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2064/2064 unit tests pass, 17/17 CTest suites pass** (unit, end-to-end native
+**2077/2077 unit tests pass, 17/17 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
-and on a build against the official Vulkan headers. ASan+UBSan: 2064/2064
+and on a build against the official Vulkan headers. ASan+UBSan: 2077/2077
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -1137,7 +1137,9 @@ STORE REFRESH
 | Store core: sources, index validation, search | Implemented, Tested on fakes |
 | Store downloads: Range/If-Range resume, queue, sha256+size check, pnr-package install | Implemented, Tested on fakes and a local server |
 | Store Ed25519 per-source key pinning, signature required at install | Implemented, Tested (RFC 8032 vectors, fakes); re-checked at launch (retained package + signature) |
-| Store scanning, sandbox | Planned (B2 sandbox, B3 scan pipeline, then research engine, Needle 2 front end) |
+| Linux sandbox for launches (`launch --sandbox`): user/net/PID/IPC/UTS namespaces, seccomp denylist, no silent fallback. Filesystem NOT isolated, label PARTIAL | Implemented, Tested here (see docs/sandbox.md) |
+| Windows sandbox | Planned (notes only) |
+| Store scan pipeline (hash, model score, ClamAV), then research engine, Needle 2 front end | Planned (B3 next) |
 | Downloading purchased games | Blocked: no authorized mechanism found; PNR will not bypass DRM or licensing |
 | Desktop launcher UI | Planned |
 | Security manager with a real isolation boundary (seccomp, namespaces) | Planned (required before any untrusted code) |
