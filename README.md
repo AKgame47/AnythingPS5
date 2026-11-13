@@ -57,11 +57,14 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**1341/1341 unit tests pass, 6/6 CTest suites pass** (unit, end-to-end native
-launch, and full package workflow: build -> import -> list -> run imported
-game, plus compact shader fixtures/mutation diagnostics). Clean Release
-build with `-Werror` passes. ASan+UBSan unit/fixture runs pass with leak
-detection disabled (no leak-check claim). No benchmarks exist yet; none
+**1402/1402 unit tests pass, 10/10 CTest suites pass** (unit, end-to-end native
+launch, full package workflow: build -> import -> list -> run imported
+game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus compact
+shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
+and on a build against the official Vulkan headers. ASan+UBSan: 1402/1402
+unit tests pass with leak detection disabled (no leak-check claim); under
+ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
+(a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
 are claimed.
 
 ## Build (Linux)
