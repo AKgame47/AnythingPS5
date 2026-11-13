@@ -56,7 +56,7 @@ developer-controlled test application and no graphics.
 | 07 | Host OS Abstraction | `platform/` | Implemented (Linux backend: CPU/memory/power/process, Tested; Windows backend: Win32 hwinfo, ELF launch Blocked) |
 | 08 | Game Services (audio/input/storage) | `services/` | Planned (save-data storage exists inside `compat`) |
 | 09 | Game Manager (library) | `library/` | SQLite data layer Implemented, Tested; UI Planned | Run-by-id (`pnr run <id>`) resolves installed games with per-game jails, launch history, and honest compatibility advancement (Untested -> Launches Only); UI Planned.
-| 10 | Desktop Launcher UI | `apps/launcher` | Planned (CLI exists: `apps/pnr_cli.cpp`) |
+| 10 | Desktop Launcher UI | `launcher/`, `apps/launcher` | Launcher core Implemented + Tested (headless, text/JSON `pnr-launcher`); desktop UI Planned |
 | 11 | Security Manager | `security/` | Partial (process isolation, application-level file path routing, package traversal/checksum rejection implemented). The current "jail" is virtual path routing, NOT an OS-enforced security sandbox: direct host syscalls bypass it. OS-enforced sandboxing (seccomp/namespaces/job objects) with adversarial tests is Planned here |
 | - | Installer (.pnrgame) | `package/` | Implemented (tar+SHA-256, importer, registration), Tested |
 
@@ -144,7 +144,7 @@ P0 Feasibility (this doc set)
           -> P3 Compatibility services expansion [audio, input]
               -> P4 Adaptive Performance Engine [telemetry-driven]
                   -> P5 Laptop optimization
-                      -> P6 Consumer launcher
+                      -> P6 Consumer launcher (core slice done, headless; no GUI yet)
                           -> P7 Authorized compatibility research
 ```
 
