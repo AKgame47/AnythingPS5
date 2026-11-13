@@ -20,6 +20,7 @@
 #include "core/runtime.hpp"
 #include "library/game_db.hpp"
 #include "loader/native_loader.hpp"
+#include "loader/nid.hpp"
 #include "package/importer.hpp"
 #include "package/sha256.hpp"
 #include "package/tar.hpp"
@@ -318,8 +319,8 @@ int main() {
 
   // --- importer end-to-end + tamper rejection ---
   {
-    const std::string root = "/tmp/pnr_import_root";
-    std::remove((root + "/library.db").c_str());
+    const std::string root =
+        "/tmp/pnr_import_root_" + std::to_string(::getpid());
     pnr::library::GameDb db;
     CHECK(db.open(root + "/library.db"), "import: db open");
 
@@ -330,7 +331,7 @@ int main() {
     m.executable = "bin/game";
     auto st = pnr::pkg::build_package(
         "/tmp/pnr_selftest.pnrgame", m,
-        {{"bin/game", self_exe()}, {"assets/note.txt", "/etc/hostname"}});
+        {{"bin/game", "/bin/true"}, {"assets/note.txt", "/etc/hostname"}});
     CHECK(st, "import: package built");
 
     auto r = pnr::pkg::import_package("/tmp/pnr_selftest.pnrgame", root, db);
@@ -517,6 +518,32 @@ int main() {
     virt.push({"KEY_A", 1});
     auto e2 = virt.poll();
     CHECK(e2 && e2->control == "KEY_A", "input: virtual device queues events");
+  }
+
+  // --- MODULE 02: NID computation (algorithm adapted from AnyPS5, GPL-2.0) ---
+  {
+    // SHA-1 reference vector: SHA1("abc")
+    const std::vector<uint8_t> abc = {'a','b','c'};
+    const auto d = pnr::loader::nid::sha1(abc);
+    char hex[41];
+    for (int i = 0; i < 20; ++i) std::snprintf(hex + i*2, 3, "%02x", d[i]);
+    CHECK(std::string(hex) == "a9993e364706816aba3e25717850c26c9cd0d89d",
+          "nid: sha1 matches reference vector");
+    const std::string n1 = pnr::loader::nid::compute_nid("printf", "libSceLibcInternal");
+    CHECK(n1.size() == 11, "nid: 11-char NID");
+    CHECK(n1 == pnr::loader::nid::compute_nid("printf", "libSceLibcInternal"),
+          "nid: deterministic");
+    CHECK(n1 != pnr::loader::nid::compute_nid("malloc", "libSceLibcInternal"),
+          "nid: distinct per symbol");
+    bool threw = false;
+    try { (void)pnr::loader::nid::compute_nid("", "x"); }
+    catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw, "nid: empty symbol rejected");
+    // round-trip through the seed resolver table
+    CHECK(pnr::loader::nid::resolve_nid(n1) == "printf",
+          "nid: resolver round-trips printf");
+    CHECK(pnr::loader::nid::resolve_nid("XXXXXXXXXXX").empty(),
+          "nid: unknown NID -> empty");
   }
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
