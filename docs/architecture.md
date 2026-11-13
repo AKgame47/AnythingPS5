@@ -45,6 +45,7 @@ developer-controlled test application and no graphics.
 | 02a | PS NID support | `loader/nid.*` | Implemented (SHA-1 + NID computation + seed resolver; algorithm adapted from AnyPS5, GPL-2.0, attribution in file headers), Tested |
 | 02b | PRX system libraries | `prx/` | Implemented (libkernel: usleep, sleep, alloc, free, create_thread, map_memory, munmap, mtypeprotect, query_memory_protection over POSIX mmap; jailed file calls (open/read/write/close/lseek/fstat) over FileSystemService; libSceLibcInternal: printf bounded subset, malloc, free, memcpy, memset, strlen, strcmp; bound by NID; taxonomy per AnyPS5 core/libs/prx, implementations original), Tested |
 | 02c | Import resolution | `loader/import_resolver.*` | Implemented (DT_NEEDED + undefined .dynsym parsed bounds-checked; every import classified host / prx-implemented / prx-declared / unknown and reported at launch), Tested |
+| 02d | PS-ABI shim + PS-style demo | Implemented / Tested | `libpnr_psabi.so` exports real sce functions (heap, sleep, thread, mmap family, jailed file calls over `PsFileTable`); `examples/ps_demo.cpp` is a PS-style binary whose imports all classify prx-implemented and dispatch through the shim at launch (`LD_PRELOAD` + `PNR_JAIL_ROOT`) |
 | 03 | Compatibility Layer | `compat/` | Implemented (memory, timing, filesystem, threads), Tested |
 | 04 | Graphics Engine (Vulkan) | `graphics/` | Blocked in sandbox (no GPU/Vulkan); Planned |
 | 05 | Adaptive Performance Engine | `performance/` | Planned |
