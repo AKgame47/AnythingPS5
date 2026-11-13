@@ -30,6 +30,10 @@ target_link_libraries(pnr_prx PUBLIC pnr_loader pnr_compat)
 target_link_libraries(pnr_loader PUBLIC pnr_core)
 
 # MODULE 03 - compatibility services
+add_library(pnr_graphics graphics/vulkan.cpp graphics/spirv.cpp)
+target_include_directories(pnr_graphics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pnr_graphics PUBLIC pnr_core dl)
+set_target_properties(pnr_graphics PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(pnr_compat compat/services.cpp)
 # PIC: pnr_compat also links into the pnr_psabi shared library.
 set_target_properties(pnr_compat PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -93,7 +97,7 @@ target_link_libraries(pnr_package PUBLIC pnr_library)
 
 # CLI launcher (STEP 1-10 workflow driver)
 add_executable(pnr apps/pnr_cli.cpp)
-target_link_libraries(pnr PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx)
+target_link_libraries(pnr PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics)
 
 # Dev tooling: build .pnrgame packages
 add_executable(pnr_make_package tools/make_package.cpp)
@@ -113,7 +117,7 @@ add_executable(pnr_tests tests/test_main.cpp)
 target_compile_definitions(pnr_tests PRIVATE
   PNR_PS_DEMO_PATH="$<TARGET_FILE:ps_demo>"
   PNR_PSABI_DIR="$<TARGET_FILE_DIR:pnr_psabi>")
-target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx)
+target_link_libraries(pnr_tests PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics)
 
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
 # End-to-end: the CLI validates and natively runs the demo app.
