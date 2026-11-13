@@ -9,10 +9,13 @@
 #include <thread>
 #include <vector>
 
+#include <unistd.h>
+
 #include "compat/services.hpp"
 #include "core/runtime.hpp"
 #include "loader/import_resolver.hpp"
 #include "prx/prx.hpp"
+#include "prx/prx_file.hpp"
 #include "library/game_db.hpp"
 #include "loader/native_loader.hpp"
 #include "package/importer.hpp"
@@ -176,9 +179,15 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args) {
        exe + " is a valid x86-64 ELF (" +
            std::to_string(v.info.segments.size()) + " segments)");
 
-  // STEP 1b - IMPORT RESOLUTION (against the PRX taxonomy)
+  // STEP 1b - IMPORT RESOLUTION (against the PRX taxonomy).
+  // The registry mirrors exactly what the PS-ABI shim provides at launch:
+  // file calls are installed against the game's jail, so the
+  // classification matches the real dispatch environment.
   {
-    const pnr::prx::PrxRegistry prx;
+    pnr::prx::PrxRegistry prx;
+    pnr::compat::FileSystemService game_jail("./pnr_data/jail");
+    pnr::prx::PsFileTable game_files(game_jail);
+    prx.install_file_calls(&game_files);
     pnr::loader::ImportResolution ir;
     const auto st = pnr::loader::resolve_imports(exe, prx, &ir);
     if (!st) {
@@ -243,7 +252,23 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args) {
       rt, "session-1",
       [&loader](const std::string& e, const std::vector<std::string>& a,
                 int* out_sig) -> int {
-        auto lr = loader.launch(e, a);
+        // PS-ABI environment: games get their own jail and can resolve the
+        // sce* shim from the launcher binary's directory.
+        std::string selfdir = ".";
+        {
+          std::ifstream maps_self("/proc/self/exe");  // existence probe
+          char buf[4096];
+          const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
+          if (n > 0) {
+            buf[n] = '\0';
+            const std::string full(buf);
+            const auto slash = full.find_last_of('/');
+            if (slash != std::string::npos) selfdir = full.substr(0, slash);
+          }
+        }
+        auto lr = loader.launch(e, a,
+                                {"PNR_JAIL_ROOT=./pnr_data/jail",
+                                 "LD_LIBRARY_PATH=" + selfdir});
         if (!lr.started) {
           std::printf("  [loader] start failed: %s\n", lr.error.c_str());
           *out_sig = -1;
