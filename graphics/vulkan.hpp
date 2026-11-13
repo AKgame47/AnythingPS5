@@ -37,7 +37,7 @@ struct TexInput {
 struct MeshInput {
   const std::vector<float>* vertices = nullptr;
   uint32_t pos_floats = 2;
-  uint32_t extra_floats = 0;  // optional location-2 attribute after colour: 1 (float) or 3 (vec3)
+  uint32_t extra_floats = 0;  // optional attributes after colour: 1 (float), 2 (vec2 uv), 3 (vec3), 5 (vec2 uv at 2 + vec3 normal at 3)
   const std::vector<uint32_t>* indices = nullptr;
   bool depth = false;
   const TexInput* tex = nullptr;  // sampled at set 0 binding 0 (fragment stage)
@@ -149,6 +149,18 @@ public:
                                           const std::vector<std::vector<uint32_t>>& frame_push,
                                           const float clear[4],
                                           std::vector<std::vector<uint8_t>>* frames);
+
+  // Lit textured variant: float3 position + float3 colour (tint) + float2 uv
+  // + float3 normal (11 floats), push constants 1..32 words per frame.
+  Status render_lit_textured_mesh_frames_rgba(uint32_t width, uint32_t height,
+                                              const std::vector<uint32_t>& vert_spirv,
+                                              const std::vector<uint32_t>& frag_spirv,
+                                              const std::vector<float>& vertices,
+                                              const std::vector<uint32_t>& indices, bool depth,
+                                              const TexInput& tex,
+                                              const std::vector<std::vector<uint32_t>>& frame_push,
+                                              const float clear[4],
+                                              std::vector<std::vector<uint8_t>>* frames);
 
   void shutdown();
 
