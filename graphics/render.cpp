@@ -91,6 +91,32 @@ Status VulkanBackend::render_lit_mesh_frames_rgba(
   return render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, &fp, clear, frames);
 }
 
+Status VulkanBackend::render_textured_mesh_frames_rgba(
+    uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
+    const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
+    const std::vector<uint32_t>& indices, bool depth, const TexInput& tex,
+    const std::vector<std::vector<uint32_t>>& fp, const float clear[4],
+    std::vector<std::vector<uint8_t>>* frames) {
+  if (vertices.empty() || vertices.size() % 8 || vertices.size() / 8 > 65536)
+    return Status::Fail(100, "vulkan", "textured mesh vertices must be float3 position + float3 colour + float2 uv (multiple of 8 floats, max 65536 vertices)");
+  if (indices.empty() || indices.size() % 3 || indices.size() > 30000)
+    return Status::Fail(100, "vulkan", "mesh indices must be a nonzero multiple of 3 (max 30000)");
+  for (uint32_t i : indices)
+    if (i >= vertices.size() / 8)
+      return Status::Fail(100, "vulkan", "mesh index out of range of the vertex array");
+  if (tex.rgba == nullptr || tex.w == 0 || tex.h == 0 || tex.w > 256 || tex.h > 256)
+    return Status::Fail(100, "vulkan", "texture must be 1..256 per side with pixel data");
+  if (fp.empty() || fp.size() > 64)
+    return Status::Fail(100, "vulkan", "frame count must be 1..64");
+  for (auto& p : fp)
+    if (p.empty() || p.size() > 32 || p.size() != fp[0].size())
+      return Status::Fail(100, "vulkan", "textured push constants must be 1..32 words, same size every frame");
+  MeshInput m;
+  m.vertices = &vertices; m.pos_floats = 3; m.extra_floats = 2; m.indices = &indices; m.depth = depth;
+  m.tex = &tex;
+  return render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, &fp, clear, frames);
+}
+
 Status VulkanBackend::render_lit_clip_mesh_rgba(
     uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
     const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
@@ -323,6 +349,98 @@ Status VulkanBackend::render_core(
   if (idx)
     if (Status s = host_buffer(idx->data(), idx->size() * 4, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, "index", &ibuf); !s.ok) return s;
 
+  // --- optional sampled texture: image + view + sampler + staging + descriptor ---
+  const TexInput* tex = mesh ? mesh->tex : nullptr;
+  VkDescriptorSetLayout dlayout = 0;
+  VkDescriptorSet tset = 0;
+  VkImage timg = 0;
+  VkBuffer tstage = 0;
+  if (tex) {
+    if (!tex->rgba || tex->w == 0 || tex->h == 0 || tex->w > 256 || tex->h > 256)
+      return Status::Fail(100, "vulkan", "texture must be 1..256 per side with pixel data");
+    VkFormatProperties fprops{};
+    fn<void (*)(VkPhysicalDevice, int32_t, VkFormatProperties*)>(vkGetPhysicalDeviceFormatProperties)(
+        phys_, (int32_t)VK_FORMAT_R8G8B8A8_UNORM, &fprops);
+    if (!(fprops.optimalTilingFeatures & 0x1))
+      return Status::Fail(100, "vulkan", "RGBA8 sampled images unsupported on this device; texture Blocked");
+    if (tex->linear && !(fprops.optimalTilingFeatures & 0x1000))
+      return Status::Fail(100, "vulkan", "linear filtering of RGBA8 unsupported on this device; use nearest");
+    if (Status s = host_buffer(tex->rgba, (size_t)tex->w * tex->h * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, "texture staging", &tstage); !s.ok) return s;
+    VkImageCreateInfo tci{};
+    tci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    tci.imageType = VK_IMAGE_TYPE_2D; tci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    tci.extent = {tex->w, tex->h, 1}; tci.mipLevels = 1; tci.arrayLayers = 1;
+    tci.samples = VK_SAMPLE_COUNT_1_BIT; tci.tiling = VK_IMAGE_TILING_OPTIMAL;
+    tci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    tci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; tci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    r = fn<VkResult (*)(VkDevice, const VkImageCreateInfo*, void*, VkImage*)>(vkCreateImage)(device_, &tci, nullptr, &timg);
+    if (r != VK_SUCCESS) return vkfail("vkCreateImage (texture)", r);
+    undo.push_back([&] { fn<void (*)(VkDevice, VkImage, void*)>(vkDestroyImage)(device_, timg, nullptr); });
+    VkMemoryRequirements treq{};
+    fn<void (*)(VkDevice, VkImage, VkMemoryRequirements*)>(vkGetImageMemoryRequirements)(device_, timg, &treq);
+    int tt = pick(treq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (tt < 0) tt = pick(treq.memoryTypeBits, 0);
+    if (tt < 0) return Status::Fail(100, "vulkan", "no memory type for the texture image");
+    VkMemoryAllocateInfo tmai{};
+    tmai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    tmai.allocationSize = treq.size; tmai.memoryTypeIndex = (uint32_t)tt;
+    VkDeviceMemory tmem = 0;
+    r = fn<VkResult (*)(VkDevice, const VkMemoryAllocateInfo*, void*, VkDeviceMemory*)>(vkAllocateMemory)(device_, &tmai, nullptr, &tmem);
+    if (r != VK_SUCCESS) return vkfail("vkAllocateMemory (texture)", r);
+    undo.push_back([&, tmem] { fn<void (*)(VkDevice, VkDeviceMemory, void*)>(vkFreeMemory)(device_, tmem, nullptr); });
+    r = fn<VkResult (*)(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize)>(vkBindImageMemory)(device_, timg, tmem, 0);
+    if (r != VK_SUCCESS) return vkfail("vkBindImageMemory (texture)", r);
+    VkImageViewCreateInfo tvci{};
+    tvci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    tvci.image = timg; tvci.viewType = VK_IMAGE_VIEW_TYPE_2D; tvci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    tvci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageView tview = 0;
+    r = fn<VkResult (*)(VkDevice, const VkImageViewCreateInfo*, void*, VkImageView*)>(vkCreateImageView)(device_, &tvci, nullptr, &tview);
+    if (r != VK_SUCCESS) return vkfail("vkCreateImageView (texture)", r);
+    undo.push_back([&, tview] { fn<void (*)(VkDevice, VkImageView, void*)>(vkDestroyImageView)(device_, tview, nullptr); });
+    VkSamplerCreateInfo sci{};
+    sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sci.magFilter = sci.minFilter = tex->linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sci.addressModeU = sci.addressModeV = sci.addressModeW =
+        tex->repeat ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.minLod = 0.0f; sci.maxLod = 0.0f;
+    VkSampler samp = 0;
+    r = fn<VkResult (*)(VkDevice, const VkSamplerCreateInfo*, void*, VkSampler*)>(vkCreateSampler)(device_, &sci, nullptr, &samp);
+    if (r != VK_SUCCESS) return vkfail("vkCreateSampler", r);
+    undo.push_back([&, samp] { fn<void (*)(VkDevice, VkSampler, void*)>(vkDestroySampler)(device_, samp, nullptr); });
+    VkDescriptorSetLayoutBinding lb{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo dlci{};
+    dlci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dlci.bindingCount = 1; dlci.pBindings = &lb;
+    r = fn<VkResult (*)(VkDevice, const VkDescriptorSetLayoutCreateInfo*, void*, VkDescriptorSetLayout*)>(
+        vkCreateDescriptorSetLayout)(device_, &dlci, nullptr, &dlayout);
+    if (r != VK_SUCCESS) return vkfail("vkCreateDescriptorSetLayout (texture)", r);
+    undo.push_back([&] { fn<void (*)(VkDevice, VkDescriptorSetLayout, void*)>(vkDestroyDescriptorSetLayout)(device_, dlayout, nullptr); });
+    VkDescriptorPoolSize dps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+    VkDescriptorPoolCreateInfo dpci{};
+    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &dps;
+    VkDescriptorPool dpool = 0;
+    r = fn<VkResult (*)(VkDevice, const VkDescriptorPoolCreateInfo*, void*, VkDescriptorPool*)>(
+        vkCreateDescriptorPool)(device_, &dpci, nullptr, &dpool);
+    if (r != VK_SUCCESS) return vkfail("vkCreateDescriptorPool (texture)", r);
+    undo.push_back([&, dpool] { fn<void (*)(VkDevice, VkDescriptorPool, void*)>(vkDestroyDescriptorPool)(device_, dpool, nullptr); });
+    VkDescriptorSetAllocateInfo tdai{};
+    tdai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    tdai.descriptorPool = dpool; tdai.descriptorSetCount = 1; tdai.pSetLayouts = &dlayout;
+    r = fn<VkResult (*)(VkDevice, const VkDescriptorSetAllocateInfo*, VkDescriptorSet*)>(
+        vkAllocateDescriptorSets)(device_, &tdai, &tset);
+    if (r != VK_SUCCESS) return vkfail("vkAllocateDescriptorSets (texture)", r);
+    VkDescriptorImageInfo dii{samp, tview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet tw{};
+    tw.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    tw.dstSet = tset; tw.dstBinding = 0; tw.descriptorCount = 1;
+    tw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; tw.pImageInfo = &dii;
+    fn<void (*)(VkDevice, uint32_t, const VkWriteDescriptorSet*, uint32_t, void*)>(
+        vkUpdateDescriptorSets)(device_, 1, &tw, 0, nullptr);
+  }
+
   // --- render pass: clear on load, store, end in TRANSFER_SRC ---
   VkAttachmentDescription att[2]{};
   att[0].format = VK_FORMAT_R8G8B8A8_UNORM; att[0].samples = VK_SAMPLE_COUNT_1_BIT;
@@ -396,6 +514,7 @@ Status VulkanBackend::render_core(
   plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
   VkPushConstantRange prange{VK_SHADER_STAGE_VERTEX_BIT, 0, push_words * 4};
   if (push_words) { plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &prange; }
+  if (tex) { plci.setLayoutCount = 1; plci.pSetLayouts = &dlayout; }
   VkPipelineLayout pl = 0;
   r = fn<VkResult (*)(VkDevice, const VkPipelineLayoutCreateInfo*, void*, VkPipelineLayout*)>(
       vkCreatePipelineLayout)(device_, &plci, nullptr, &pl);
@@ -413,7 +532,7 @@ Status VulkanBackend::render_core(
   VkVertexInputAttributeDescription vattr[3] = {
       {0, 0, static_cast<Fmt>(pos_floats == 4 ? (int32_t)VK_FORMAT_R32G32B32A32_SFLOAT : pos_floats == 3 ? (int32_t)VK_FORMAT_R32G32B32_SFLOAT : (int32_t)VK_FORMAT_R32G32_SFLOAT), 0},
       {1, 0, static_cast<Fmt>((int32_t)VK_FORMAT_R32G32B32_SFLOAT), pos_floats * 4},
-      {2, 0, static_cast<Fmt>(extra_floats == 3 ? (int32_t)VK_FORMAT_R32G32B32_SFLOAT : (int32_t)VK_FORMAT_R32_SFLOAT), (pos_floats + 3) * 4}};
+      {2, 0, static_cast<Fmt>(extra_floats == 3 ? (int32_t)VK_FORMAT_R32G32B32_SFLOAT : extra_floats == 2 ? (int32_t)VK_FORMAT_R32G32_SFLOAT : (int32_t)VK_FORMAT_R32_SFLOAT), (pos_floats + 3) * 4}};
   if (verts) {
     vin.vertexBindingDescriptionCount = 1; vin.pVertexBindingDescriptions = &vbind;
     vin.vertexAttributeDescriptionCount = extra_floats ? 3 : 2; vin.pVertexAttributeDescriptions = vattr;
@@ -492,6 +611,9 @@ Status VulkanBackend::render_core(
         cmd, &rbi, (int32_t)VK_SUBPASS_CONTENTS_INLINE);
     fn<void (*)(VkCommandBuffer, int32_t, VkPipeline)>(vkCmdBindPipeline)(
         cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    if (tset)
+      fn<void (*)(VkCommandBuffer, int32_t, VkPipelineLayout, uint32_t, uint32_t, const VkDescriptorSet*, uint32_t, const uint32_t*)>(
+          vkCmdBindDescriptorSets)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &tset, 0, nullptr);
     if (vbuf) {
       VkDeviceSize off = 0;
       fn<void (*)(VkCommandBuffer, uint32_t, uint32_t, const VkBuffer*, const VkDeviceSize*)>(
@@ -528,6 +650,45 @@ Status VulkanBackend::render_core(
       vkCreateFence)(device_, &fci, nullptr, &fence);
   if (r != VK_SUCCESS) return vkfail("vkCreateFence", r);
   undo.push_back([&, fence] { fn<void (*)(VkDevice, VkFence, void*)>(vkDestroyFence)(device_, fence, nullptr); });
+  if (tex) {
+    // One-time upload: UNDEFINED -> TRANSFER_DST, copy staging, -> SHADER_READ_ONLY.
+    VkCommandBuffer ucmd = nullptr;
+    VkCommandBufferAllocateInfo uai{};
+    uai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    uai.commandPool = pool; uai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; uai.commandBufferCount = 1;
+    r = fn<VkResult (*)(VkDevice, const VkCommandBufferAllocateInfo*, VkCommandBuffer*)>(
+        vkAllocateCommandBuffers)(device_, &uai, &ucmd);
+    if (r != VK_SUCCESS) return vkfail("vkAllocateCommandBuffers (texture upload)", r);
+    fn<VkResult (*)(VkCommandBuffer, const VkCommandBufferBeginInfo*)>(vkBeginCommandBuffer)(ucmd, &begin);
+    VkImageMemoryBarrier b1{};
+    b1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b1.srcAccessMask = 0; b1.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b1.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b1.srcQueueFamilyIndex = b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b1.image = timg; b1.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    using BarrierFn = void (*)(VkCommandBuffer, VkFlags, VkFlags, VkFlags, uint32_t, const void*, uint32_t, const void*, uint32_t, const VkImageMemoryBarrier*);
+    fn<BarrierFn>(vkCmdPipelineBarrier)(ucmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b1);
+    VkBufferImageCopy tr{};
+    tr.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    tr.imageExtent = {tex->w, tex->h, 1};
+    fn<void (*)(VkCommandBuffer, VkBuffer, VkImage, int32_t, uint32_t, const VkBufferImageCopy*)>(
+        vkCmdCopyBufferToImage)(ucmd, tstage, timg, (int32_t)VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &tr);
+    VkImageMemoryBarrier b2 = b1;
+    b2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    fn<BarrierFn>(vkCmdPipelineBarrier)(ucmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b2);
+    fn<VkResult (*)(VkCommandBuffer)>(vkEndCommandBuffer)(ucmd);
+    VkSubmitInfo us{};
+    us.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    us.commandBufferCount = 1; us.pCommandBuffers = &ucmd;
+    r = fn<VkResult (*)(VkQueue, uint32_t, const VkSubmitInfo*, VkFence)>(vkQueueSubmit)(queue_, 1, &us, fence);
+    if (r != VK_SUCCESS) return vkfail("vkQueueSubmit (texture upload)", r);
+    r = fn<VkResult (*)(VkDevice, uint32_t, const VkFence*, VkBool32, uint64_t)>(
+        vkWaitForFences)(device_, 1, &fence, 1, 30000000000ull);
+    if (r != VK_SUCCESS) return vkfail("vkWaitForFences (texture upload)", r);
+    r = fn<VkResult (*)(VkDevice, uint32_t, const VkFence*)>(vkResetFences)(device_, 1, &fence);
+    if (r != VK_SUCCESS) return vkfail("vkResetFences", r);
+  }
   for (uint32_t f = 0; f < nframes; ++f) {
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
