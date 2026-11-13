@@ -28,6 +28,8 @@ const char* error_kind(int c) {
     case kErrRateLimited: return "rate-limited";
     case kErrServer: return "server-error";
     case kErrNetwork: return "network";
+    case kErrTransport: return "transport";
+    case kErrBlockedHost: return "blocked-host";
     case kErrBadJson: return "bad-json";
     case kErrSchema: return "schema-change";
     case kErrSonyErrors: return "sony-errors";
@@ -47,6 +49,8 @@ const char* error_advice(int c) {
     case kErrRateLimited: return "Sony is rate limiting: wait and try again later";
     case kErrServer: return "Sony server error: try again later";
     case kErrNetwork: return "no response from Sony: check your connection";
+    case kErrTransport: return "could not talk to Sony: libcurl (libcurl.so.4) may be missing, or TLS verification failed; PNR never turns verification off";
+    case kErrBlockedHost: return "refused: PNR only talks to Sony's official hosts over https";
     case kErrBadJson: return "the response is not valid JSON";
     case kErrSchema: return "the response is not the expected shape: Sony may have changed the API, nothing was imported";
     case kErrSonyErrors: return "Sony reported errors and returned no data: nothing was imported";
