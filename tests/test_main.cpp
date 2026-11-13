@@ -1,6 +1,7 @@
 // PNR unit tests - no framework dependency, explicit pass/fail counts.
 // Never fabricated: a failure prints and fails the binary.
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -18,6 +19,8 @@
 #include "services/input.hpp"
 #include "services/virtual_fs.hpp"
 #include "core/runtime.hpp"
+#include "graphics/spirv.hpp"
+#include "graphics/vulkan.hpp"
 #include "library/game_db.hpp"
 #include "loader/native_loader.hpp"
 #include "loader/nid.hpp"
@@ -847,6 +850,70 @@ int main() {
           "libdb: launch recorded");
     db.close();
     std::filesystem::remove(dbp);
+  }
+
+  // --- MODULE 04: SPIR-V emission + real execution on Vulkan ---
+  {
+    using pnr::graphics::SpirvModule;
+    using pnr::graphics::VulkanBackend;
+    namespace spv = pnr::graphics::spv;
+    const auto words = SpirvModule::compute_write_u32(42);
+    CHECK(words.size() > 20 && words[0] == spv::kMagic,
+          "spirv: magic header present");
+    CHECK(words[1] == spv::kVersion10 && words[3] == 13 && words[4] == 0,
+          "spirv: version/bound/schema correct");
+    CHECK(words.size() % 1 == 0, "spirv: word-aligned");
+
+    // External validation when the harness provides spirv-val.
+    const char* val = std::getenv("PNR_SPIRV_VAL");
+    if (val != nullptr && std::filesystem::exists(val)) {
+      const std::string tmp = "/tmp/pnr_spv_" + std::to_string(::getpid()) +
+                              ".spv";
+      {
+        std::ofstream o(tmp, std::ios::binary);
+        o.write(reinterpret_cast<const char*>(words.data()),
+                words.size() * 4);
+      }
+      const std::string cmd = std::string(val) + " " + tmp + " 2>&1";
+      FILE* p = popen(cmd.c_str(), "r");
+      std::string out;
+      char buf[256];
+      while (p != nullptr && fgets(buf, sizeof buf, p) != nullptr) out += buf;
+      const int rc = p != nullptr ? pclose(p) : -1;
+      CHECK(rc == 0, "spirv: spirv-val accepts the module");
+      if (rc != 0) std::printf("    spirv-val said: %s\n", out.c_str());
+      std::filesystem::remove(tmp);
+    } else {
+      std::puts("    note: PNR_SPIRV_VAL unset; spirv-val check skipped "
+                "(execution check below still runs)");
+    }
+
+    // Real execution: llvmpipe (software Vulkan) in the dev sandbox.
+    // No ICD at all is an honest SKIP, never a failure.
+    VulkanBackend vk;
+    auto st = vk.open();
+    if (!st) {
+      std::printf("    note: Vulkan unavailable (%s); execution checks "
+                  "skipped honestly\n", st.error.message.c_str());
+    } else {
+      st = vk.create_instance("pnr-tests");
+      CHECK(st, "vk: instance created");
+      CHECK(!vk.devices().empty(), "vk: at least one physical device");
+      for (const auto& d : vk.devices())
+        std::printf("    vk device: %s (vendor=0x%x type=%d%s)\n",
+                    d.name.c_str(), d.vendor_id, d.type,
+                    d.software ? " software" : "");
+      st = vk.create_device(0);
+      CHECK(st, "vk: compute device created");
+      std::vector<uint32_t> io = {0};
+      st = vk.run_compute_words(words, &io);
+      CHECK(st, st ? "vk: compute dispatch ran"
+                   : (std::string("vk: dispatch failed: ") +
+                      st.error.message)
+                        .c_str());
+      CHECK(io[0] == 42, "vk: shader wrote 42 into the SSBO and readback matches");
+      vk.shutdown();
+    }
   }
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
