@@ -50,6 +50,18 @@ public:
                            std::vector<uint32_t>* io,
                            const std::vector<uint32_t>& uniforms = {});
 
+  // MODULE 04 drawing slice: render `vertex_count` vertices (triangle
+  // list, no vertex buffers; the vertex shader generates positions from
+  // gl_VertexIndex) into an OFFSCREEN RGBA8 image cleared to `clear`,
+  // then copy it to host memory (w*h*4 bytes, row-major, top row first).
+  // There is NO swapchain and NO display: this is headless rendering.
+  // Shaders are SPIR-V words with entry point "main".
+  Status render_offscreen_rgba(uint32_t width, uint32_t height,
+                               const std::vector<uint32_t>& vert_spirv,
+                               const std::vector<uint32_t>& frag_spirv,
+                               uint32_t vertex_count, const float clear[4],
+                               std::vector<uint8_t>* rgba);
+
   void shutdown();
 
 private:
@@ -59,6 +71,7 @@ private:
   VkDevice device_ = 0;
   VkQueue queue_ = 0;
   uint32_t queue_family_ = 0;
+  VkFlags queue_flags_ = 0;
   std::vector<VulkanDeviceInfo> devices_;
   std::vector<VkPhysicalDevice> phys_handles_;
 
@@ -81,7 +94,13 @@ private:
   X(vkFreeCommandBuffers) X(vkBeginCommandBuffer) X(vkCmdBindPipeline) \
   X(vkCmdBindDescriptorSets) X(vkCmdDispatch) X(vkEndCommandBuffer) \
   X(vkCreateFence) X(vkWaitForFences) X(vkDestroyFence) X(vkQueueSubmit) \
-  X(vkQueueWaitIdle) X(vkCmdPushConstants)
+  X(vkQueueWaitIdle) X(vkCmdPushConstants) \
+  X(vkCreateImage) X(vkDestroyImage) X(vkGetImageMemoryRequirements) \
+  X(vkBindImageMemory) X(vkCreateImageView) X(vkDestroyImageView) \
+  X(vkCreateRenderPass) X(vkDestroyRenderPass) X(vkCreateFramebuffer) \
+  X(vkDestroyFramebuffer) X(vkCreateGraphicsPipelines) \
+  X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCmdDraw) \
+  X(vkCmdCopyImageToBuffer)
 #define PNR_VK_MEMBER(name) void* name = nullptr;
   PNR_VK_LIST(PNR_VK_MEMBER)
 #undef PNR_VK_MEMBER
