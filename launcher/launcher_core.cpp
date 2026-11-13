@@ -546,8 +546,12 @@ LaunchOutcome LauncherCore::launch(const std::string& game_id,
   if (!get(game_id, &e)) { o.error = "no such game id in the library"; return o; }
   o.found = true;
   if (!e.runnable) { o.error = "not runnable: " + e.not_runnable_reason; return o; }
-  const std::string exe = e.install_path + "/" + e.executable;
-  if (!std::filesystem::exists(exe)) { o.error = "entry point missing on disk: " + exe; return o; }
+  const std::string exe_rel = e.install_path + "/" + e.executable;
+  if (!std::filesystem::exists(exe_rel)) { o.error = "entry point missing on disk: " + exe_rel; return o; }
+  // absolute so the path stays valid after the sandbox changes the root
+  std::error_code abs_ec;
+  const std::string exe = std::filesystem::absolute(exe_rel, abs_ec).lexically_normal().string();
+  if (abs_ec) { o.error = "cannot resolve an absolute path for the entry point"; return o; }
   std::vector<std::string> full = env;
   auto has = [&](const char* key) {
     const std::string k = std::string(key) + "=";
