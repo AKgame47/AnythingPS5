@@ -854,3 +854,9 @@ Store core (`store/store.hpp`, `store/store_cli.hpp`): `Registry(dir)` persists 
 - `BodySink = std::function<bool(const HttpResponse& head, const char*, size_t)>`; returning false stops the transfer ("download stopped").
 - `HttpClient::download(request, sink)`: default is unsupported; `GuardedHttp` applies host rules; the curl path streams, drains error bodies capped at 1 MiB, and aborts on low speed.
 - `Queue::run` enforces size and sha256 before the final rename; `prepare_install` accepts only `verified` or `installed` entries.
+
+## Sandbox contracts (`sandbox/sandbox.hpp`, `loader/native_loader.hpp`)
+
+- `sandbox::probe()` tests each capability in forked children and returns `Probe` (flags plus notes). `usable()` is true only when every piece works.
+- `sandbox::enter(&err)` runs in a forked child before exec. It returns true only in the process that should exec the game (PID 1 of the new PID namespace); the intermediate process waits and mirrors the game's exit code or fatal signal.
+- `NativeLoader::child_setup` is an optional hook run in the forked child before exec. Returning false makes the child print the reason and exit 125. `LauncherCore::set_child_setup` passes it through. Without the hook, launches are unchanged.
