@@ -40,7 +40,7 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2260/2260 unit tests, 17/17 CTest suites** on a fresh Linux
+Test state: **2260/2260 unit tests, 18/18 CTest suites** on a fresh Linux
 Release `-Werror` build (details in the capability section below).
 
 ## Rendered output
@@ -152,7 +152,7 @@ cd build
 
 Full command reference with real captured output is in
 [Captured sessions](#example-output). Linux x86-64 only; a Windows build
-compiles but cannot run ELF games.
+compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 
 ## What works right now (Phase 0 + Phase 1 prototype)
 
@@ -195,12 +195,12 @@ compiles but cannot run ELF games.
 | Game services: virtual filesystem (jailed areas, per-game/user save isolation) | Implemented, Tested |
 | Game services: input (evdev enumeration, mapping profiles, virtual device) | Implemented, Tested |
 | Game services: audio (interface + honest null backend) | Interface Implemented, host backends Planned |
-| Windows backend | Implemented (hwinfo via Win32; ELF launch Blocked, cross-compile CI-verified) |
+| Windows backend | Partial: hwinfo via Win32 Implemented; game launch Blocked. Cross-compiles with llvm-mingw (no CI exists; not run on real Windows) |
 | Rust components | Planned (no Rust toolchain in current sandbox) |
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2260/2260 unit tests pass, 17/17 CTest suites pass** (unit, end-to-end native
+**2260/2260 unit tests pass, 18/18 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
@@ -1060,15 +1060,17 @@ statically linked (no MinGW runtime DLLs needed). Verified: compiles and
 links with clang/llvm-mingw. Not yet executed on real Windows hardware in
 this project - stated, not assumed. `pnr hwinfo` works via the Win32 API;
 `pnr run` is Blocked on Windows because PNR loads ELF (Linux-format)
-binaries, which Windows cannot execute - a PE/Win32 toolchain path for the
-runtime is Phase 1 follow-up work.
+binaries, which Windows cannot execute. A PE/Win32 path for the runtime is
+Planned, not started. Even then PNR would run only guests built for PNR itself.
+It does not run Windows PC games and has no Wine/Proton-style translation layer
+(not planned). See [docs/platforms.md](docs/platforms.md).
 
 ## Releases
 
-Prebuilt binaries (Linux x86-64, Windows x86-64 preview) will be published
-on the [Releases](https://github.com/AKgame47/AnythingPS5/releases) page
-once the current code increments settle. Any release stays a prototype
-demo, not a real PS5 runtime - the release notes say exactly what works.
+No prebuilt binaries are published. Downloadable releases are parked until the
+owner asks for them. If a release is ever made, it would be Linux x86-64 only
+(the Windows build cannot run games), it stays a prototype demo and not a real
+PS5 runtime, and its notes must say exactly what works.
 
 ## Repository layout
 
@@ -1142,7 +1144,7 @@ STORE REFRESH
 | Research tools (C1): hash-chained research log, user-supplied-URL resumable fetch with optional enforced SHA-256 (Sony hosts refused), read-only inspect of PNR formats (Sony containers recognised by magic only, never opened) | Implemented, Tested here with a fake HTTP server; no real host tested (see docs/research.md) |
 | `pnr-launcher ask "..."` (D1): optional natural-language front end that runs the user's own external Needle 2 executable (`PNR_NEEDLE`), re-validates its output, runs read-only commands directly, always asks on a terminal before anything that changes state; the model runs in PNR's partial sandbox by default (D2, `--no-model-sandbox` opts out); uncalibrated threshold, model is sometimes wrong | Experimental. Tested with a fake model plus one host's real binary on a few prompts; no accuracy benchmark, none claimed (see docs/ask.md) |
 | `pnr-launcher manifest suggest <dir>` (D2b): read-only, deterministic DRAFT `manifest.pnr` from a directory, guessed fields marked, writes only with `--out` to a new file, never installs; also reachable read-only through `ask` | Experimental. Tested with generated fixtures and real CLI output; heuristic, no accuracy claim (see docs/manifest-suggest.md) |
-| Windows sandbox | Planned (notes only) |
+| Windows sandbox | Planned (notes only, nothing built) |
 | Store scan pipeline: hash always on, EMBER2024 model stage via external helper (OFF unless model+helper present), ClamAV (OFF unless installed); flagged blocks install; see docs/scan.md | Implemented + Tested with fakes; model stage Experimental, never run against a real model or ClamAV |
 | Research engine, Needle 2 front end, filesystem isolation for the sandbox | Planned |
 | Downloading purchased games | Blocked: no authorized mechanism found; PNR will not bypass DRM or licensing |
