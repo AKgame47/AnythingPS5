@@ -124,3 +124,18 @@ Until unblocked, any commercial PS5 content is reported as
   machine, high-end desktop.
 - Never fabricate results (rule 14). No benchmarks exist yet; none are
   claimed.
+
+## 10. Related work (design reference only)
+
+- [boykopovar/AnyPS5](https://github.com/boykopovar/AnyPS5) — a PS5 relinker:
+  converts PS5 ELFs offline into native Linux/Windows/macOS executables and
+  binds imports by NID against reimplemented PRX system libraries, with a
+  shader recompiler producing SPIR-V. License: GPL-2.0-only. Because PNR
+  currently carries no license, no AnyPS5 code is copied into this
+  repository (copying would require relicensing PNR under GPL-2.0, which is
+  the owner's decision). It is used as a design reference only, mainly for:
+  the relinker-vs-runtime-loader architecture trade-off (Module 02 format
+  adapters), NID-based import binding, the PRX system-library taxonomy a
+  compatibility layer eventually needs, and the shader-to-SPIR-V pipeline
+  shape (Module 04). Its legal posture matches ours: no firmware, keys, or
+  DRM circumvention shipped.
