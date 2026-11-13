@@ -22,8 +22,10 @@
 #include "loader/native_loader.hpp"
 #include "loader/nid.hpp"
 #include "prx/prx.hpp"
+#include "prx/prx_file.hpp"
 #include "loader/import_resolver.hpp"
 #include <atomic>
+#include <filesystem>
 #include "package/importer.hpp"
 #include "package/sha256.hpp"
 #include "package/tar.hpp"
@@ -727,6 +729,73 @@ int main() {
                    &fn, &err) == pnr::prx::SCE_OK,
           "mm: munmap binds");
     CHECK(fn({mapped, 4096}) == pnr::prx::SCE_OK, "mm: bound unmap works");
+  }
+
+  // --- libkernel file calls over the jailed filesystem ---
+  {
+    const std::string fsroot =
+        "/tmp/pnr_prx_fs_" + std::to_string(::getpid());
+    std::filesystem::remove_all(fsroot);
+    pnr::compat::FileSystemService fs(fsroot);
+    CHECK(fs.write_file("/data/hello.txt", "hello pnr"),
+          "fs: seed write inside jail");
+    pnr::prx::PsFileTable table(fs);
+
+    // declared-only until installed (honest)
+    pnr::prx::PrxRegistry reg;
+    std::function<std::int64_t(const std::vector<std::int64_t>&)> fn;
+    std::string err;
+    const std::string nid_open =
+        pnr::loader::nid::compute_nid("sceKernelOpen", "libkernel");
+    CHECK(reg.bind(nid_open, &fn, &err) == pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+          "fs: open declared-only before install");
+
+    const std::int64_t fd = table.open("/data/hello.txt",
+                                       pnr::prx::SCE_KERNEL_O_RDONLY);
+    CHECK(fd >= 3, "fs: open inside jail");
+    char buf[32] = {};
+    CHECK(table.read(fd, buf, 9) == 9 && std::string(buf, 9) == "hello pnr",
+          "fs: read bytes");
+    CHECK(table.lseek(fd, 0, pnr::prx::SCE_KERNEL_SEEK_SET) == 0, "fs: lseek");
+    pnr::prx::SceKernelStat st{};
+    CHECK(table.fstat(fd, &st) == pnr::prx::SCE_OK && st.size == 9 &&
+              !st.is_directory,
+          "fs: fstat size");
+    CHECK(table.read(fd, buf, 4) == 4, "fs: read after seek");
+    CHECK(table.close(fd) == pnr::prx::SCE_OK, "fs: close");
+    CHECK(table.close(fd) == pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+          "fs: double close EINVAL");
+    // write path: create + append
+    const std::int64_t wfd = table.open(
+        "/out/log.txt", pnr::prx::SCE_KERNEL_O_WRONLY | pnr::prx::SCE_KERNEL_O_CREAT);
+    CHECK(wfd >= 3, "fs: create file");
+    CHECK(table.write(wfd, "abc", 3) == 3, "fs: write bytes");
+    CHECK(table.close(wfd) == pnr::prx::SCE_OK, "fs: close write");
+    // traversal rejected by the jail, never touches host
+    CHECK(table.open("../../etc/passwd", pnr::prx::SCE_KERNEL_O_RDONLY) ==
+              pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+          "fs: traversal rejected");
+    // "/etc/passwd" stays INSIDE the jail (root/etc/passwd), so the open
+    // fails only because the file does not exist there - host file untouched
+    CHECK(table.open("/etc/passwd", pnr::prx::SCE_KERNEL_O_RDONLY) < 0,
+          "fs: absolute path jailed, not host");
+    // NID-bound flow after install
+    reg.install_file_calls(&table);
+    CHECK(reg.bind(nid_open, &fn, &err) == pnr::prx::SCE_OK,
+          "fs: open binds after install");
+    const std::string path = "/data/hello.txt";
+    const std::int64_t bfd = fn({reinterpret_cast<std::int64_t>(path.c_str()),
+                                 pnr::prx::SCE_KERNEL_O_RDONLY});
+    CHECK(bfd >= 3, "fs: bound open");
+    CHECK(reg.bind(pnr::loader::nid::compute_nid("sceKernelRead", "libkernel"),
+                   &fn, &err) == pnr::prx::SCE_OK,
+          "fs: read binds");
+    char b2[16] = {};
+    CHECK(fn({bfd, reinterpret_cast<std::int64_t>(b2), 5}) == 5 &&
+              std::string(b2, 5) == "hello",
+          "fs: bound read");
+    table.close(bfd);
+    std::filesystem::remove_all(fsroot);
   }
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
