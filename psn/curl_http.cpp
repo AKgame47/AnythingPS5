@@ -3,6 +3,8 @@
 // talk to a local server. GPL-2.0.
 #include <dlfcn.h>
 
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 
 #include "psn/http.hpp"
@@ -34,23 +36,58 @@ struct Api {
   const char* (*easy_strerror)(CURLcode) = nullptr;
 };
 
-struct Sink { std::string* out; size_t cap; bool over = false; };
+struct Ctx {
+  HttpResponse* res;
+  std::string* body = nullptr;  // buffered mode
+  size_t cap = 0;
+  bool over = false;
+  const BodySink* sink = nullptr;  // streaming mode
+  bool sink_refused = false;
+  int code = 0;  // from the status line, so the body callback knows it
+  size_t discarded = 0;
+};
+std::string trim(std::string v) {
+  while (!v.empty() && (v.back() == '\r' || v.back() == '\n' || v.back() == ' ')) v.pop_back();
+  size_t a = 0; while (a < v.size() && v[a] == ' ') ++a;
+  return v.substr(a);
+}
+bool ieq_prefix(const std::string& line, const char* name) {
+  const size_t n = std::strlen(name);
+  if (line.size() < n) return false;
+  for (size_t i = 0; i < n; ++i) if (std::tolower(static_cast<unsigned char>(line[i])) != name[i]) return false;
+  return true;
+}
 size_t on_body(char* p, size_t sz, size_t n, void* ud) {
-  auto* s = static_cast<Sink*>(ud);
+  auto* c = static_cast<Ctx*>(ud);
   const size_t len = sz * n;
-  if (s->out->size() + len > s->cap) { s->over = true; return 0; }
-  s->out->append(p, len);
+  if (c->sink) {
+    if (c->code == 200 || c->code == 206) {
+      if (!(*c->sink)(*c->res, p, len)) { c->sink_refused = true; return 0; }
+      return len;
+    }
+    c->discarded += len;  // error pages: drained, never kept
+    if (c->discarded > (1u << 20)) { c->over = true; return 0; }
+    return len;
+  }
+  if (c->body->size() + len > c->cap) { c->over = true; return 0; }
+  c->body->append(p, len);
   return len;
 }
 size_t on_header(char* p, size_t sz, size_t n, void* ud) {
+  auto* c = static_cast<Ctx*>(ud);
   const size_t len = sz * n;
-  std::string line(p, len);
-  if (line.size() > 9 && (line[0] == 'L' || line[0] == 'l') && line.compare(0, 9, "Location:") != 0 && line.compare(0, 9, "location:") != 0) return len;
-  if (line.compare(0, 9, "Location:") == 0 || line.compare(0, 9, "location:") == 0) {
-    std::string v = line.substr(9);
-    while (!v.empty() && (v.back() == '\r' || v.back() == '\n' || v.back() == ' ')) v.pop_back();
-    size_t a = 0; while (a < v.size() && v[a] == ' ') ++a;
-    *static_cast<std::string*>(ud) = v.substr(a);
+  const std::string line(p, len);
+  if (line.compare(0, 5, "HTTP/") == 0) {  // a new response (e.g. after 100-continue): forget older headers
+    const size_t sp = line.find(' ');
+    c->code = sp == std::string::npos ? 0 : std::atoi(line.c_str() + sp + 1);
+    c->res->status = c->code;
+    c->res->location.clear(); c->res->content_range.clear(); c->res->etag.clear(); c->res->content_length = -1;
+  } else if (ieq_prefix(line, "location:")) c->res->location = trim(line.substr(9));
+  else if (ieq_prefix(line, "content-range:")) c->res->content_range = trim(line.substr(14));
+  else if (ieq_prefix(line, "etag:")) c->res->etag = trim(line.substr(5));
+  else if (ieq_prefix(line, "content-length:")) {
+    const std::string v = trim(line.substr(15));
+    if (!v.empty() && v.size() < 19 && v.find_first_not_of("0123456789") == std::string::npos) c->res->content_length = std::atoll(v.c_str());
   }
   return len;
 }
@@ -59,7 +96,9 @@ class CurlHttp : public HttpClient {
 public:
   CurlHttp(Api a, CurlOptions o) : api_(a), opt_(o) {}
   ~CurlHttp() override { if (api_.lib) dlclose(api_.lib); }
-  Status perform(const HttpRequest& req, HttpResponse* res) override {
+  Status perform(const HttpRequest& req, HttpResponse* res) override { return run(req, res, nullptr); }
+  Status download(const HttpRequest& req, const BodySink& sink, HttpResponse* res) override { return run(req, res, &sink); }
+  Status run(const HttpRequest& req, HttpResponse* res, const BodySink* stream) {
     *res = HttpResponse{};
     // Checked here too: PROTOCOLS_STR needs curl >= 7.85, older libcurl ignores it.
     {
@@ -72,7 +111,7 @@ public:
     if (!h) return Status::Fail(kErrTransport, "psn", "curl init failed");
     void* hdrs = nullptr;
     for (const auto& x : req.headers) hdrs = api_.slist_append(hdrs, x.c_str());
-    Sink sink{&res->body, static_cast<size_t>(opt_.max_response_bytes)};
+    Ctx ctx; ctx.res = res; ctx.body = &res->body; ctx.cap = static_cast<size_t>(opt_.max_response_bytes); ctx.sink = stream;
     auto set = [&](int o, auto v) { api_.easy_setopt(h, o, v); };
     set(CURLOPT_URL, req.url.c_str());
     set(CURLOPT_NOSIGNAL, 1L);
@@ -83,13 +122,17 @@ public:
     set(CURLOPT_REDIR_PROTOCOLS_STR, "https");
     set(181 /*CURLOPT_PROTOCOLS*/, opt_.allow_http_for_tests ? 3L : 2L);  // legacy form for curl < 7.85
     set(182 /*CURLOPT_REDIR_PROTOCOLS*/, 2L);
-    set(CURLOPT_TIMEOUT, opt_.timeout_seconds);
+    if (stream) {  // long transfers: no total timeout, but give up if the link stalls
+      set(CURLOPT_TIMEOUT, 0L);
+      set(19 /*CURLOPT_LOW_SPEED_LIMIT*/, 1024L);
+      set(20 /*CURLOPT_LOW_SPEED_TIME*/, 30L);
+    } else set(CURLOPT_TIMEOUT, opt_.timeout_seconds);
     set(CURLOPT_CONNECTTIMEOUT, 15L);
     set(CURLOPT_USERAGENT, "pnr-psn/1 (unofficial; local tool)");
     set(CURLOPT_WRITEFUNCTION, reinterpret_cast<void*>(&on_body));
-    set(CURLOPT_WRITEDATA, static_cast<void*>(&sink));
+    set(CURLOPT_WRITEDATA, static_cast<void*>(&ctx));
     set(CURLOPT_HEADERFUNCTION, reinterpret_cast<void*>(&on_header));
-    set(CURLOPT_HEADERDATA, static_cast<void*>(&res->location));
+    set(CURLOPT_HEADERDATA, static_cast<void*>(&ctx));
     if (hdrs) set(CURLOPT_HTTPHEADER, hdrs);
     if (req.method != "GET") {
       set(CURLOPT_CUSTOMREQUEST, req.method.c_str());
@@ -103,8 +146,9 @@ public:
     if (hdrs) api_.slist_free_all(hdrs);
     api_.easy_cleanup(h);
     if (rc != CURLE_OK) {
-      std::string m = sink.over ? "response larger than the limit" : "transfer failed: " + scrub(why);
-      return Status::Fail(sink.over ? kErrSchema : kErrTransport, "psn", m);
+      if (ctx.sink_refused) return Status::Fail(kErrTransport, "psn", "download stopped: the receiver refused more data (size limit or disk)");
+      std::string m = ctx.over ? "response larger than the limit" : "transfer failed: " + scrub(why);
+      return Status::Fail(ctx.over && !stream ? kErrSchema : kErrTransport, "psn", m);
     }
     res->status = static_cast<int>(code);
     return Status::Ok();
