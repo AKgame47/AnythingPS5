@@ -214,6 +214,7 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args,
        exe + " is a valid x86-64 ELF (" +
            std::to_string(v.info.segments.size()) + " segments)");
 
+  int gfx_imports = 0;
   // STEP 1b - IMPORT RESOLUTION (against the PRX taxonomy).
   // The registry mirrors exactly what the PS-ABI shim provides at launch:
   // file calls are installed against the game's jail, so the
@@ -234,7 +235,11 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args,
              std::to_string(ir.host) + " host-resolved, " +
              std::to_string(ir.prx_implemented) + " prx-implemented, " +
              std::to_string(ir.prx_declared) + " prx-declared-only, " +
-             std::to_string(ir.unknown) + " unknown");
+             std::to_string(ir.unknown) + " unknown" +
+             (ir.pnr_extension > 0
+                  ? ", " + std::to_string(ir.pnr_extension) + " pnr-extension"
+                  : std::string()));
+    gfx_imports = ir.pnr_extension;
     for (const auto& e : ir.imports) {
       if (e.klass != pnr::loader::ImportClass::Host)
         std::printf("  [import] %-32s %s\n", e.name.c_str(),
@@ -282,9 +287,21 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args,
   step("4-runtime", "SUCCESS", "compat memory/fs/thread services up");
 
   // STEP 5 - GRAPHICS INITIALIZATION
-  step("5-graphics", "SKIPPED",
-       "demo app is non-graphical; Vulkan compute backend is implemented "
-       "(see pnr gpu), render passes are Phase 2 work");
+  if (gfx_imports > 0) {
+    const auto gpu_cap = rt.capabilities().query("gpu.vulkan");
+    const bool have_gpu = gpu_cap && gpu_cap->supported;
+    step("5-graphics", have_gpu ? "SUCCESS" : "BLOCKED",
+         have_gpu
+             ? "game imports " + std::to_string(gfx_imports) +
+                   " pnrGfx* calls; the shim renders OFFSCREEN (headless) in "
+                   "the game process; " + gpu_note +
+                   "; no swapchain, no display"
+             : "game needs pnrGfx* offscreen rendering but " + gpu_note);
+  } else {
+    step("5-graphics", "SKIPPED",
+         "game imports no pnrGfx* calls (non-graphical); the offscreen "
+         "renderer is available to games that do (see ps_cube_demo)");
+  }
 
   // STEP 6 - CONTENT INITIALIZATION
   st = fs.create_dirs("/saves");
@@ -354,9 +371,28 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args,
            std::to_string(session.last_exit_code()));
 
   // STEP 8/9 - MONITORING + OPTIMIZATION
-  step("8-monitor", "SUCCESS",
-       "wall time + exit status measured (frame-time telemetry needs the "
-       "graphics phase)");
+  if (gfx_imports > 0) {
+    namespace fsys = std::filesystem;
+    const std::string jail_dir = game_id.empty()
+                                     ? "./pnr_data/jail"
+                                     : "./pnr_data/jail/" + game_id;
+    std::size_t n = 0, bytes = 0;
+    std::error_code ec;
+    for (const auto& de : fsys::directory_iterator(jail_dir + "/frames", ec))
+      if (de.path().extension() == ".ppm") {
+        ++n;
+        bytes += static_cast<std::size_t>(de.file_size(ec));
+      }
+    step("8-monitor", "SUCCESS",
+         "wall time + exit status measured; " + std::to_string(n) +
+             " presented frame file(s), " + std::to_string(bytes) +
+             " bytes in the jail (/frames); per-frame times are printed by "
+             "the game, the runtime has no frame-time telemetry yet");
+  } else {
+    step("8-monitor", "SUCCESS",
+         "wall time + exit status measured (non-graphical game: no "
+         "frame-time telemetry)");
+  }
   step("9-optimize", "SKIPPED",
        "deterministic adaptive controller is Phase 4 work");
 
