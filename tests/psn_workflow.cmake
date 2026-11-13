@@ -20,7 +20,7 @@ file(WRITE ${WS}/resp.json "{\"data\":{\"purchasedTitlesRetrieve\":{\"__typename
 file(WRITE ${WS}/tok.txt "${TOK}\n")
 
 run_launcher(out rc psn status)
-if(NOT rc EQUAL 0 OR NOT out MATCHES "token: absent" OR NOT out MATCHES "no network code")
+if(NOT rc EQUAL 0 OR NOT out MATCHES "token: absent" OR NOT out MATCHES "only `psn sync` contacts Sony")
   message(FATAL_ERROR "status without token wrong: ${rc} ${out}")
 endif()
 
@@ -86,6 +86,21 @@ if(NOT out MATCHES "present-loose-permissions")
   message(FATAL_ERROR "loose permissions not reported: ${out}")
 endif()
 execute_process(COMMAND chmod 600 ${WS}/lib/psn/npsso.token)
+
+# live sync: no token -> clear error and no change; with a token and no
+# reachable Sony (this environment may have none) it must fail cleanly and
+# change nothing. Real Sony behaviour is NOT tested here.
+run_launcher(out rc psn sync)
+if(rc EQUAL 0 OR NOT out MATCHES "token")
+  message(FATAL_ERROR "sync with a token missing/invalid wrong: ${rc} ${out}")
+endif()
+if(out MATCHES "${TOK}")
+  message(FATAL_ERROR "token echoed by sync")
+endif()
+run_launcher(out rc psn status)
+if(NOT out MATCHES "owned entries: 2 ")
+  message(FATAL_ERROR "failed sync changed the library: ${out}")
+endif()
 
 # disconnect
 run_launcher(out rc psn disconnect --forget-owned)
