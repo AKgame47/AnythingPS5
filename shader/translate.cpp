@@ -49,7 +49,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
     nodes.push_back({U32Op::Constant, o.value});
     return Reg{static_cast<uint32_t>(nodes.size()-1), o.value, o.value, 0};
   };
-  bool ended = false, stored = false, guarded = false, conditional = false;
+  bool ended = false, stored = false, guarded = false, conditional = false, floating = false;
   struct Compare { uint32_t a,b; };
   std::optional<Compare> scc;
   bool merge_active=false;
@@ -100,6 +100,16 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       if (!v) return fail("undefined VGPR or unsupported v_mov source" + at);
       if(merge_active) assigned[i.dst.reg]=true;
       regs[i.dst.reg] = *v; // SSA alias: later overwrites do not change this value
+    } else if (i.family==RdnaFamily::VOP2 &&
+               (i.opcode_id==3 || i.opcode_id==4 || i.opcode_id==8)) {
+      // Raw uint register storage, IEEE binary32 arithmetic under Vulkan's
+      // host policy. No SDWA/DPP, source modifiers, denorm/rounding modes.
+      auto a=source(i.src0), b=source(i.src1);
+      if(!a || !b) return fail("undefined/unsupported float source"+at);
+      const auto op=i.opcode_id==3?U32Op::FAdd:i.opcode_id==4?U32Op::FSub:U32Op::FMul;
+      nodes.push_back({op,a->node,b->node});
+      regs[i.dst.reg]=Reg{uint32_t(nodes.size()-1),{}};
+      floating=true;
     } else if (i.family == RdnaFamily::VOP2 &&
                (i.opcode_id == 0x25 || i.opcode_id == 0x26 ||
                 i.opcode_id == 0x1b || i.opcode_id == 0x1c || i.opcode_id == 0x1d)) {
@@ -203,6 +213,7 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
     if(read.first<=writes->last && writes->first<=read.last)
       return fail("multi-invocation load/output ranges overlap; barriers not supported");
   ComputeTranslation r;
+  r.host_float32=floating;
   r.required_uniform_words=uniform_words;
   r.conditional_selection = conditional;
   r.local_size_x = local_size_x;
