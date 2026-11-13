@@ -42,6 +42,7 @@ developer-controlled test application and no graphics.
 |---|--------|-----------|--------|
 | 01 | Core Runtime | `core/` | Implemented, Tested |
 | 02 | Native Executable Loader | `loader/` | Implemented (ELF64 validate + supervised child-process launch), Tested |
+| 02a | PS NID support | `loader/nid.*` | Implemented (SHA-1 + NID computation + seed resolver; algorithm adapted from AnyPS5, GPL-2.0, attribution in file headers), Tested |
 | 03 | Compatibility Layer | `compat/` | Implemented (memory, timing, filesystem, threads), Tested |
 | 04 | Graphics Engine (Vulkan) | `graphics/` | Blocked in sandbox (no GPU/Vulkan); Planned |
 | 05 | Adaptive Performance Engine | `performance/` | Planned |
