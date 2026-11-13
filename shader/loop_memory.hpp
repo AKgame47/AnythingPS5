@@ -1,5 +1,5 @@
 // Bounded two-axis loop memory proof. GPL-2.0.
-// A verifier only: does not enable guest loop-memory translation/execution.
+// Used by the strict guarded dword-copy loop translator before lowering.
 #pragma once
 #include <cstdint>
 #include <string>
