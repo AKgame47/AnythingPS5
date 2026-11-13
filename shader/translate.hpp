@@ -14,6 +14,7 @@ struct ComputeTranslation {
   bool full64_pointers = false; // runtime pair guard/carry-aware FLAT offset
   bool host_float32 = false; // Vulkan host FP policy, not PS5 exact modes
   uint32_t required_uniform_words = 0; // initial s0..sN-1, runtime push constants
+  bool structured_loop = false; // strict constant-count accumulator loop
   bool conditional_selection = false; // restricted forward SCC0 skip
   uint32_t local_size_x = 1; // one workgroup, explicit test invocation ABI
   bool guarded_memory = false; // invalid runtime loads=0 / stores skipped
@@ -42,7 +43,10 @@ struct ComputeTranslation {
 // Conditional subset: readfirstlane to SGPR (single invocation only), s_mov_b32,
 // s_cmp_eq_u32, one forward s_cbranch_scc0 over v_mov-only body. Registers
 // assigned in body must also be defined on skipped path. Branch/Phi merge;
-// no loops, nesting, branch memory effects or general control flow.
+// no nesting, branch memory effects or general control flow.
+// Separate counted-loop subset: s_mov constant 1..64; one in-place vector
+// uint32 add of invariant delta; s_sub counter,1; s_cmp counter,0; SCC0
+// backedge to add. One loop, no combined selection/body memory/runtime count.
 // Explicit uniform ABI: uniform_words=0..16 initializes s0..sN-1 from
 // runtime Vulkan push constants, shared across invocations. Values are not
 // baked into SPIR-V. Exact count required at checked dispatch. Not a Sony
