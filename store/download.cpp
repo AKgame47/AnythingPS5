@@ -241,6 +241,7 @@ Status Queue::prepare_install(const std::string& s, const std::string& p, std::s
   Package k; Status r = find_pkg(s, p, &k);
   if (!r) return r;
   if (label_for(k) == "unsupported") return fail(kErrUnsupportedKind, "not a PNR package: cannot be installed");
+  { const Source* so = reg_.find(s); std::string mode; if (!so) return fail(kErrNoSource, "no such source"); Status sg = check_signature(*so, k, &mode); if (!sg) return sg; }
   DlState st; bool ex = false;
   r = load_state(s, p, &st, &ex);
   if (!r) return r;
