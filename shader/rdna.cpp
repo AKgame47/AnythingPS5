@@ -327,6 +327,7 @@ RdnaDecodeResult rdna_decode(const std::vector<uint32_t>& code) {
         in.src0 = scalar_source(word & 0x1ffu);
         in.dst.kind = RdnaOperandKind::VectorReg;
         in.dst.reg = (word >> 17u) & 0xffu;
+        if (in.opcode_id==2) in.dst=scalar_dest(in.dst.reg);
         if (!apply_literal(code, wi, in, r.error)) return r;
         break;
       }
