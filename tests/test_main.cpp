@@ -1525,6 +1525,128 @@ int main() {
     }
   }
 
+
+  // --- Strict forward SCC0 skip with move-only body and merge Phi ---
+  {
+    using namespace pnr::shader;using namespace pnr::graphics;
+    constexpr uint64_t base=0x1200001000ull;
+    // v2=input[0], v3=input[1]; s0=readfirstlane(v2), s1=7;
+    // v4=111; if(s0==s1) {v4=v3;} output[2]=v4.
+    const std::vector<uint32_t> code={
+      0x7e0002ff,0x1000,0x7e0202ff,0x12,
+      0xdc300000,0x027f0000,0xdc300004,0x037f0000,
+      0x7e000502,0xbe810387,0x7e0802ff,111,
+      0xbf060100,0xbf840001,0x7e080303,
+      0xdc700008,0x007f0400,0xbf810000};
+    auto t=translate_compute_words(code,base,4);
+    CHECK(t.ok && t.conditional_selection && !t.stored_value_known,
+          "branch: runtime SCC compare/forward selection compiles");
+    auto dec=rdna_decode({0x7e000502});
+    CHECK(dec.ok && dec.instructions[0].dst.kind==RdnaOperandKind::ScalarReg &&
+          dec.instructions[0].src0.kind==RdnaOperandKind::VectorReg,
+          "branch: v_readfirstlane has SGPR destination, VGPR source");
+    auto reject=[&](std::vector<uint32_t> w,const char* label,uint32_t lanes=1) {
+      auto r=translate_compute_words(w,base,4,lanes);
+      CHECK(!r.ok && !r.error.empty() && r.spirv.empty(),label);
+    };
+    auto w=code;w[13]=0xbf84ffff;
+    reject(w,"branch: backward branch rejected");
+    w=code;w[13]=0xbf840000;
+    reject(w,"branch: zero displacement rejected");
+    w=code;w[13]=0xbf840002;
+    reject(w,"branch: target inside FLAT payload rejected");
+    w=code;w[13]=0xbf847fff;
+    reject(w,"branch: out-of-program target rejected");
+    w=code;w.erase(w.begin()+12);
+    reject(w,"branch: undefined SCC rejected");
+    w=code;w[12]=0xbf060109;
+    reject(w,"branch: undefined compare SGPR rejected");
+    w=code;w[8]=0x7e000509;
+    reject(w,"branch: undefined readfirstlane VGPR rejected");
+    w=code;w[8]=0x7ed40502;
+    reject(w,"branch: special scalar destination rejected");
+    w=code;w[13]=0xbf850001;
+    reject(w,"branch: SCC1 branch outside subset rejected");
+    w=code;w[14]=0xbf840001;
+    reject(w,"branch: nested branch rejected");
+    w=code;w[13]=0xbf840003;
+    reject(w,"branch: conditional memory side effect rejected");
+    w=code;w[14]=0x7e0c0303;
+    reject(w,"branch: merged register undefined on skipped path rejected");
+    w=code;w.insert(w.begin()+15,{0xbf840001,0x7e080303});
+    reject(w,"branch: second selection rejected");
+    w=code;w[14]=(0x25u<<25u)|(4u<<17u)|(3u<<9u)|260u;
+    reject(w,"branch: body ALU outside selection subset rejected");
+    w=code;w[14]=0xbe810387;
+    reject(w,"branch: body scalar side effect rejected");
+    w=code;w[12]=0xbf070100;
+    reject(w,"branch: non-equality comparison outside subset rejected");
+    w=code;w[13]=0xbf840001;w[14]=0x7e0802ff;w.insert(w.begin()+15,222);
+    reject(w,"branch: target inside move literal rejected");
+    reject(code,"branch: scalar branch in multi-invocation mode rejected",2);
+    CHECK(SpirvModule::compute_u32({{U32Op::Constant,1},
+      {U32Op::SelectEqual,0,0,0,2}}).empty(),"branch: malformed selection SSA ref rejected");
+    const char* val=std::getenv("PNR_SPIRV_VAL");
+    auto validate=[&](const ComputeTranslation& r) {
+      if(val && std::filesystem::exists(val)) {
+        const std::string path="/tmp/pnr_branch_"+std::to_string(::getpid())+".spv";
+        {std::ofstream o(path,std::ios::binary);o.write(reinterpret_cast<const char*>(r.spirv.data()),r.spirv.size()*4);}
+        CHECK(std::system((std::string(val)+" --target-env vulkan1.0 "+path).c_str())==0,
+              "branch: structured branch/Phi validates for Vulkan 1.0");
+        std::filesystem::remove(path);
+      }else std::puts("    note: branch validator skipped (not configured)");
+    };
+    validate(t);
+    VulkanBackend vk;auto st=vk.open();
+    if(!st)std::printf("    note: branch Vulkan skipped: %s\n",st.error.message.c_str());
+    else {
+      st=vk.create_instance("pnr-branch-tests");CHECK(st,"branch: Vulkan instance created");
+      if(st && !vk.devices().empty()) {
+        st=vk.create_device(0);CHECK(st,"branch: compute device created");
+        if(st) {
+          for(uint32_t a:{7u,0u,0xffffffffu})for(uint32_t b:{0u,0xdeadbeefu}) {
+            std::vector<uint32_t> io={a,b,0xa5a5a5a5,0xcafebabe};
+            const auto run=run_translated_compute(vk,t,&io);
+            CHECK(run && io==std::vector<uint32_t>({a,b,a==7?b:111,0xcafebabe}),
+                  "branch: taken/fallthrough path runtime readback exact, neighbors unchanged");
+          }
+          // Two dependent assignments, both merged (v3 already defined).
+          w=code;w[13]=0xbf840002;
+          w.insert(w.begin()+15,0x7e060304); // v3=v4 in body
+          w[17]=0x007f0300; // store v3
+          auto multi=translate_compute_words(w,base,4);validate(multi);
+          for(uint32_t a:{7u,8u}) {
+            std::vector<uint32_t> io={a,55,0,0xabcdef01};
+            const auto run=run_translated_compute(vk,multi,&io);
+            CHECK(multi.ok && run && io[2]==55 && io[3]==0xabcdef01,
+                  "branch: dependent body assignments merge across multiple VGPRs");
+          }
+          // Selection feeds a guarded pointer, exercising guard/branch Phi composition.
+          w=code;w[11]=0x1004;w[13]=0xbf840002;w[14]=0x7e0802ff;
+          w.insert(w.begin()+15,0x1000);
+          w.insert(w.begin()+16,{0x7e0a02ff,0x12,0xdc300000,0x067f0004});
+          w[21]=0x007f0600;
+          auto pointer=translate_compute_words(w,base,4);validate(pointer);
+          for(uint32_t a:{7u,8u}) {
+            std::vector<uint32_t> io={a,55,0,0xabcdef01};
+            const auto run=run_translated_compute(vk,pointer,&io);
+            CHECK(pointer.ok && pointer.guarded_memory && run && io[2]==(a==7?a:55),
+                  "branch: selected address composes with guarded load Phi");
+          }
+          // Conditional constant uses extra literal word; PC target must skip both.
+          w=code;w[13]=0xbf840002;w[14]=0x7e0802ff;w.insert(w.begin()+15,222);
+          auto literal=translate_compute_words(w,base,4);validate(literal);
+          for(uint32_t a:{7u,8u}) {
+            std::vector<uint32_t> io={a,55,0,0xabcdef01};
+            const auto run=run_translated_compute(vk,literal,&io);
+            CHECK(literal.ok && run && io[2]==(a==7?222u:111u),
+                  "branch: literal body word count and merge PC preserved");
+          }
+        }
+      }else CHECK(false,"branch: physical device available");
+    }
+  }
+
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
