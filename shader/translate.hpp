@@ -11,6 +11,7 @@ struct ComputeTranslation {
   bool ok = false;
   std::string error;
   std::vector<uint32_t> spirv; // empty on EVERY failure
+  bool host_float32 = false; // Vulkan host FP policy, not PS5 exact modes
   uint32_t required_uniform_words = 0; // initial s0..sN-1, runtime push constants
   bool conditional_selection = false; // restricted forward SCC0 skip
   uint32_t local_size_x = 1; // one workgroup, explicit test invocation ABI
@@ -32,6 +33,10 @@ struct ComputeTranslation {
 // Host must bind at least required_buffer_words words; zero/oversize ranges
 // and base+size overflow fail. Legacy callers default to a single word.
 // Supports v_mov, flat_load/store_dword, uint32 add/sub/and/or/xor.
+// Experimental unmodified VOP2 f32 add/sub/mul bitcasts raw registers to
+// binary32, emits NoContraction, bitcasts result back. Host Vulkan default
+// FP policy only: no PS5 rounding/denorm/NaN payload/signaling guarantee.
+// Inline float selectors/SDWA/DPP/VOP3 modifiers remain unsupported.
 // Single-invocation conditional subset: readfirstlane to SGPR, s_mov_b32,
 // s_cmp_eq_u32, one forward s_cbranch_scc0 over v_mov-only body. Registers
 // assigned in body must also be defined on skipped path. Branch/Phi merge;
