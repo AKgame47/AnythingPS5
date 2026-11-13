@@ -4,7 +4,12 @@
 #include <cstring>
 #include <fstream>
 #include <string>
-#include <unistd.h>
+#if defined(_WIN32)
+  #include <windows.h>
+#endif
+#if defined(__unix__) || defined(__APPLE__)
+  #include <unistd.h>
+#endif
 
 #include "compat/services.hpp"
 #include "core/runtime.hpp"
@@ -29,11 +34,20 @@ static int g_pass = 0, g_fail = 0;
   } while (0)
 
 static std::string self_exe() {
+#if defined(__unix__) || defined(__APPLE__)
   char buf[4096];
   ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
   if (n <= 0) return {};
   buf[n] = '\0';
   return buf;
+#elif defined(_WIN32)
+  char buf[MAX_PATH];
+  DWORD n = ::GetModuleFileNameA(nullptr, buf, MAX_PATH);
+  if (n == 0 || n == MAX_PATH) return {};
+  return std::string(buf, n);
+#else
+  return {};
+#endif
 }
 
 int main() {
