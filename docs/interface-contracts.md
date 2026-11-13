@@ -148,8 +148,8 @@ share one core.
 - `rdna_decode(code)` walks a word stream into `RdnaInstruction` records
   (pc, family, opcode id, mnemonic, operands, immediates, branch target,
   word count). Truncation and unknown families are honest errors.
-- Mnemonics exist only for the named subset: scalar families complete per
-  the adapted tables, vector families partial. Other opcodes decode
+- Mnemonics exist only for a named subset, partial in both scalar and
+  vector families. Other opcodes decode
   structurally with `supported=false` and no invented name.
 - 64-bit families (VOP3/memory/image) consume two words so program
   walking stays aligned even where payload fields are not decoded yet.
@@ -158,7 +158,8 @@ share one core.
   implementation is original. Test corpus is synthetic instruction words,
   like AnyPS5's own decoder tests - no commercial shader content.
 - Planned: SDWA/DPP modifiers, MIMG/MUBUF payload fields, VOP3 named
-  table, control-flow structurization, decode-to-SPIR-V translation.
+  table, control-flow structurization, general decode-to-SPIR-V translation.
+  The restricted constant-compute path is IF-GRAPH-03 below.
 
 
 Game Rendering Interface → Graphics Compatibility Adapter → Intermediate
@@ -310,3 +311,34 @@ touches nothing in the library.
 - The CLI installs the same jail's file table into its classification registry
   before resolving imports, so the printed classification matches the real
   dispatch environment.
+
+
+## IF-GRAPH-03 Restricted constant-compute translation (v1)
+
+Status: Experimental, Implemented (strict subset), Tested.
+
+- `shader/translate.hpp`: `translate_compute_bytes(bytes, guest_base)` parses
+  little-endian words without alignment assumptions; partial words fail.
+  `translate_compute_words(words, guest_base)` is the word-level entry point.
+- Result: `ok`, diagnostic `error`, `spirv`, `stored_value`. Every failure
+  returns an empty SPIR-V vector. No instruction is silently skipped.
+- Explicit test ABI: one active invocation, one 32-bit SSBO at set 0/binding 0.
+  The caller's 64-bit guest base maps to exactly word zero of this binding.
+  It is not a host pointer, a PS5 ABI, or general GPU address translation.
+- Accepted instructions: `v_mov_b32` from literal/inline integer/previously
+  defined constant VGPR, exactly one unmodified `flat_store_dword`, and a
+  final `s_endpgm` with zero immediate. The address VGPR pair must be fully
+  defined and equal the supplied guest base. The FLAT scalar-address field
+  must be 0x7f, offset/segment/cache/LDS/reserved fields zero.
+- Straight-line moves are constant-folded, then `compute_write_u32(value)`
+  emits the SPIR-V store. This is a restricted translator, not a runtime
+  VGPR register file or wavefront emulator. Full shader translation Planned.
+- Rejects undefined registers, unsupported sources/instructions, modifiers,
+  other addresses, additional stores, missing termination, trailing code.
+- FLAT field layout/opcode 0x1c are adapted from AnyPS5's
+  `RdnaMemoryOpDecoder.cpp` (boykopovar, GPL-2.0), under the attribution in
+  `shader/rdna.cpp`. Synthetic test instructions contain no commercial code.
+- Tests validate translated SPIR-V for Vulkan 1.0 using `PNR_SPIRV_VAL` when
+  configured, then dispatch on Vulkan and read back 0, 42, 0xdeadbeef and
+  0xffffffff. The neighboring word must remain unchanged. Missing validator
+  or loader is reported as a skip, not claimed as tested on that host.
