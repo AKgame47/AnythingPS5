@@ -48,6 +48,7 @@ developer-controlled test application and no graphics.
 | 06 | Laptop Optimization Manager | `performance/laptop` | Planned |
 | 05 | Adaptive Performance Engine | `ape/` | Implemented (deterministic rules: CPU/RAM class heuristic, frame stats, closed-loop keep/revert controller), Tested |
 | 06 | Laptop Optimization Manager | `laptop/` | Implemented (battery/balanced/max-performance caps; unknown power state never assumed AC), Tested |
+| 08 | Game Services | `services/` | Implemented: virtual filesystem (jailed areas, per-game/user saves), input (evdev enumeration, mapping profiles, virtual device), audio (interface + null backend), Tested; host audio backends Planned |
 | 07 | Host OS Abstraction | `platform/` | Implemented (Linux backend: CPU/memory/power/process, Tested; Windows backend: Win32 hwinfo, ELF launch Blocked) |
 | 08 | Game Services (audio/input/storage) | `services/` | Planned (save-data storage exists inside `compat`) |
 | 09 | Game Manager (library) | `library/` | SQLite data layer Implemented, Tested; UI Planned |
