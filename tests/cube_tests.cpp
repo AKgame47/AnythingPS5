@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
+#include <set>
 #include <sstream>
 #include <unistd.h>
 #include "loader/import_resolver.hpp"
@@ -202,6 +203,72 @@ void pnr_cube_tests(int& pass,int& fail) {
     check(all_ok,"mesh game: presented silhouette matches an independent CPU projection of the uploaded triangles within 1% of pixels");
     pnr::prx::PrxRegistry reg;pnr::loader::ImportResolution ir;
     check(pnr::loader::resolve_imports(PNR_PS_MESH_DEMO_PATH,reg,&ir)&&ir.pnr_extension==6&&ir.unknown==0,"mesh game: pnrGfx* imports classify as pnr-extension");
+    std::filesystem::remove_all(jail);
+  }
+#endif
+#ifdef PNR_PS_TEX_DEMO_PATH
+  // ---- a game uploads a texture + uv quad; CPU ray-cast + sampler reference ----
+  {
+    const std::string jail="/tmp/pnr_texdemo_jail_"+std::to_string(::getpid());
+    std::filesystem::remove_all(jail);
+    pnr::loader::NativeLoader loader;
+    auto lr=loader.launch(PNR_PS_TEX_DEMO_PATH,{},{"PNR_JAIL_ROOT="+jail,std::string("LD_LIBRARY_PATH=")+PNR_PSABI_DIR});
+    check(lr.validated&&lr.started&&lr.finished&&!lr.signaled&&lr.exit_code==0,"texture game: ps_tex_demo launched, exit 0 (9 invalid calls refused inside the game)");
+    // 8x8 texture the game builds: r=32x+16, g=32y+16, b=(x+y odd?255:64)
+    auto texel=[&](int x,int y,int c)->double{return c==0?32.0*x+16:c==1?32.0*y+16:(((x+y)&1)?255.0:64.0);};
+    const double f=1.0/std::tan(fov*0.5);
+    constexpr uint32_t N=8;bool all_ok=true;uint32_t found=0;
+    double worst_frac=0;uint32_t distinct_nearest=0;
+    for(uint32_t k=0;k<N;++k){
+      char name[64];std::snprintf(name,sizeof name,"/frames/tex_%02u.ppm",k);
+      std::ifstream fi(jail+name,std::ios::binary);
+      if(!fi){all_ok=false;continue;}
+      ++found;std::stringstream ss;ss<<fi.rdbuf();std::string d=ss.str();
+      const std::string hdr="P6\n96 96\n255\n";
+      if(d.size()!=hdr.size()+W*H*3){all_ok=false;continue;}
+      const bool lin=k>=4;const double us=lin?2.0:1.0;
+      Mat4 M=mat4_mul(mat4_rotate_x(0.3f),mat4_rotate_y((k%4)*0.35f-0.5f));
+      double R[3][3];for(int r=0;r<3;++r)for(int c=0;c<3;++c)R[r][c]=M[c*4+r];
+      uint32_t mism=0,cov=0;std::set<int> seen;
+      for(uint32_t y=0;y<H;++y)for(uint32_t x=0;x<W;++x){
+        double nx=(x+0.5)/W*2-1,ny=(y+0.5)/H*2-1;
+        double dv[3]={nx/f,-ny/f,-1.0},ov[3]={0,0,3};double o[3],dd[3];
+        for(int i=0;i<3;++i){o[i]=R[0][i]*ov[0]+R[1][i]*ov[1]+R[2][i]*ov[2];dd[i]=R[0][i]*dv[0]+R[1][i]*dv[1]+R[2][i]*dv[2];}
+        const unsigned char* q=reinterpret_cast<const unsigned char*>(&d[hdr.size()+(y*W+x)*3]);
+        const double t=-o[2]/dd[2];
+        const double px=o[0]+t*dd[0],py=o[1]+t*dd[1];
+        const bool hit=t>0&&std::fabs(px)<=0.7&&std::fabs(py)<=0.7;
+        if(!hit){if(q[0]|q[1]|q[2])++mism;continue;}
+        ++cov;
+        const double u=(px+0.7)/1.4*us,v=(0.7-py)/1.4*us;
+        double ref[3];
+        if(!lin){
+          int tx=std::min(7,std::max(0,(int)std::floor(u*8))),ty=std::min(7,std::max(0,(int)std::floor(v*8)));
+          for(int c=0;c<3;++c)ref[c]=texel(tx,ty,c);
+          seen.insert(ty*8+tx);
+        }else{
+          const double fu=u*8-0.5,fv=v*8-0.5;
+          const int x0=(int)std::floor(fu),y0=(int)std::floor(fv);
+          const double ax=fu-x0,ay=fv-y0;
+          auto wrap=[](int i){return ((i%8)+8)%8;};
+          for(int c=0;c<3;++c){
+            double a=texel(wrap(x0),wrap(y0),c),b=texel(wrap(x0+1),wrap(y0),c),cc=texel(wrap(x0),wrap(y0+1),c),dq=texel(wrap(x0+1),wrap(y0+1),c);
+            ref[c]=(a*(1-ax)+b*ax)*(1-ay)+(cc*(1-ax)+dq*ax)*ay;
+          }
+        }
+        bool same=true;for(int c=0;c<3;++c)if(std::fabs(q[c]-ref[c])>(lin?4.5:0.5))same=false;
+        if(!same)++mism;
+      }
+      if(k==0||k==4)distinct_nearest=std::max<uint32_t>(distinct_nearest,(uint32_t)seen.size());
+      const double frac=(double)mism/(double)W/(double)H;worst_frac=std::max(worst_frac,frac);
+      std::printf("  texture game frame %u (%s): CPU sampler reference vs presented pixels: %u mismatched of %u, %u quad pixels\n",k,lin?"linear/repeat":"nearest/clamp",mism,W*H,cov);
+      if(mism>W*H*3/100||cov<1000)all_ok=false;
+    }
+    check(found==N,"texture game: all 8 presented PPM files exist inside the game's jail");
+    check(all_ok,"texture game: presented pixels match an independent CPU ray-cast + nearest/bilinear sampler within tolerance (nearest +-0, linear +-4, <=3% of pixels)");
+    check(distinct_nearest>=20,"texture game: the nearest frame shows many distinct texels (texture really sampled, not a flat colour)");
+    pnr::prx::PrxRegistry reg;pnr::loader::ImportResolution ir;
+    check(pnr::loader::resolve_imports(PNR_PS_TEX_DEMO_PATH,reg,&ir)&&ir.pnr_extension==7&&ir.unknown==0,"texture game: pnrGfx* imports classify as pnr-extension");
     std::filesystem::remove_all(jail);
   }
 #endif
