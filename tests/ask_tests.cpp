@@ -167,7 +167,7 @@ void pnr_ask_tests(int& pass, int& fail) {
       ::chmod(probe.c_str(), 0755);
       NeedleRun sr; sr.sandbox = true; std::string out;
       auto s = run_needle(probe, "x", sr, &out);
-      if (!s) std::printf("note: sandboxed probe failed: %s\n", s.error.message.c_str());
+      if (!s) std::printf("note: sandboxed probe failed: %s out=[%s]\n", s.error.message.c_str(), out.c_str());
       check(s && has(out, "SECRET_HIDDEN") && !has(out, "SECRET_VISIBLE"), "sandboxed needle: the user's files outside its private directory are invisible");
       check(has(out, "ETC_READONLY") && !fs::exists("/etc/pnr_probe_write"), "sandboxed needle: system directories are read-only");
       check(has(out, "TOOLS_READABLE"), "sandboxed needle: it can still read its tools file");
