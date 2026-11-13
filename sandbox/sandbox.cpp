@@ -7,6 +7,8 @@
 #include <signal.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -15,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <vector>
 
 #if defined(__linux__) && defined(__x86_64__)
@@ -110,6 +113,77 @@ bool install_seccomp(std::string* err) {
   return true;
 }
 
+
+bool mkdir_p(const std::string& p) {
+  std::error_code ec; std::filesystem::create_directories(p, ec);
+  return !ec || std::filesystem::is_directory(p);
+}
+bool abs_ok(const std::string& p) { return p.size() > 1 && p[0] == '/' && p.find("/../") == std::string::npos && (p.size() < 3 || p.compare(p.size() - 3, 3, "/..") != 0); }
+
+// Bind src (dir or file) to root+src. nosuid,nodev always; read-only when asked.
+// Inherited flags are carried over, as the kernel requires for mounts from outside the userns.
+bool bind_into(const std::string& root, const std::string& src, bool ro, std::string* err, bool devnode = false) {
+  struct stat st;
+  if (::stat(src.c_str(), &st) != 0) { *err = "cannot bind " + src + ": " + std::strerror(errno); return false; }
+  const std::string dst = root + src;
+  if (S_ISDIR(st.st_mode)) { if (!mkdir_p(dst)) { *err = "cannot create mountpoint " + dst; return false; } }
+  else {
+    if (!mkdir_p(std::filesystem::path(dst).parent_path().string())) { *err = "cannot create mountpoint dir for " + dst; return false; }
+    int fd = ::open(dst.c_str(), O_CREAT | O_WRONLY, 0644); if (fd < 0) { *err = "cannot create mountpoint " + dst; return false; } ::close(fd);
+  }
+  if (::mount(src.c_str(), dst.c_str(), nullptr, MS_BIND, nullptr) != 0) { *err = "bind mount " + src + ": " + std::strerror(errno); return false; }
+  struct statvfs sv; unsigned long fl = MS_BIND | MS_REMOUNT | MS_NOSUID | (devnode ? 0 : MS_NODEV) | (ro ? MS_RDONLY : 0);
+  if (::statvfs(dst.c_str(), &sv) == 0) {
+    if (sv.f_flag & ST_NOEXEC) fl |= MS_NOEXEC;
+    if (sv.f_flag & ST_NOATIME) fl |= MS_NOATIME;
+    if (sv.f_flag & ST_NODIRATIME) fl |= MS_NODIRATIME;
+    if (sv.f_flag & ST_RELATIME) fl |= MS_RELATIME;
+  }
+  if (::mount(nullptr, dst.c_str(), nullptr, fl, nullptr) != 0) { *err = "remount " + src + (ro ? " read-only: " : ": ") + std::strerror(errno); return false; }
+  return true;
+}
+
+// Runs in the PID 1 grandchild after the mount ns has been made private.
+// newroot is an existing empty host directory.
+bool build_root(const Policy& pol, const std::string& newroot, std::string* err) {
+  if (::unshare(CLONE_NEWNS) != 0) { *err = std::string("second mount namespace: ") + std::strerror(errno); return false; }
+  if (::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0) { *err = std::string("making mounts private: ") + std::strerror(errno); return false; }
+  if (::mount("tmpfs", newroot.c_str(), "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755,size=4m") != 0) { *err = std::string("mounting the new root tmpfs: ") + std::strerror(errno); return false; }
+  auto tmpfs_at = [&](const char* sub, const char* opts) {
+    const std::string d = newroot + sub;
+    if (!mkdir_p(d)) { *err = std::string("mkdir ") + d; return false; }
+    if (::mount("tmpfs", d.c_str(), "tmpfs", MS_NOSUID | MS_NODEV, opts) != 0) { *err = std::string("mounting tmpfs on ") + sub + ": " + std::strerror(errno); return false; }
+    return true;
+  };
+  if (!tmpfs_at("/tmp", "mode=1777,size=256m") || !tmpfs_at("/dev", "mode=0755,size=1m") || !tmpfs_at("/dev/shm", "mode=1777,size=64m")) return false;
+  // system dirs: a host symlink (e.g. /lib -> usr/lib) is recreated as a symlink
+  for (const char* d : {"/usr", "/lib", "/lib64", "/lib32", "/bin", "/sbin"}) {
+    struct stat ls;
+    if (::lstat(d, &ls) != 0) continue;
+    if (S_ISLNK(ls.st_mode)) {
+      char buf[512]; ssize_t n = ::readlink(d, buf, sizeof buf - 1);
+      if (n <= 0) { *err = std::string("readlink ") + d; return false; }
+      buf[n] = 0; if (::symlink(buf, (newroot + d).c_str()) != 0) { *err = std::string("symlink ") + d; return false; }
+    } else if (!bind_into(newroot, d, true, err)) return false;
+  }
+  if (::access("/etc/ld.so.cache", F_OK) == 0 && !bind_into(newroot, "/etc/ld.so.cache", true, err)) return false;
+  for (const char* d : {"null", "zero", "full", "random", "urandom"})
+    if (!bind_into(newroot, std::string("/dev/") + d, false, err, true)) return false;
+  if (!bind_into(newroot, pol.game_dir, true, err)) return false;
+  for (const auto& d : pol.ro_dirs) if (!bind_into(newroot, d, true, err)) return false;
+  for (const auto& d : pol.rw_dirs) if (!bind_into(newroot, d, false, err)) return false;
+  if (!mkdir_p(newroot + "/proc") || ::mount("proc", (newroot + "/proc").c_str(), "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr) != 0) { *err = std::string("mounting a private /proc: ") + std::strerror(errno); return false; }
+  const std::string old = newroot + "/.oldroot";
+  if (::mkdir(old.c_str(), 0700) != 0) { *err = "mkdir .oldroot"; return false; }
+  if (::syscall(SYS_pivot_root, newroot.c_str(), old.c_str()) != 0) { *err = std::string("pivot_root: ") + std::strerror(errno); return false; }
+  if (::chdir("/") != 0) { *err = "chdir /"; return false; }
+  if (::umount2("/.oldroot", MNT_DETACH) != 0) { *err = std::string("detaching the old root: ") + std::strerror(errno); return false; }
+  ::rmdir("/.oldroot");
+  if (::mount(nullptr, "/", nullptr, MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NODEV, nullptr) != 0) { *err = std::string("making / read-only: ") + std::strerror(errno); return false; }
+  if (::chdir(pol.game_dir.c_str()) != 0) { *err = "chdir to the game dir"; return false; }
+  return true;
+}
+
 // Runs fn in a forked child, returns its exit status == 0.
 template <class F> bool in_child(F fn) {
   pid_t p = ::fork();
@@ -118,25 +192,42 @@ template <class F> bool in_child(F fn) {
   int st = 0; while (::waitpid(p, &st, 0) < 0 && errno == EINTR) {}
   return WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
-}  // namespace
-
-bool enter(std::string* err) {
-  std::string e;
-  if (!new_userns(&e)) { *err = e; return false; }
-  if (::unshare(CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWPID) != 0) { *err = std::string("unshare(mount/net/ipc/uts/pid): ") + std::strerror(errno); return false; }
+static bool enter_impl(const Policy* pol, std::string* err) {
+  std::string e, newroot;
+  if (pol) {
+    if (pol->game_dir.empty() || !abs_ok(pol->game_dir)) { *err = "policy: game_dir must be an absolute path"; return false; }
+    for (const auto& d : pol->ro_dirs) if (!abs_ok(d)) { *err = "policy: ro dir must be an absolute path: " + d; return false; }
+    for (const auto& d : pol->rw_dirs) if (!abs_ok(d)) { *err = "policy: rw dir must be an absolute path: " + d; return false; }
+    for (const auto& d : pol->rw_dirs) if (!mkdir_p(d)) { *err = "cannot create the writable dir " + d; return false; }
+    char tmpl[] = "/tmp/pnr-sb-XXXXXX";
+    if (!::mkdtemp(tmpl)) { *err = std::string("cannot create a mountpoint dir in /tmp: ") + std::strerror(errno); return false; }
+    newroot = tmpl;
+  }
+  auto cleanup = [&] { if (!newroot.empty()) ::rmdir(newroot.c_str()); };
+  if (!new_userns(&e)) { *err = e; cleanup(); return false; }
+  if (::unshare(CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWPID) != 0) { *err = std::string("unshare(mount/net/ipc/uts/pid): ") + std::strerror(errno); cleanup(); return false; }
   pid_t child = ::fork();
-  if (child < 0) { *err = "fork failed"; return false; }
+  if (child < 0) { *err = "fork failed"; cleanup(); return false; }
   if (child > 0) {  // intermediate: wait for the game (PID 1 of the new namespace) and mirror its fate
     int st = 0; while (::waitpid(child, &st, 0) < 0 && errno == EINTR) {}
+    cleanup();
     if (WIFSIGNALED(st)) { ::signal(WTERMSIG(st), SIG_DFL); ::kill(::getpid(), WTERMSIG(st)); _exit(128 + WTERMSIG(st)); }
     _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 1);
   }
   // grandchild: PID 1 in the new PID namespace
-  if (::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0) { *err = std::string("making mounts private: ") + std::strerror(errno); return false; }
-  if (::mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr) != 0) { *err = std::string("mounting a private /proc: ") + std::strerror(errno); return false; }
+  if (pol) {
+    if (!build_root(*pol, newroot, err)) return false;
+  } else {
+    if (::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0) { *err = std::string("making mounts private: ") + std::strerror(errno); return false; }
+    if (::mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr) != 0) { *err = std::string("mounting a private /proc: ") + std::strerror(errno); return false; }
+  }
   if (!install_seccomp(&e)) { *err = e; return false; }
   return true;
 }
+}  // namespace
+
+bool enter(std::string* err) { return enter_impl(nullptr, err); }
+bool enter(const Policy& policy, std::string* err) { return enter_impl(&policy, err); }
 
 Probe probe() {
   Probe p; p.supported_platform = true;
@@ -158,6 +249,16 @@ Probe probe() {
   if (!p.mountns_procfs) notes += "private mount namespace or fresh /proc unavailable; ";
   p.seccomp = in_child([] { std::string e; return install_seccomp(&e); });
   if (!p.seccomp) notes += "seccomp filter could not be installed; ";
+  char pg[] = "/tmp/pnr-probe-XXXXXX";
+  const bool have_pg = ::mkdtemp(pg) != nullptr;
+  std::string pgs = have_pg ? pg : "";
+  p.filesystem = p.userns && have_pg && in_child([pgs] {
+    Policy pol; pol.game_dir = pgs; std::string e;
+    if (!enter(pol, &e)) { std::fprintf(stderr, "probe: %s\n", e.c_str()); return false; }
+    // only the PID 1 grandchild reaches here, inside the new root
+    _exit((::access("/usr", F_OK) == 0 && ::access("/home", F_OK) != 0 && ::access("/.oldroot", F_OK) != 0 && ::access(pgs.c_str(), F_OK) == 0) ? 0 : 1); });
+  if (have_pg) ::rmdir(pg);
+  if (!p.filesystem) notes += "a pivot_root filesystem root could not be built (see stderr); ";
   p.notes = notes;
   return p;
 }
@@ -168,13 +269,13 @@ Probe probe() { Probe p; p.notes = "the sandbox is only built for Linux x86-64 (
 
 std::string describe(const Probe& p) {
   auto yn = [](bool b) { return b ? "available" : "UNAVAILABLE"; };
-  std::string s = "SANDBOX (Linux, partial isolation; filesystem NOT isolated)\n";
+  std::string s = "SANDBOX (Linux, partial isolation; filesystem root is a private pivot_root tmpfs)\n";
   s += std::string("  user namespace (no real privileges): ") + yn(p.userns) + "\n";
   s += std::string("  network namespace (no network):      ") + yn(p.netns) + "\n";
   s += std::string("  PID namespace + private /proc:       ") + yn(p.pidns && p.mountns_procfs) + "\n";
   s += std::string("  IPC + UTS namespaces:                ") + yn(p.ipc_uts) + "\n";
   s += std::string("  seccomp denylist + no_new_privs:     ") + yn(p.seccomp) + "\n";
-  s += "  filesystem isolation:                NOT PROVIDED (the game can read and write what your user can)\n";
+  s += std::string("  filesystem isolation (pivot_root):   ") + (p.filesystem ? "available: game sees only system dirs (ro), its own dir (ro), its jail (rw), private /tmp" : "UNAVAILABLE") + "\n";
   s += p.usable() ? "  status: usable. Label: PARTIAL. A denylist is not an allowlist; do not run untrusted code on this alone.\n"
                   : "  status: NOT usable here: " + p.notes + "\n";
   return s;
