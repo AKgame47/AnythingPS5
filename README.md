@@ -57,11 +57,11 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**1402/1402 unit tests pass, 10/10 CTest suites pass** (unit, end-to-end native
+**1431/1431 unit tests pass, 13/13 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
-game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus compact
+game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journey, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
-and on a build against the official Vulkan headers. ASan+UBSan: 1402/1402
+and on a build against the official Vulkan headers. ASan+UBSan: 1431/1431
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -613,6 +613,46 @@ exit - "it started and finished" and nothing more; playability is never
 claimed. The sce shim itself is provided by the runtime (like firmware
 modules), not shipped inside the package.
 
+## Launcher core (headless, not a desktop UI)
+
+Status: **Implemented, Tested** (unit tests plus the `pnr_launcher_workflow`
+CTest). **There is no GUI**: no window, no artwork, no toolkit. The desktop
+launcher UI (module 10) is still **Planned**. This slice is the logic a UI
+would sit on, with a text/JSON front end.
+
+- `launcher/launcher_core.*`: lists library games, shows details and
+  compatibility status, launches by exact game id, records launch history.
+- `apps/launcher/launcher_main.cpp` builds `pnr-launcher`:
+  `list [--json]`, `show <id> [--json]`, `launch <id> [--json] [-- args]`.
+- Library path: `PNR_LIBRARY_DB`, default `./pnr_data/library.db`.
+- A clean exit (0) moves compatibility Untested -> Launches Only and nothing
+  else. It never overwrites a state a human set. No playability is claimed.
+- Each game gets its own jail folder next to the library, like `pnr run`.
+- Limits: trusted developer-built content only. The jail is application-level
+  path routing, not a security sandbox. Imported games are whatever the
+  importer wrote. Exit codes: 0 ok, 1 game ran but not clean, 2 unknown id or library open failure, 64 usage.
+
+Real captured output (`ps_demo` packaged and imported, then driven):
+
+```
+$ pnr-launcher list
+PNR PS Demo  v0.1.0  [Untested]  runnable  id=ps-demo
+$ pnr-launcher show ps-demo
+PNR PS Demo  v0.1.0
+  id:            ps-demo
+  compatibility: Untested
+  notes:         imported .pnrgame; no execution test yet
+  installed:     ./pnr_data/games/ps-demo-0.1.0
+  runnable:      yes
+  launches:      0
+$ pnr-launcher launch ps-demo --json
+{"game_id":"ps-demo","found":true,"attempted":true,"finished":true,"signaled":false,"exit_code":0,"wall_seconds":0.023,"recorded":true,"compat_advanced":true,"error":""}
+$ pnr-launcher list --json
+{"games":[{"game_id":"ps-demo","title":"PNR PS Demo","version":"0.1.0","platform":"pnr-dev","compatibility":"Launches Only","compatibility_notes":"launched natively, exit 0; gameplay not verified","installed":true,"install_path":"./pnr_data/games/ps-demo-0.1.0","executable":"bin/game","integrity":"verified","runnable":true,"not_runnable_reason":"","launch_count":1}],"count":1}
+$ pnr-launcher launch nope
+LAUNCH NOT STARTED: no such game id in the library
+```
+
 ## Windows build
 
 Cross-compile from Linux with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)
@@ -641,7 +681,7 @@ demo, not a real PS5 runtime - the release notes say exactly what works.
 ## Repository layout
 
 ```
-apps/        pnr CLI now; desktop launcher + diagnostics later
+apps/        pnr CLI, pnr-launcher (headless launcher core front end); desktop UI + diagnostics later
 core/        MODULE 01 - runtime, lifecycle, events, config, capabilities
 loader/      MODULE 02 - ELF parser (A), native loader (B), NID support, format adapters (C, planned)
 prx/         MODULE 02 companion - PS system-library layer bound by NID (libkernel subset implemented);
@@ -651,6 +691,7 @@ platform/    MODULE 07 - host OS abstraction, Linux + Windows backends (Windows 
 ape/         MODULE 05 - adaptive performance engine (classification, frame stats, controller)
 laptop/      MODULE 06 - laptop optimization manager (power modes, caps)
 package/     .pnrgame format: ustar, SHA-256, importer
+launcher/    MODULE 10 core - headless launcher core (list, details, launch + history)
 library/     MODULE 09 - SQLite game/installation/compatibility/launch store
 services/    MODULE 08 - virtual filesystem, input, audio backends
 tools/       pnr_make_package - dev package builder
