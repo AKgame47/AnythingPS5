@@ -37,6 +37,12 @@ struct CompatibilityRecord {
   std::string notes;
 };
 
+struct LaunchRow {
+  int exit_code = 0;       // -1 when the game was killed by a signal
+  double wall_seconds = 0;
+  double at = 0;           // unix seconds
+};
+
 class GameDb {
 public:
   Status open(const std::string& path);   // creates schema if needed
@@ -51,6 +57,14 @@ public:
 
   Status set_compatibility(const CompatibilityRecord& c);
   std::optional<CompatibilityRecord> get_compatibility(const std::string& game_id);
+
+  // Compatibility set by a person. Marked human_set so automatic launch
+  // bookkeeping and re-imports never overwrite it. set_compatibility()
+  // above is the automatic path and clears the mark.
+  Status set_compatibility_human(const CompatibilityRecord& c);
+  bool compat_is_human_set(const std::string& game_id);
+  // Newest first, at most `limit` rows (1..1000).
+  std::vector<LaunchRow> launch_history(const std::string& game_id, int limit);
 
   Status record_launch(const std::string& game_id, int exit_code,
                        double wall_seconds);
