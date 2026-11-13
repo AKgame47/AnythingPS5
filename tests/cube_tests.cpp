@@ -272,6 +272,80 @@ void pnr_cube_tests(int& pass,int& fail) {
     std::filesystem::remove_all(jail);
   }
 #endif
+#ifdef PNR_PS_LITTEX_DEMO_PATH
+  // ---- lit + textured cube: CPU ray-cast + Lambert + texture sampler reference ----
+  {
+    const std::string jail="/tmp/pnr_littexdemo_jail_"+std::to_string(::getpid());
+    std::filesystem::remove_all(jail);
+    pnr::loader::NativeLoader loader;
+    auto lr=loader.launch(PNR_PS_LITTEX_DEMO_PATH,{},{"PNR_JAIL_ROOT="+jail,std::string("LD_LIBRARY_PATH=")+PNR_PSABI_DIR});
+    check(lr.validated&&lr.started&&lr.finished&&!lr.signaled&&lr.exit_code==0,"lit textured game: ps_littex_demo launched, exit 0 (6 invalid calls refused inside the game)");
+    struct F{double n[3],u[3],w[3],c[3];};
+    const F faces[6]={
+      {{0,0,1},{1,0,0},{0,1,0},{1,0.6,0.6}},{{1,0,0},{0,0,-1},{0,1,0},{0.6,1,0.6}},
+      {{0,1,0},{1,0,0},{0,0,-1},{0.6,0.6,1}},{{0,0,-1},{-1,0,0},{0,1,0},{1,1,0.6}},
+      {{-1,0,0},{0,0,1},{0,1,0},{1,0.6,1}},{{0,-1,0},{1,0,0},{0,0,1},{0.6,1,1}}};
+    auto texel=[&](int x,int y,int c)->double{return c==0?32.0*x+16:c==1?32.0*y+16:(((x+y)&1)?255.0:64.0);};
+    const double f=1.0/std::tan(fov*0.5);
+    constexpr uint32_t N=8;bool all_ok=true;uint32_t found=0;double klo=1e9,khi=-1e9;
+    for(uint32_t k=0;k<N;++k){
+      char name[64];std::snprintf(name,sizeof name,"/frames/littex_%02u.ppm",k);
+      std::ifstream fi(jail+name,std::ios::binary);
+      if(!fi){all_ok=false;continue;}
+      ++found;std::stringstream ss;ss<<fi.rdbuf();std::string d=ss.str();
+      const std::string hdr="P6\n96 96\n255\n";
+      if(d.size()!=hdr.size()+W*H*3){all_ok=false;continue;}
+      const bool lin=k>=4;
+      Mat4 M=mat4_mul(mat4_rotate_x(0.5f),mat4_rotate_y(k*2.0f*(float)M_PI/N+0.3f));
+      double R[3][3];for(int r=0;r<3;++r)for(int c=0;c<3;++c)R[r][c]=M[c*4+r];
+      double Lv[3];
+      if(!lin){Lv[0]=0.4;Lv[1]=0.6;Lv[2]=0.7;}else{Lv[0]=-0.6;Lv[1]=0.3;Lv[2]=0.7;}
+      double ll=std::sqrt(Lv[0]*Lv[0]+Lv[1]*Lv[1]+Lv[2]*Lv[2]);for(double& x:Lv)x/=ll;
+      uint32_t mism=0;
+      for(uint32_t y=0;y<H;++y)for(uint32_t x=0;x<W;++x){
+        double nx=(x+0.5)/W*2-1,ny=(y+0.5)/H*2-1;
+        double dv[3]={nx/f,-ny/f,-1.0},ov[3]={0,0,3};double o[3],dd[3];
+        for(int i=0;i<3;++i){o[i]=R[0][i]*ov[0]+R[1][i]*ov[1]+R[2][i]*ov[2];dd[i]=R[0][i]*dv[0]+R[1][i]*dv[1]+R[2][i]*dv[2];}
+        double tn=-1e30,tf=1e30;int ax=-1,sg=0;
+        for(int i=0;i<3;++i){double t1=(-0.5-o[i])/dd[i],t2=(0.5-o[i])/dd[i];double lo=std::min(t1,t2),hi=std::max(t1,t2);if(lo>tn){tn=lo;ax=i;sg=dd[i]>0?0:1;}tf=std::min(tf,hi);}
+        const bool hit=tn<tf&&tf>0;
+        const unsigned char* q=reinterpret_cast<const unsigned char*>(&d[hdr.size()+(y*W+x)*3]);
+        if(!hit){if(q[0]|q[1]|q[2])++mism;continue;}
+        const double nsign=sg==0?-1.0:1.0;
+        const F* fc=nullptr;for(const F& c:faces)if(c.n[ax]==nsign)fc=&c;
+        double p[3];for(int i=0;i<3;++i)p[i]=o[i]+tn*dd[i];
+        double su=0,sw=0;for(int i=0;i<3;++i){su+=2*p[i]*fc->u[i];sw+=2*p[i]*fc->w[i];}
+        const double u=(su+1)*0.5,vv=(sw+1)*0.5;
+        double nv[3];for(int r=0;r<3;++r)nv[r]=R[r][0]*fc->n[0]+R[r][1]*fc->n[1]+R[r][2]*fc->n[2];
+        double kk=0.25+0.75*std::max(nv[0]*Lv[0]+nv[1]*Lv[1]+nv[2]*Lv[2],0.0);
+        klo=std::min(klo,kk);khi=std::max(khi,kk);
+        double ref[3];
+        if(!lin){
+          int tx=std::min(7,std::max(0,(int)std::floor(u*8))),ty=std::min(7,std::max(0,(int)std::floor(vv*8)));
+          for(int c=0;c<3;++c)ref[c]=texel(tx,ty,c);
+        }else{
+          const double fu=u*8-0.5,fv=vv*8-0.5;
+          const int x0=(int)std::floor(fu),y0=(int)std::floor(fv);const double ax_=fu-x0,ay=fv-y0;
+          auto cl=[](int i){return std::min(7,std::max(0,i));};
+          for(int c=0;c<3;++c){
+            double a=texel(cl(x0),cl(y0),c),b=texel(cl(x0+1),cl(y0),c),cc=texel(cl(x0),cl(y0+1),c),dq=texel(cl(x0+1),cl(y0+1),c);
+            ref[c]=(a*(1-ax_)+b*ax_)*(1-ay)+(cc*(1-ax_)+dq*ax_)*ay;
+          }
+        }
+        bool same=true;for(int c=0;c<3;++c)if(std::fabs(q[c]-ref[c]*fc->c[c]*kk)>(lin?5.0:2.0))same=false;
+        if(!same)++mism;
+      }
+      std::printf("  lit textured game frame %u (%s): CPU reference vs presented pixels: %u mismatched of %u\n",k,lin?"linear":"nearest",mism,W*H);
+      if(mism>W*H*3/100)all_ok=false;
+    }
+    check(found==N,"lit textured game: all 8 presented PPM files exist inside the game's jail");
+    check(all_ok,"lit textured game: presented pixels match an independent CPU ray-cast + Lambert + tint + nearest/bilinear texture (nearest +-2, linear +-5, <=3% of pixels)");
+    check(khi-klo>0.4,"lit textured game: faces are visibly lit differently (shading factor spread > 0.4)");
+    pnr::prx::PrxRegistry reg;pnr::loader::ImportResolution ir;
+    check(pnr::loader::resolve_imports(PNR_PS_LITTEX_DEMO_PATH,reg,&ir)&&ir.pnr_extension==8&&ir.unknown==0,"lit textured game: pnrGfx* imports classify as pnr-extension");
+    std::filesystem::remove_all(jail);
+  }
+#endif
 #ifdef PNR_PS_LIT_DEMO_PATH
   // ---- a game uploads a lit mesh with normals and sets a light ----
   {
