@@ -227,8 +227,9 @@ MISMATCH. Non-packages fail at archive validation.
 
 - `PrxRegistry`: taxonomy of PS-style system-library symbols. Library/symbol organization follows AnyPS5 (GPL-2.0) core/libs/prx; host implementations are original PNR code.
 - `bind(nid, &fn, &error) -> SCE_OK` for implemented symbols; `SCE_KERNEL_ERROR_EINVAL` for declared-only symbols (known but not implemented); `SCE_KERNEL_ERROR_UNKNOWN` for NIDs outside the taxonomy. Never silently substitutes.
-- Implemented today (libkernel): `sceKernelUsleep`, `sceKernelSleep`, `sceKernelAlloc`, `sceKernelFree`, `sceKernelCreateThread` (detached host thread; handle/join API is Planned).
-- Declared-only (honest, no host implementation): `sceKernelAlloc` family extensions and `libSceLibcInternal` (printf, malloc, free, memcpy, memset, strlen, strcmp).
+- Implemented (libkernel): `sceKernelUsleep`, `sceKernelSleep`, `sceKernelAlloc`, `sceKernelFree`, `sceKernelCreateThread` (detached host thread; handle/join API is Planned).
+- Implemented (libSceLibcInternal): `printf` (BOUNDED formatter: %d %i %u %x %s %c %% only, max 8 variadic args - the honest limit of a NID trampoline; unsupported specifiers pass through literally), `malloc`, `free`, `memcpy`, `memset`, `strlen`, `strcmp`.
+- Declared-only (honest, no host implementation): `sceKernelMapMemory`, `sceKernelMTypeprotect`.
 
 ## IF-IMP-01 Import Resolution (v1) — Implemented, Tested
 
