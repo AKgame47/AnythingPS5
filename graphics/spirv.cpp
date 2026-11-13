@@ -139,7 +139,9 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
     inst(m,spv::OpTypePointer,{24,9,6});
     inst(m,spv::OpVariable,{23,25,9});
   }
-  uint32_t next = 26;
+  inst(m,22,{26,32}); // binary32 OpTypeFloat
+  uint32_t next = 27;
+  std::vector<uint32_t> no_contraction;
   std::vector<uint32_t> ids(nodes.size(), 0), indices(nodes.size(), 0);
   for (size_t i = 0; i < nodes.size(); ++i) {
     const auto& n = nodes[i];
@@ -232,6 +234,16 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
     if (n.a >= i || !ids[n.a]) return {};
     if (n.op == U32Op::Store) { inst(m, spv::OpStore, {access, ids[n.a]}); continue; }
     if (n.b >= i || !ids[n.b]) return {};
+    if(n.op==U32Op::FAdd || n.op==U32Op::FSub || n.op==U32Op::FMul) {
+      const uint32_t a=next++, b=next++, result=next++;
+      inst(m,124,{26,a,ids[n.a]}); // raw bits -> f32, not numeric conversion
+      inst(m,124,{26,b,ids[n.b]});
+      const uint16_t op=n.op==U32Op::FAdd?129:n.op==U32Op::FSub?131:133;
+      inst(m,op,{26,result,a,b});
+      no_contraction.push_back(result);
+      ids[i]=next++;inst(m,124,{6,ids[i],result});
+      continue;
+    }
     uint16_t op = 0;
     switch (n.op) {
       case U32Op::Add: op = 128; break;
@@ -247,6 +259,13 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   inst(m, spv::OpReturn, {});
   inst(m, spv::OpFunctionEnd, {});
   m[3] = next;
+  // Decorations must precede type/function declarations, even though IDs
+  // for arithmetic results were assigned while emitting the body.
+  std::vector<uint32_t> decorations;
+  for(auto id:no_contraction) inst(decorations,spv::OpDecorate,{id,42}); // NoContraction
+  size_t insert=5;
+  while(insert<m.size() && (m[insert]&65535u)!=spv::OpTypeVoid)insert+=m[insert]>>16u;
+  m.insert(m.begin()+insert,decorations.begin(),decorations.end());
   return m;
 }
 
