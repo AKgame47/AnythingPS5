@@ -216,3 +216,9 @@ MISMATCH. Non-packages fail at archive validation.
 - `IInputBackend::enumerate() -> vector<InputDeviceInfo>`; the Linux backend scans `/dev/input` read-only.
 - `InputMapper::load(profile_text)`: ini-style `action = control` bindings; malformed lines fail with the line number. `translate(raw)` maps raw control events to actions.
 - `VirtualInputDevice`: scripted device for tests and demos. Advanced controller features are exposed only when a device reports them.
+
+## IF-NID-01 PS NID Computation (v1) — Implemented, Tested
+
+- `nid::sha1(data) -> array<uint8_t,20>`: SHA-1 digest, validated against a reference vector.
+- `nid::compute_nid(symbol_name, library_name) -> string`: the 11-character PS-style NID; throws `std::invalid_argument` on an empty symbol name. Algorithm adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5) (GPL-2.0); AnythingPS5 is GPL-2.0.
+- `nid::resolve_nid(nid) -> string`: seed lookup table over common libkernel/libSceLibcInternal symbols; returns empty for unknown NIDs. The table grows with the PRX system-library layer (taxonomy per AnyPS5's core/libs/prx structure; we document the structure, we do not copy its 6000+ definition files wholesale).
