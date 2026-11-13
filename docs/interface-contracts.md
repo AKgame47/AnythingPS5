@@ -313,7 +313,7 @@ touches nothing in the library.
   dispatch environment.
 
 
-## IF-GRAPH-03 Restricted integer-compute translation (v3)
+## IF-GRAPH-03 Restricted integer-compute translation (v4)
 
 Status: Experimental, Implemented (strict subset), Tested.
 
@@ -321,7 +321,7 @@ Status: Experimental, Implemented (strict subset), Tested.
   little-endian words without alignment assumptions; partial words fail.
   `translate_compute_words(words, guest_base, buffer_words=1)` is the word-level entry point.
 - Result: `ok`, diagnostic `error`, `spirv`, `stored_value_known`,
-  `stored_value`, `required_buffer_words`. Every failure returns empty SPIR-V. `stored_value` is
+  `stored_value`, `required_buffer_words`, `guarded_memory`. Every failure returns empty SPIR-V. `stored_value` is
   meaningful only when `stored_value_known` is true; runtime results are
   never invented by the compiler.
 - Explicit test ABI: one active invocation, one fixed-size uint array SSBO at set 0/binding 0.
@@ -335,17 +335,23 @@ Status: Experimental, Implemented (strict subset), Tested.
   definitions after source overwrite; destination/source aliasing is safe.
   Runtime SSBO loads become OpLoad and arithmetic becomes real SPIR-V
   integer ALU, with uint32 wraparound. No host precomputation of loaded data.
-- Address VGPR pairs must be defined constant moves. Add the unsigned
+- For constant address VGPR pairs, add the unsigned
   11-bit FLAT byte offset, then check addition overflow, lower/upper bounds
   and four-byte alignment before generating an array index. Guest base must
   be aligned; zero/oversized extent and base+range overflow are rejected.
-  ALU/load-dependent addresses remain rejected, even constant-only ALU.
+  Runtime low-word addresses are accepted when high word is constant and
+  matches binding base, binding does not cross a 32-bit boundary, and FLAT
+  immediate is zero. Undefined or runtime high words fail at translation.
+  ALU results can supply low addresses, with uint32 modular semantics:
+  no carry into high word is inferred. This is not full 64-bit pointer math.
   FLAT scalar address must be 0x7f, all segment/cache/LDS/reserved
   fields zero (including offset bit 11); load VDATA/store VDST must be zero.
 - `graphics::SpirvModule::compute_u32(nodes, buffer_words=1)` emits the straight-line uint
   IR. Invalid forward references or reads from Store nodes return empty.
   Load.a and Store.b are checked word indices; malformed/out-of-range
-  accesses produce no module. SPIR-V uses a fixed-size uint array with
+  static accesses produce no module. GuardedLoad.a is an earlier runtime
+  low-address node; GuardedStore.a=data, .b=address. Invalid SSA refs fail.
+  SPIR-V uses a fixed-size uint array with
   ArrayStride=4, inside the existing BufferBlock struct. Instruction order
   is preserved; constant declarations precede functions.
 - `run_translated_compute(backend, translation, io)` is the checked dispatch
@@ -356,7 +362,7 @@ Status: Experimental, Implemented (strict subset), Tested.
 - Rejects undefined registers, unsupported sources/instructions/modifiers,
   other addresses, additional stores, missing termination and trailing code.
   No wave/EXEC, asynchronous waitcnt, general barriers, resource descriptors,
-  dynamic addresses or real-game shader ABI. Full shader compilation Planned.
+  full 64-bit dynamic addresses or real-game shader ABI. Full shader compilation Planned.
 - FLAT layouts/opcodes and ALU opcode numbers follow AnyPS5's attributed
   GPL-2.0 decoder taxonomy. Tests contain only synthetic instructions.
 - Tests use spirv-val for Vulkan 1.0 when `PNR_SPIRV_VAL` is set, check emitted
@@ -369,3 +375,27 @@ Status: Experimental, Implemented (strict subset), Tested.
   Last legal word at FLAT offset 2044 is executed; invalid ranges, overflow,
   misalignment, reserved offsets, null/short host buffers are rejected.
   Missing validator/loader prints a skip, not a tested claim.
+
+
+### Runtime address guard policy (Experimental test ABI)
+
+- `guarded_memory=true` signals runtime checks. This is a PNR test policy,
+  not a claim about PS5 out-of-range access behavior.
+- Before each dynamic access, emit unsigned lower/upper address comparisons
+  and `(address & 3)==0`. Combine with OpLogicalAnd, then OpSelectionMerge
+  and OpBranchConditional. Index subtraction, shift and OpAccessChain live
+  inside the valid branch, as does OpLoad/OpStore. No speculative invalid
+  pointer or memory operation is emitted outside that branch.
+- An invalid runtime load yields zero via OpPhi at the merge. An invalid
+  store does nothing. Host dispatch succeeds; this policy is not a host
+  exception or GPU fault report. Constant invalid accesses still fail
+  translation, with no module.
+- Guarded stores always have stored_value_known=false because even constant
+  data may be suppressed. A checked host buffer length is still required.
+- Four guarded modules (load, store, load+ALU+store, ALU-derived address)
+  validate for Vulkan 1.0 and execute on lavapipe across nine runtime
+  addresses each. Cases include first/middle/last words, lower bound, one
+  past the end, misalignment, zero and 0xffffffff. Whole-buffer comparisons
+  verify zero/skip policy and that every unrelated word remains unchanged.
+- Dynamic high word, high mismatch, boundary-crossing binding, nonzero
+  dynamic offset and malformed SSA address/data references are rejected.
