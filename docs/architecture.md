@@ -183,3 +183,7 @@ dispatches. Float results follow host Vulkan policy.
 `pnrGfxSetTexture` / `pnrGfxSetTexturedMesh` / `pnrGfxDrawTexturedMesh` / `pnrGfxTexturedDraws` add one sampled RGBA8 texture. `render_core` creates a sampled image, view, sampler and staging buffer, uploads with two barriers and a buffer-to-image copy, and binds a combined image sampler at set 0 binding 0 (fragment stage). Hand-authored vertex and fragment shaders (`graphics/demo/tex.*.spvasm`). No mipmaps, no anisotropy, no RDNA path; filtering is the host driver's.
 
 `pnrGfxSetLitTexturedMesh` / `pnrGfxDrawLitTexturedMesh` / `pnrGfxLitTexturedDraws` combine the lit and texture paths: vertex attributes 0 position, 1 tint, 2 uv, 3 normal (`MeshInput.extra_floats == 5`), push constants MVP + object-space light, hand-authored `littex.vert` / `littex.frag`. The light comes from `pnrGfxSetLight`, the texture from `pnrGfxSetTexture`. No RDNA path for this combination.
+
+## Store downloads (slice A2)
+
+`store/download.*` holds `Queue` (enqueue, list, pause, cancel, run, prepare_install, mark_installed). It streams through `HttpClient::download` with a `BodySink`, so no download is held in memory. State lives in `<store>/downloads/<src>/<pkg>.state|.part|.pnrgame`. Install goes through the existing package importer after a re-hash. Hash only: no signatures, scanning or sandbox yet.
