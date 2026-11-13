@@ -14,6 +14,7 @@ struct ComputeTranslation {
   bool full64_pointers = false; // runtime pair guard/carry-aware FLAT offset
   bool host_float32 = false; // Vulkan host FP policy, not PS5 exact modes
   uint32_t required_uniform_words = 0; // initial s0..sN-1, runtime push constants
+  bool loop_memory = false; // strict proof-checked guarded copy loop
   uint32_t loop_count_uniform = 16; // 0..15 input index; 16 = no runtime loop count
   bool structured_loop = false; // strict bounded accumulator loop
   bool conditional_selection = false; // restricted forward SCC0 skip
@@ -54,6 +55,10 @@ struct ComputeTranslation {
 // runtime Vulkan push constants, shared across invocations. Values are not
 // baked into SPIR-V. Exact count required at checked dispatch. Not a Sony
 // user-data/descriptor ABI. Initial SGPRs outside the declared range undefined.
+// Dedicated memory loop: count init; guarded FLAT dword load/store; two
+// in-place affine low-pointer increments; decrement/equality/SCC0 backedge.
+// Exact lane x iteration proof forbids store collisions/read-write alias.
+// Constant binding high, no low wrap, no other store/loop/selection region.
 // No wave/EXEC/asynchronous waitcnt semantics or real-game shader ABI.
 ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
                                            uint64_t ssbo_guest_base,
