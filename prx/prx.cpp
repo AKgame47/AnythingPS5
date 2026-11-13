@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <thread>
 
@@ -44,6 +45,81 @@ SceInt32 sceKernelCreateThread(const char* name, void (*entry)(void*), void* arg
   }
   (void)name;  // thread naming is host-specific; recorded as Planned
   return SCE_OK;
+}
+
+
+namespace {
+
+// Bounded printf core: returns the formatted text (testable), printf wrapper
+// writes it to stdout. Supported: %d %i %u %x %s %c %%. Others stay literal.
+std::string format_bounded(const char* fmt, const std::vector<std::int64_t>& args) {
+  std::string out;
+  std::size_t ai = 0;
+  for (const char* p = fmt; p != nullptr && *p != '\0'; ++p) {
+    if (*p != '%') { out.push_back(*p); continue; }
+    ++p;
+    if (*p == '\0') { out.push_back('%'); break; }
+    switch (*p) {
+      case '%': out.push_back('%'); break;
+      case 'c':
+        if (ai < args.size()) out.push_back(static_cast<char>(args[ai++]));
+        break;
+      case 's': {
+        if (ai < args.size()) {
+          const char* sp = reinterpret_cast<const char*>(args[ai++]);
+          if (sp != nullptr) out += sp; else out += "(null)";
+        }
+        break;
+      }
+      case 'd': case 'i':
+        if (ai < args.size()) out += std::to_string(static_cast<long long>(args[ai++]));
+        break;
+      case 'u':
+        if (ai < args.size()) out += std::to_string(static_cast<unsigned long long>(args[ai++]));
+        break;
+      case 'x': {
+        if (ai < args.size()) {
+          char buf[24];
+          std::snprintf(buf, sizeof buf, "%llx", static_cast<unsigned long long>(args[ai++]));
+          out += buf;
+        }
+        break;
+      }
+      default:  // unsupported specifier: honest literal passthrough
+        out.push_back('%');
+        out.push_back(*p);
+        break;
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+void* sce_libc_memcpy(void* dst, const void* src, std::size_t n) {
+  if (dst == nullptr || src == nullptr) return nullptr;
+  return std::memcpy(dst, src, n);
+}
+void* sce_libc_memset(void* dst, int c, std::size_t n) {
+  if (dst == nullptr) return nullptr;
+  return std::memset(dst, c, n);
+}
+std::size_t sce_libc_strlen(const char* s) {
+  return s == nullptr ? 0 : std::strlen(s);
+}
+int sce_libc_strcmp(const char* a, const char* b) {
+  if (a == nullptr || b == nullptr) return (a == b) ? 0 : (a == nullptr ? -1 : 1);
+  return std::strcmp(a, b);
+}
+void* sce_libc_malloc(std::size_t size) {
+  if (size == 0) return nullptr;
+  return std::malloc(size);
+}
+void sce_libc_free(void* ptr) { std::free(ptr); }
+int sce_libc_printf(const char* fmt, const std::vector<std::int64_t>& args) {
+  const std::string out = format_bounded(fmt, args);
+  std::fputs(out.c_str(), stdout);
+  return static_cast<int>(out.size());
 }
 
 namespace {
@@ -87,13 +163,52 @@ PrxRegistry::PrxRegistry() {
         return sceKernelCreateThread("pnr-prx-thread", entry, arg);
       }));
   // Declared-only taxonomy entries (honest: no host implementation yet).
-  symbols_.push_back(decl_only("libSceLibcInternal", "printf"));
-  symbols_.push_back(decl_only("libSceLibcInternal", "malloc"));
-  symbols_.push_back(decl_only("libSceLibcInternal", "free"));
-  symbols_.push_back(decl_only("libSceLibcInternal", "memcpy"));
-  symbols_.push_back(decl_only("libSceLibcInternal", "memset"));
-  symbols_.push_back(decl_only("libSceLibcInternal", "strlen"));
-  symbols_.push_back(decl_only("libSceLibcInternal", "strcmp"));
+  symbols_.push_back(decl_only("libkernel", "sceKernelMapMemory"));
+  symbols_.push_back(decl_only("libkernel", "sceKernelMTypeprotect"));
+  // libSceLibcInternal subset, implemented over host equivalents.
+  symbols_.push_back(impl("libSceLibcInternal", "printf",
+      [](const std::vector<std::int64_t>& a) -> std::int64_t {
+        if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
+        const auto* fmt = reinterpret_cast<const char*>(a[0]);
+        return sce_libc_printf(fmt, {a.begin() + 1, a.end()});
+      }));
+  symbols_.push_back(impl("libSceLibcInternal", "malloc",
+      [](const std::vector<std::int64_t>& a) -> std::int64_t {
+        if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
+        return reinterpret_cast<std::int64_t>(sce_libc_malloc(static_cast<std::size_t>(a[0])));
+      }));
+  symbols_.push_back(impl("libSceLibcInternal", "free",
+      [](const std::vector<std::int64_t>& a) -> std::int64_t {
+        if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
+        sce_libc_free(reinterpret_cast<void*>(a[0]));
+        return SCE_OK;
+      }));
+  symbols_.push_back(impl("libSceLibcInternal", "memcpy",
+      [](const std::vector<std::int64_t>& a) -> std::int64_t {
+        if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
+        return reinterpret_cast<std::int64_t>(sce_libc_memcpy(
+            reinterpret_cast<void*>(a[0]), reinterpret_cast<const void*>(a[1]),
+            static_cast<std::size_t>(a[2])));
+      }));
+  symbols_.push_back(impl("libSceLibcInternal", "memset",
+      [](const std::vector<std::int64_t>& a) -> std::int64_t {
+        if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
+        return reinterpret_cast<std::int64_t>(sce_libc_memset(
+            reinterpret_cast<void*>(a[0]), static_cast<int>(a[1]),
+            static_cast<std::size_t>(a[2])));
+      }));
+  symbols_.push_back(impl("libSceLibcInternal", "strlen",
+      [](const std::vector<std::int64_t>& a) -> std::int64_t {
+        if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
+        return static_cast<std::int64_t>(
+            sce_libc_strlen(reinterpret_cast<const char*>(a[0])));
+      }));
+  symbols_.push_back(impl("libSceLibcInternal", "strcmp",
+      [](const std::vector<std::int64_t>& a) -> std::int64_t {
+        if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
+        return sce_libc_strcmp(reinterpret_cast<const char*>(a[0]),
+                               reinterpret_cast<const char*>(a[1]));
+      }));
 }
 
 const PrxSymbol* PrxRegistry::find(const std::string& nid) const {
