@@ -165,6 +165,7 @@ int main(int argc, char** argv) {
     if (!ls) { std::fprintf(stderr, "store: %s\n", ls.error.message.c_str()); rc = 1; }
     else {
       if (pos[0] == "source" && pos.size() == 4 && pos[1] == "add") rc = pnr::store::cmd_source_add(reg, pos[2], pos[3], rights, json, &out);
+      else if (pos[0] == "source" && pos.size() == 4 && pos[1] == "pin") rc = pnr::store::cmd_source_pin(reg, pos[2], pos[3], json, &out);
       else if (pos[0] == "source" && pos.size() == 3 && pos[1] == "remove") rc = pnr::store::cmd_source_remove(reg, pos[2], yes, json, &out);
       else if (pos[0] == "source" && pos.size() == 2 && pos[1] == "list") rc = pnr::store::cmd_source_list(reg, json, &out);
       else if (pos[0] == "refresh" && pos.size() <= 2) rc = pnr::store::cmd_refresh(reg, pos.size() == 2 ? pos[1] : "", json, &out);
