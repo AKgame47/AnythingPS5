@@ -101,3 +101,7 @@ Commands: `store get <src> <pkg>` (queue), `store queue list|run|pause|resume|ca
 - No malware scanning and no sandbox (security slice, Planned). A verified hash does not mean a package is safe. Until then `pnr run` is for trusted developer-built demos only.
 - Rights and licences are declared text. PNR does not verify them.
 - No artwork, categories browsing UI, DLC, developer submission flow or Windows build/test yet. Linux only.
+
+## Scanning (slice B3)
+
+`store scan <source> <package>` and `store install` run the scan pipeline: hash (always), EMBER2024 model score through an external helper (OFF unless configured), ClamAV (OFF unless installed). A flagged stage refuses install unless `--allow-flagged`. A clean result never proves safety. Details, licences and the extractor decision: [docs/scan.md](scan.md).
