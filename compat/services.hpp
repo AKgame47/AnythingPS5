@@ -41,6 +41,9 @@ public:
 };
 
 // Filesystem Services: virtual paths jailed under a root directory.
+// NOTE: application-level path routing, NOT an OS-enforced security
+// sandbox - code that calls the host directly bypasses it. Trusted
+// developer-built content only until Module 11 lands a real boundary.
 // Virtual path "/saves/a.txt" maps to "<root>/saves/a.txt".
 // Path traversal escaping the root is rejected explicitly.
 class FileSystemService {
