@@ -39,6 +39,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Float32 VOP2 add/sub/mul: raw-bit registers, real SPIR-V arithmetic, NoContraction | Experimental host-Vulkan FP policy, Tested on lavapipe; exact PS5 rounding/denormal/NaN payload behavior not implemented |
 | Full64 runtime pointers: scalar add/addc/sub/subb pair arithmetic, carry-aware FLAT offsets, lexicographic bounds/alignment guards | Experimental, Tested (cross-low-word bindings, overflow/borrow/OOB, spirv-val + lavapipe); single invocation, existing bounded SSBO only |
 | Strict counted loop: scalar constant or runtime uniform count 1..64, one uint32 vector accumulator add, decrement/compare/backedge; real SPIR-V LoopMerge/Phi | Experimental, Tested (1/2/8/64 invocations, 1/2/16/64 counts, spirv-val + lavapipe); invalid runtime count rejected before dispatch plus GPU no-op guard; no body memory, nesting or general CFG |
+| Proof-checked copy loop: guarded dword load/store, two affine pointer increments, constant/runtime uniform count; exact lane x iteration collision/alias proof | Experimental, Tested (spirv-val + lavapipe, tiled/transposed maps, offsets, invalid-count no-op); no in-place updates, full64 loop pointers or broader body/control flow |
 | Adaptive Performance Engine (deterministic rules, hardware class heuristic, closed-loop controller) | Implemented, Tested |
 | Laptop Optimization Manager (battery/balanced/max-performance caps) | Implemented, Tested |
 | Game services: virtual filesystem (jailed areas, per-game/user save isolation) | Implemented, Tested |
@@ -49,7 +50,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**1102/1102 unit tests pass, 5/5 CTest suites pass** (unit, end-to-end native
+**1286/1286 unit tests pass, 5/5 CTest suites pass** (unit, end-to-end native
 launch, and full package workflow: build -> import -> list -> run imported
 game, plus compact shader fixtures/mutation diagnostics). Clean Release
 build with `-Werror` passes. ASan+UBSan unit/fixture runs pass with leak
@@ -403,5 +404,5 @@ Loop-memory preparation: `shader/loop_memory.hpp` proves exact nonnegative
 lane x iteration affine address maps (1..64 per axis, 1..32 accesses). It
 rejects alignment/range/overflow, store collisions and read/write aliases
 across all lanes and iterations. Tested against 12,000 deterministic maps.
-This is a verifier only: loop-body memory translation remains Planned and
-rejected. Existing counted loops still have no memory operations in the body.
+The verifier is now connected to a strict guarded load/store copy-loop
+shape. Broader loop-body memory and dependencies remain Planned.
