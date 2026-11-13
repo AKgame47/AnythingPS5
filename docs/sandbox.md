@@ -1,6 +1,6 @@
-# PNR sandbox (slice B2)
+# PNR sandbox (slices B2 and B2b)
 
-Status: **Linux x86-64: Implemented + Tested here (real namespaces, real seccomp, real exec). Label: PARTIAL. Windows: Planned, nothing built or tested.**
+Status: **Linux x86-64: Implemented + Tested here (real namespaces, real seccomp, real pivot_root filesystem, real exec). Label: PARTIAL (stronger since B2b, still not "strong"). Windows: Planned, nothing built or tested.**
 
 Opt-in per launch: `pnr-launcher launch <game> --sandbox`. Check the host first with `pnr-launcher sandbox probe`.
 
@@ -14,11 +14,33 @@ Opt-in per launch: `pnr-launcher launch <game> --sandbox`. Check the host first 
 
 ## What it does NOT do
 
-- **No filesystem isolation.** The game can read and write whatever your user can. (A test asserts this honestly.) `/sys` is also the host's. Planned: Landlock or a pivot_root root.
+- The read-only system dirs (`/usr`, `/lib*`, `/bin`, `/sbin`) are visible, so the game can read any world-readable file there. Anything you put in those dirs is exposed.
+- Sub-mounts under a bound directory are not carried in (they appear as empty dirs).
 - A **denylist** is weaker than an allowlist. An allowed syscall used the wrong way, or a kernel bug, can still escape. Namespaces are not a security boundary against a kernel exploit.
 - No resource limits (CPU, memory, processes) yet.
-- It is **not** a reason to run untrusted code. Until filesystem isolation and an allowlist exist, treat PNR as running trusted developer demos or packages you trust.
+- It is **not** a reason to run untrusted code. Filesystem isolation now exists, but without a syscall allowlist and resource limits, still treat PNR as running trusted developer demos or packages you trust.
 - x86-64 only. On other architectures or non-Linux the sandbox reports itself unusable.
+
+## Filesystem isolation (slice B2b)
+
+With `launch --sandbox` the game runs in a new root built by `pivot_root`, not your real filesystem. The root is a fresh tmpfs holding only:
+
+| Path | Access | What it is |
+| --- | --- | --- |
+| `/usr /lib /lib64 /bin /sbin` | read-only | host system dirs (symlinks such as `/lib -> usr/lib` are recreated) |
+| `/etc/ld.so.cache` | read-only | the only `/etc` file, so shared libraries resolve |
+| the game's install dir | read-only | at its own host path, so the exe path and env vars stay valid |
+| the PNR jail root of the game (`PNR_JAIL_ROOT`) | read-write | created if missing; writes land on the host here |
+| `LD_LIBRARY_PATH` dirs (the PS-ABI shim dir) | read-only | same path as on the host |
+| `/tmp`, `/dev/shm` | read-write tmpfs | private; writes vanish with the sandbox |
+| `/dev` | `null zero full random urandom` only | bound from the host |
+| `/proc` | fresh | the game's own PID namespace |
+
+Everything else is simply absent: `/home`, `/root`, the rest of `/etc` (so no `/etc/passwd`), `/sys`, `/var`, other mounts. `/` itself is read-only. All mounts are nosuid, and nodev except the five device files. The old root is detached and removed before the game starts, and seccomp then denies `mount`, `pivot_root`, `chroot` and `setns`, so the game cannot undo it. The working directory is the game dir. A symlink the game creates to a host path resolves inside the new root, not on the host.
+
+Failure is loud: a relative path, a missing read-only dir, or a host that cannot do this stops the launch. `sandbox probe` now includes a real attempt to build and enter such a root, and `launch --sandbox` refuses to start if it fails. The old "namespaces + seccomp only" entry point still exists in the library for tests and is clearly named in the header; the launcher never uses it.
+
+Limits of this step: it is one tested Linux host (kernel and container policy differ). Bind mounts are non-recursive. There are still no CPU, memory or process limits. The syscall filter is still a denylist. The scan and `store` commands run outside the sandbox.
 
 ## No silent fallback
 
@@ -27,19 +49,19 @@ Opt-in per launch: `pnr-launcher launch <game> --sandbox`. Check the host first 
 ## Real captured probe output (this build host)
 
 ```
-SANDBOX (Linux, partial isolation; filesystem NOT isolated)
+SANDBOX (Linux, partial isolation; filesystem root is a private pivot_root tmpfs)
   user namespace (no real privileges): available
   network namespace (no network):      available
   PID namespace + private /proc:       available
   IPC + UTS namespaces:                available
   seccomp denylist + no_new_privs:     available
-  filesystem isolation:                NOT PROVIDED (the game can read and write what your user can)
+  filesystem isolation (pivot_root):   available: game sees only system dirs (ro), its own dir (ro), its jail (rw), private /tmp
   status: usable. Label: PARTIAL. A denylist is not an allowlist; do not run untrusted code on this alone.
 ```
 
 ## Tests
 
-`tests/sandbox_tests.cpp` forks, enters the sandbox and execs real programs: PID 1 and exit status mirroring, SIGSEGV mirroring, only own processes in /proc, only `lo` in /proc/net/dev, same uid, seccomp EPERM for ptrace and mount, outbound connect fails, and the honest check that a file written inside is visible outside. If the host does not permit user namespaces the effect tests print SKIP. The `pnr_store_workflow` CTest launches the demo game with `--sandbox` through the real loader (or checks it refuses when the sandbox is unusable).
+`tests/sandbox_tests.cpp` forks, enters the sandbox and execs real programs: PID 1 and exit status mirroring, SIGSEGV mirroring, only own processes in /proc, only `lo` in /proc/net/dev, same uid, seccomp EPERM for ptrace and mount, outbound connect fails, and the honest check that plain `enter()` without a Policy still shares the filesystem. 16 more tests (B2b) enter a real pivot_root root: the game dir and shim dir are visible at their paths; a host file beside the game dir, `/etc/passwd`, `/home`, `/root`, `/sys/kernel` and `/.oldroot` are not; game dir, `/` and `/usr` are read-only; the rw dir is writable and lands on the host; `/tmp` is private; symlinks to outside paths do not escape; `/dev` is minimal and its nodes work; `/proc` is fresh and the game is PID 1; a script in the game dir executes at its own path; cwd is the game dir; relative and missing policy paths are refused; no mountpoint dirs are left in /tmp. If the host does not permit user namespaces the effect tests print SKIP. The `pnr_store_workflow` CTest launches the demo game with `--sandbox` through the real loader (or checks it refuses when the sandbox is unusable).
 
 ## Windows (notes only, Planned, untested)
 
