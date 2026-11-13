@@ -56,7 +56,7 @@ developer-controlled test application and no graphics.
 | 07 | Host OS Abstraction | `platform/` | Implemented (Linux backend: CPU/memory/power/process, Tested; Windows backend: Win32 hwinfo, ELF launch Blocked) |
 | 08 | Game Services (audio/input/storage) | `services/` | Planned (save-data storage exists inside `compat`) |
 | 09 | Game Manager (library) | `library/` | SQLite data layer Implemented, Tested; UI Planned | Run-by-id (`pnr run <id>`) resolves installed games with per-game jails, launch history, and honest compatibility advancement (Untested -> Launches Only); UI Planned.
-| 10 | Desktop Launcher UI | `launcher/`, `apps/launcher` | Launcher core Implemented + Tested (headless text/JSON `pnr-launcher`: list/show/launch, compat set/show, history, read-only scan, import, remove, verify); desktop UI Planned |
+| 10 | Desktop Launcher UI | `launcher/`, `apps/launcher` | Launcher core Implemented + Tested (headless text/JSON `pnr-launcher`: list/show/launch, compat set/show, history, read-only scan, import, remove, verify, doctor, clean --orphans, save export/restore); desktop UI Planned |
 | 11 | Security Manager | `security/` | Partial (process isolation, application-level file path routing, package traversal/checksum rejection implemented). The current "jail" is virtual path routing, NOT an OS-enforced security sandbox: direct host syscalls bypass it. OS-enforced sandboxing (seccomp/namespaces/job objects) with adversarial tests is Planned here |
 | - | Installer (.pnrgame) | `package/` | Implemented (tar+SHA-256, importer, registration), Tested |
 
