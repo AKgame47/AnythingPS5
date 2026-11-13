@@ -1257,6 +1257,103 @@ int main() {
     }
   }
 
+
+  // --- Bounded multi-word SSBO: independent two inputs + one output ---
+  {
+    using namespace pnr::shader;
+    using namespace pnr::graphics;
+    constexpr uint64_t base=0x1234567800ull;
+    const std::vector<uint32_t> code={
+      0x7e0002ff,0x34567800,0x7e0202ff,0x12,
+      0xdc300004,0x027f0000, // v2 = buf[1]
+      0xdc300008,0x037f0000, // v3 = buf[2]
+      (0x25u<<25u)|(2u<<17u)|(3u<<9u)|258u, // v2 += v3
+      0xdc700010,0x007f0200, // buf[4] = v2
+      0xbf810000};
+    auto t=translate_compute_words(code,base,5);
+    CHECK(t.ok && t.required_buffer_words==5 && !t.stored_value_known,
+          "bounds: two inputs and separate output compile with explicit range");
+    std::vector<uint8_t> encoded;
+    for(auto word:code)for(unsigned j=0;j<4;++j)encoded.push_back(uint8_t(word>>(j*8)));
+    auto from_bytes=translate_compute_bytes(encoded,base,5);
+    CHECK(from_bytes.ok && from_bytes.spirv==t.spirv && from_bytes.required_buffer_words==5,
+          "bounds: byte entry preserves explicit buffer extent");
+    auto bad=[&](std::vector<uint32_t> w,uint64_t b,uint32_t n,const char* label) {
+      auto r=translate_compute_words(w,b,n);
+      CHECK(!r.ok && !r.error.empty() && r.spirv.empty() && !r.required_buffer_words,label);
+    };
+    bad(code,base,0,"bounds: zero words rejected");
+    bad(code,base,65537,"bounds: oversized binding rejected");
+    bad(code,base+1,5,"bounds: unaligned guest base rejected");
+    bad(code,UINT64_MAX-3,2,"bounds: overflowing guest range rejected");
+    bad(code,base,4,"bounds: store at end of range rejected");
+    auto w=code; w[4]=0xdc300014;
+    bad(w,base,5,"bounds: load beyond range rejected");
+    w=code; w[4]=0xdc300005;
+    bad(w,base,5,"bounds: unaligned load rejected");
+    w=code; w[9]=0xdc700011;
+    bad(w,base,5,"bounds: unaligned store rejected");
+    w=code; w[1]-=8;
+    bad(w,base,5,"bounds: below-base address rejected");
+    w=code; w[1]=0xfffffffc; w[3]=0xffffffff;
+    bad(w,base,5,"bounds: effective address addition overflow rejected");
+    w=code; w[4]|=0x800;
+    bad(w,base,5,"bounds: reserved FLAT offset bit rejected");
+    CHECK(SpirvModule::compute_u32({{U32Op::Load,5}},5).empty(),
+          "bounds: emitter rejects out-of-range load index");
+    CHECK(SpirvModule::compute_u32({{U32Op::Constant,7},{U32Op::Store,0,5}},5).empty(),
+          "bounds: emitter rejects out-of-range store index");
+    CHECK(SpirvModule::compute_u32({},0).empty(),"bounds: emitter rejects zero-sized array");
+    const char* val=std::getenv("PNR_SPIRV_VAL");
+    if(val && std::filesystem::exists(val)) {
+      const std::string path="/tmp/pnr_bounds_"+std::to_string(::getpid())+".spv";
+      {std::ofstream o(path,std::ios::binary);o.write(reinterpret_cast<const char*>(t.spirv.data()),t.spirv.size()*4);}
+      CHECK(std::system((std::string(val)+" --target-env vulkan1.0 "+path).c_str())==0,
+            "bounds: fixed array SPIR-V validates for Vulkan 1.0");
+      std::filesystem::remove(path);
+    } else std::puts("    note: bounds spirv-val skipped (not configured)");
+    VulkanBackend vk;
+    std::vector<uint32_t> short_io={1,2,3,4};
+    const auto before=short_io;
+    CHECK(!run_translated_compute(vk,t,&short_io) && short_io==before,
+          "bounds: short host io rejected before Vulkan, unchanged");
+    CHECK(!run_translated_compute(vk,t,nullptr),"bounds: null host io rejected");
+    CHECK(!run_translated_compute(vk,ComputeTranslation{},&short_io),
+          "bounds: failed translation not dispatched");
+    auto st=vk.open();
+    if(!st) std::printf("    note: bounds Vulkan skipped: %s\n",st.error.message.c_str());
+    else {
+      st=vk.create_instance("pnr-bounds-tests"); CHECK(st,"bounds: Vulkan instance created");
+      if(st && !vk.devices().empty()) {
+        st=vk.create_device(0); CHECK(st,"bounds: compute device created");
+        if(st) {
+          for(uint32_t a : {0u,42u,0xffffffffu}) {
+            std::vector<uint32_t> io={0xaaaaaaaa,a,17,0xbbbbbbbb,0xcccccccc};
+            auto run=run_translated_compute(vk,t,&io);
+            CHECK(run && io==std::vector<uint32_t>({0xaaaaaaaa,a,17,0xbbbbbbbb,uint32_t(a+17)}),
+                  "bounds: independent inputs/output, all other words unchanged");
+          }
+          // Absolute guest address adjustment, immediate offsets zero.
+          w=code; w[1]+=4; w[4]=0xdc300000; w[6]=0xdc300004; w[9]=0xdc70000c;
+          auto abs=translate_compute_words(w,base,5);
+          std::vector<uint32_t> io={1,10,20,2,3};
+          auto run=run_translated_compute(vk,abs,&io);
+          CHECK(abs.ok && run && io==std::vector<uint32_t>({1,10,20,2,30}),
+                "bounds: constant register address and immediate offset compose");
+          // Highest legal unsigned FLAT offset (2044) and last binding word.
+          w={0x7e0002ff,0x34567800,0x7e0202ff,0x12,
+             0xdc3007fc,0x027f0000,0xdc700000,0x007f0200,0xbf810000};
+          auto edge=translate_compute_words(w,base,512);
+          io.assign(512,0xabcddcba);io[511]=0x12345678;
+          run=run_translated_compute(vk,edge,&io);
+          bool clean=io[0]==0x12345678 && io[511]==0x12345678;
+          for(size_t j=1;j<511;++j)clean &= io[j]==0xabcddcba;
+          CHECK(edge.ok && run && clean,"bounds: last binding word and max aligned FLAT offset execute");
+        }
+      } else CHECK(false,"bounds: physical device available");
+    }
+  }
+
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
