@@ -35,6 +35,7 @@ engine for ordinary PCs and laptops, including low-end hardware.
 | Game-driven rendering: `ps_cube_demo` runs under `pnr run`, its frame loop calls `pnrGfx*` (PNR extension, not Sony API) in `libpnr_psabi.so`, including `pnrGfxDrawCubeRdna` which renders through the translated-RDNA compute-as-vertex path and is checked byte-for-byte against the hand-authored reference in the game; frames presented as PPM into the game's jail and read back by the game; CLI step 5 reports the offscreen renderer, step 8 counts frame files | Implemented, Tested on software Vulkan (byte-identical to harness render); headless, no swapchain/display; hardware GPU untested |
 | Game-supplied mesh: `pnrGfxSetMesh` (validated, bounded, copied) + `pnrGfxDrawMesh(yaw,pitch,mode)` (hand-authored VS or translated-RDNA path); `ps_mesh_demo` uploads its own pyramid under `pnr run`, refuses 9 invalid uploads, presents 8 spinning frames | Implemented, Tested on software Vulkan: unit tests match the presented silhouette to a CPU projection (0 mismatched pixels per frame), RDNA vs hand-authored frames 0 differing bytes (1 byte off by one in the ASan build, so the game tolerates +-2). PNR extension, not a Sony API; max 24 vertices (RDNA kernel lanes), flat vertex colours interpolated, no textures/lighting, headless, hardware GPU untested |
 | Per-vertex normals + directional light: `pnrGfxSetLitMesh` / `pnrGfxSetLight` / `pnrGfxDrawLitMesh`, Lambert diffuse with ambient 0.25, computed per vertex by a hand-authored shader (reference) or by translated RDNA kernels (MVP transform + dot3); `ps_lit_demo` runs under `pnr run` with a mid-run light change | Implemented, Tested on software Vulkan: presented pixels match an independent CPU Lambert shading (0 mismatched of 9216 per frame, 8 frames), dot3 kernel equals the CPU float dot (max diff 0), RDNA vs hand-authored frames 0 differing bytes (game tolerates +-3 on 1%). Gouraud (per-vertex) only, one directional light, no specular/textures/shadows; max 24 vertices; max() clamp is in the hand-authored fragment shader; PNR extension, not a Sony API; hardware GPU untested |
+| Texture: `pnrGfxSetTexture` (RGBA8, 1..256 per side, nearest/linear, repeat/clamp) / `pnrGfxSetTexturedMesh` / `pnrGfxDrawTexturedMesh`; a hand-authored fragment shader samples it (`ps_tex_demo` under `pnr run`) | Implemented, Tested on software Vulkan (llvmpipe): presented pixels match an independent CPU ray-cast + nearest/bilinear sampler (0-1 mismatched of 9216 per frame, 8 frames, nearest +-0, linear +-4). Limits: no mipmaps, no anisotropy, 8-bit RGBA only, hand-authored vertex stage only (no RDNA path), sampler behaviour is the host driver's, no swapchain/display, hardware GPU untested |
 | RDNA-translated vertex stage (compute-as-vertex): `graphics/rdna_vertex.hpp` generates restricted RDNA machine code (v_mul_f32/v_add_f32 with MVP scalars in s0..s15, flat load/store over a 24-lane SSBO), the PNR translator turns it into SPIR-V compute, four dispatches give clip x,y,z,w for the cube's 24 vertices, and those positions are drawn through a pass-through vertex shader (`render_clip_mesh_rgba`, float4 clip + colour). 8 rotating frames compared with the hand-authored MVP vertex shader | Experimental, Tested on software Vulkan: clip positions match a CPU float reference (max diff 0) and 0 of 73728 pixels differ from the hand-authored frames on lavapipe. Not a real RDNA vertex-stage ABI (no VS inputs/exports/parameter cache), only the float ops the translator supports, instruction encodings written by PNR rather than compiled from a game shader, no exact PS5 float rounding guarantee, hardware GPU untested; pixel equality on another driver is not promised |
 | SPIR-V emission: compute write-back module shape, word-level emitter | Implemented (subset), Tested (spirv-val + real dispatch); full shader stages Planned |
 | RDNA shader decoder: all encoding families detected, field extraction for scalar+vector families, named mnemonic subset (scalar/vector partial), literals/64-bit words/truncation handled honestly; taxonomy adapted from [AnyPS5](https://github.com/boykopovar/AnyPS5) (GPL-2.0) | Implemented (subset), Tested (synthetic words); SDWA/DPP + image/memory payload fields Planned |
@@ -353,6 +354,58 @@ ps_mesh_demo: ALL FRAMES RENDERED, PRESENTED TO JAIL AND VERIFIED
 --- game output end ---
 [7-start] SUCCESS   game ran natively in child process, exit code 0
 [8-monitor] SUCCESS   wall time + exit status measured; 16 presented frame file(s), 442576 bytes in the jail (/frames); per-frame times are printed by the game, the runtime has no frame-time telemetry yet
+[9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
+  [event] lifecycle -> STOPPING
+  [event] lifecycle -> TERMINATED
+[10-shutdown] SUCCESS   resources released, 0 errors recorded
+RESULT: RUN OK (real native execution)
+```
+
+### `pnr run ./ps_tex_demo` - texture sampling
+
+`ps_tex_demo` builds an 8x8 RGBA texture and a uv quad and uploads them with
+`pnrGfxSetTexture` (flags: 1 = linear, 2 = repeat; sizes 1..256) and
+`pnrGfxSetTexturedMesh` (8 floats per vertex: xyz, rgb tint, uv). A
+hand-authored fragment shader outputs `texel.rgb * tint`. Frames 0..3 use
+nearest + clamp with uv 0..1, frames 4..7 linear + repeat with uv 0..2. The
+unit tests compare presented pixels with a CPU ray-cast and a CPU
+nearest/bilinear sampler. Limits: one mip level, 8-bit RGBA, host Vulkan
+sampler (llvmpipe here), no swapchain/display. Captured verbatim:
+
+```text
+ps_tex_demo: 8x8 texture + uv quad ready; 9 invalid calls refused
+ps_tex_demo: frame 0 nearest/clamp yaw=-0.50 covered=1302
+ps_tex_demo: frame 1 nearest/clamp yaw=-0.15 covered=1444
+ps_tex_demo: frame 2 nearest/clamp yaw=0.20 covered=1430
+ps_tex_demo: frame 3 nearest/clamp yaw=0.55 covered=1269
+ps_tex_demo: frame 4 linear/repeat yaw=-0.50 covered=1302
+ps_tex_demo: frame 5 linear/repeat yaw=-0.15 covered=1444
+ps_tex_demo: frame 6 linear/repeat yaw=0.20 covered=1430
+ps_tex_demo: frame 7 linear/repeat yaw=0.55 covered=1269
+ps_tex_demo: ALL FRAMES RENDERED AND PRESENTED TO JAIL
+[1-validate] SUCCESS   ./ps_tex_demo is a valid x86-64 ELF (13 segments)
+[1-imports] SUCCESS   23 imports: 16 host-resolved, 0 prx-implemented, 0 prx-declared-only, 0 unknown, 7 pnr-extension
+  [import] pnrGfxSetTexture                 pnr-extension
+  [import] pnrGfxPresentToFile              pnr-extension
+  [import] pnrGfxInit                       pnr-extension
+  [import] pnrGfxLastError                  pnr-extension
+  [import] pnrGfxDrawTexturedMesh           pnr-extension
+  [import] pnrGfxSetTexturedMesh            pnr-extension
+  [import] pnrGfxTexturedDraws              pnr-extension
+[2-analysis] SUCCESS   logical cores=2; gpu=llvmpipe (LLVM 15.0.7, 256 bits) (software Vulkan)
+[3-config] SUCCESS   default profile 'balanced' (no game profile found; defaults used openly)
+  [event] lifecycle -> VALIDATING
+  [event] lifecycle -> INITIALIZING
+  [event] lifecycle -> READY
+[4-runtime] SUCCESS   compat memory/fs/thread services up
+[5-graphics] SUCCESS   game imports 7 pnrGfx* calls; the shim renders OFFSCREEN (headless) in the game process; gpu=llvmpipe (LLVM 15.0.7, 256 bits) (software Vulkan); no swapchain, no display
+[6-content] SUCCESS   save-data dir jailed at ./pnr_data/saves
+--- game output begin ---
+  [event] lifecycle -> RUNNING
+  [monitor] wall=0.061s exit=0
+--- game output end ---
+[7-start] SUCCESS   game ran natively in child process, exit code 0
+[8-monitor] SUCCESS   wall time + exit status measured; 8 presented frame file(s), 221288 bytes in the jail (/frames); per-frame times are printed by the game, the runtime has no frame-time telemetry yet
 [9-optimize] SKIPPED   deterministic adaptive controller is Phase 4 work
   [event] lifecycle -> STOPPING
   [event] lifecycle -> TERMINATED
