@@ -11,7 +11,9 @@
   #include <unistd.h>
 #endif
 
+#include "ape/ape.hpp"
 #include "compat/services.hpp"
+#include "laptop/laptop.hpp"
 #include "core/runtime.hpp"
 #include "library/game_db.hpp"
 #include "loader/native_loader.hpp"
@@ -367,6 +369,102 @@ int main() {
       CHECK(!bad.status, "import: non-package rejected cleanly");
     }
     db.close();
+  }
+
+  // --- MODULE 05: APE hardware classification (documented boundaries) ---
+  {
+    using pnr::ape::HardwareFacts;
+    using pnr::ape::PerfClass;
+    const uint64_t gib = 1024ull*1024*1024;
+    HardwareFacts f;
+    f.cpu_logical_cores = 0;
+    CHECK(pnr::ape::classify(f) == PerfClass::Unknown, "ape: no cores -> unknown");
+    f.cpu_logical_cores = 2; f.ram_total_bytes = 4*gib;
+    CHECK(pnr::ape::classify(f) == PerfClass::A_budget, "ape: 2c/4G -> class A");
+    f.cpu_logical_cores = 4; f.ram_total_bytes = 8*gib;
+    CHECK(pnr::ape::classify(f) == PerfClass::B_low, "ape: 4c/8G -> class B");
+    f.cpu_logical_cores = 8; f.ram_total_bytes = 16*gib;
+    CHECK(pnr::ape::classify(f) == PerfClass::C_midrange, "ape: 8c/16G -> class C");
+    f.cpu_logical_cores = 12; f.ram_total_bytes = 32*gib;
+    CHECK(pnr::ape::classify(f) == PerfClass::D_highend, "ape: 12c/32G -> class D");
+    f.cpu_logical_cores = 16; f.ram_total_bytes.reset();
+    CHECK(pnr::ape::classify(f) == PerfClass::A_budget,
+          "ape: unknown RAM never upgrades class");
+  }
+
+  // --- MODULE 05: frame window statistics ---
+  {
+    pnr::ape::FrameWindow w;
+    for (int i = 1; i <= 100; ++i) w.frame_ms.push_back((double)i);
+    w.recompute();
+    CHECK(w.avg_ms > 50.4 && w.avg_ms < 50.6, "ape: frame avg correct");
+    CHECK(w.p95_ms == 95.0, "ape: p95 correct");
+    CHECK(w.variance > 0.0, "ape: variance computed");
+  }
+
+  // --- MODULE 05: adaptive controller rules + anti-oscillation revert ---
+  {
+    pnr::ape::AdaptiveController c(pnr::ape::PerformanceObjective{60.0});
+    pnr::ape::Telemetry t;
+    t.frame_avg_ms = 25.0;  // target is 16.67ms -> above target
+    t.cpu_util = 0.95;      // CPU saturated
+    pnr::ape::QualitySettings s;
+    CHECK(c.classify_bottleneck(t) == pnr::ape::Bottleneck::cpu_suspected,
+          "ape: cpu bottleneck classified");
+    auto a = c.decide(t, s);
+    CHECK(a.changed && a.field == "background_tasks" && a.to == 2,
+          "ape: cpu pressure halves background tasks");
+    s.background_tasks = a.to;
+    auto a2 = c.decide(t, s);
+    CHECK(!a2.changed, "ape: no second change during stabilization");
+    t.frame_avg_ms = 30.0;  // got worse: revert
+    c.evaluate(t, s);
+    CHECK(s.background_tasks == 4, "ape: ineffective change reverted");
+    t.frame_avg_ms = 25.0;
+    auto a3 = c.decide(t, s);
+    CHECK(a3.changed, "ape: can adjust again after evaluation");
+    s.background_tasks = a3.to;
+    t.frame_avg_ms = 10.0;  // improved: keep
+    c.evaluate(t, s);
+    CHECK(s.background_tasks == 2, "ape: effective change kept");
+  }
+
+  // --- MODULE 05: memory bottleneck + fps cap floor ---
+  {
+    pnr::ape::AdaptiveController c(pnr::ape::PerformanceObjective{60.0});
+    pnr::ape::Telemetry t;
+    t.frame_avg_ms = 33.0;
+    t.cpu_util = 0.3;
+    t.mem_total_bytes = 16ull*1024*1024*1024;
+    t.mem_available_bytes = 512ull*1024*1024;  // < 5% -> memory pressure
+    pnr::ape::QualitySettings s;
+    auto a = c.decide(t, s);
+    CHECK(a.changed && a.field == "resolution_scale_pct" && a.to == 90,
+          "ape: memory pressure reduces resolution scale");
+  }
+
+  // --- MODULE 06: laptop power modes ---
+  {
+    using pnr::laptop::PowerMode;
+    auto saver = pnr::laptop::caps_for(PowerMode::battery_saver);
+    CHECK(saver.fps_cap == 30 && saver.max_background_tasks == 1,
+          "laptop: battery saver caps");
+    auto perf = pnr::laptop::caps_for(PowerMode::max_performance);
+    CHECK(perf.fps_cap == 120 && perf.min_resolution_scale_pct == 100,
+          "laptop: max performance caps");
+    pnr::ape::HardwareFacts f;
+    f.cpu_logical_cores = 8;
+    f.on_battery = true;
+    CHECK(pnr::laptop::default_mode(f) == PowerMode::battery_saver,
+          "laptop: on battery -> saver");
+    f.on_battery.reset();
+    CHECK(pnr::laptop::default_mode(f) == PowerMode::balanced,
+          "laptop: unknown battery -> balanced, never assumed AC");
+    pnr::ape::QualitySettings s;
+    s.fps_cap = 60;
+    pnr::laptop::apply_caps(saver, s);
+    CHECK(s.fps_cap == 30 && s.background_tasks == 1,
+          "laptop: caps bound quality settings");
   }
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
