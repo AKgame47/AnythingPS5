@@ -1,8 +1,10 @@
 // PNR CLI - first launch driver for the master prompt's 10-step workflow.
 // Every step prints an explicit SUCCESS / FAILED / SKIPPED / BLOCKED line.
 // It never reports a game as run when only initialization succeeded.
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -160,7 +162,8 @@ int cmd_validate(pnr::loader::NativeLoader& loader, const std::string& exe) {
   return 0;
 }
 
-int cmd_run(const std::string& exe, const std::vector<std::string>& args) {
+int cmd_run(const std::string& exe, const std::vector<std::string>& args,
+            const std::string& game_id = "") {
   using pnr::Status;
   pnr::RuntimeManager rt;
   pnr::loader::NativeLoader loader;
@@ -250,7 +253,7 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args) {
   // STEP 7 - GAME START (separate process, supervised)
   pnr::GameSession session(
       rt, "session-1",
-      [&loader](const std::string& e, const std::vector<std::string>& a,
+      [&loader, &game_id](const std::string& e, const std::vector<std::string>& a,
                 int* out_sig) -> int {
         // PS-ABI environment: games get their own jail and can resolve the
         // sce* shim from the launcher binary's directory.
@@ -266,8 +269,14 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args) {
             if (slash != std::string::npos) selfdir = full.substr(0, slash);
           }
         }
+        // Library games get their own jail; ad-hoc paths share the
+        // default one. The sce* shim resolves from the launcher's
+        // directory (prx modules come from the runtime, like firmware).
+        const std::string jail = game_id.empty()
+                                     ? "./pnr_data/jail"
+                                     : "./pnr_data/jail/" + game_id;
         auto lr = loader.launch(e, a,
-                                {"PNR_JAIL_ROOT=./pnr_data/jail",
+                                {"PNR_JAIL_ROOT=" + jail,
                                  "LD_LIBRARY_PATH=" + selfdir});
         if (!lr.started) {
           std::printf("  [loader] start failed: %s\n", lr.error.c_str());
@@ -285,7 +294,11 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args) {
       });
 
   std::puts("--- game output begin ---");
+  const auto t0 = std::chrono::steady_clock::now();
   Status run = session.start(exe, args);
+  const double wall =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+          .count();
   std::puts("--- game output end ---");
   if (!run) {
     step("7-start", "FAILED", run.error.message);
@@ -313,14 +326,44 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args) {
   std::printf("RESULT: %s\n",
               session.last_exit_code() == 0 ? "RUN OK (real native execution)"
                                             : "RUN FAILED (real result)");
+
+  // Library bookkeeping for games run by id: the launch is recorded, and
+  // a clean exit moves compatibility Untested -> Launches Only. That state
+  // means exactly what it says: the game started and finished; nobody has
+  // verified playability.
+  if (!game_id.empty()) {
+    pnr::library::GameDb db;
+    if (db.open("./pnr_data/library.db")) {
+      db.record_launch(game_id, session.last_exit_code(), wall);
+      if (session.last_exit_code() == 0) {
+        auto compat = db.get_compatibility(game_id);
+        if (!compat || compat->state == "Untested") {
+          db.set_compatibility({game_id, "Launches Only",
+                                "launched natively, exit 0; gameplay not "
+                                "verified"});
+          std::printf("[library] launch recorded; compatibility=Launches "
+                      "Only (exit 0, gameplay unverified)\n");
+        } else {
+          std::printf("[library] launch recorded; compatibility=%s "
+                      "(unchanged)\n", compat->state.c_str());
+        }
+      } else {
+        std::printf("[library] launch recorded (exit %d; compatibility "
+                    "unchanged)\n", session.last_exit_code());
+      }
+      db.close();
+    }
+  }
   return session.last_exit_code();
 }
 
 void usage() {
   std::puts("PNR CLI (AnythingPS5) - honest prototype\n"
             "usage:\n"
-            "  pnr run <executable> [args...]   validate + natively run a "
-            "developer test app\n"
+            "  pnr run <exe-or-game-id> [args...]\n"
+            "                                 validate + natively run a "
+            "test app or an\n"
+            "                                 installed library game\n"
             "  pnr validate <executable>        ELF/x86-64 validation only\n"
             "  pnr import <file.pnrgame>        verify + install a dev package\n"
             "  pnr games                        list the game library\n"
@@ -342,7 +385,27 @@ int main(int argc, char** argv) {
   if (argc >= 2 && std::strcmp(argv[1], "games") == 0) return cmd_games();
   if (argc >= 3 && std::strcmp(argv[1], "run") == 0) {
     std::vector<std::string> args(argv + 3, argv + argc);
-    return cmd_run(argv[2], args);
+    std::string target = argv[2];
+    std::string game_id;
+    if (!std::filesystem::exists(target)) {
+      // Not a path: try the library. Never guess beyond an exact id.
+      pnr::library::GameDb db;
+      if (db.open("./pnr_data/library.db")) {
+        auto inst = db.get_installation(target);
+        if (inst && !inst->executable.empty()) {
+          game_id = target;
+          target = inst->path + "/" + inst->executable;
+        }
+        db.close();
+      }
+      if (game_id.empty()) {
+        std::fprintf(stderr,
+                     "run: '%s' is neither a file nor an installed game id\n",
+                     argv[2]);
+        return 2;
+      }
+    }
+    return cmd_run(target, args, game_id);
   }
   usage();
   return 64;
