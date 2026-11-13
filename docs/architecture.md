@@ -6,8 +6,8 @@ Status labels used everywhere: **Planned / Implemented / Tested / Experimental /
 ## 1. What PNR is (and is not)
 
 PNR (PlayStation Native Runtime) is a research project exploring native
-x86-64 execution of compatible software on Windows and Linux, with a
-compatibility layer mapping console-style services to host services, a
+x86-64 execution of compatible software on Linux (a Windows build exists
+but cannot run guests, see `docs/platforms.md`), with a compatibility layer mapping console-style services to host services, a
 Vulkan graphics backend, and an adaptive performance engine.
 
 PNR is **not** an emulator, not a VM, not streaming, and — as of this
