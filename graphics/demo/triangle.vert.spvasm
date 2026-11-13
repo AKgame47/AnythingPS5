@@ -1,0 +1,49 @@
+; Original PNR demo vertex shader, GPL-2.0. Vulkan 1.0.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %index %position
+OpDecorate %index BuiltIn VertexIndex
+OpDecorate %position BuiltIn Position
+%void = OpTypeVoid
+%fun = OpTypeFunction %void
+%int = OpTypeInt 32 1
+%float = OpTypeFloat 32
+%v4 = OpTypeVector %float 4
+%pi = OpTypePointer Input %int
+%po = OpTypePointer Output %v4
+%index = OpVariable %pi Input
+%position = OpVariable %po Output
+%i0 = OpConstant %int 0
+%i1 = OpConstant %int 1
+%zero = OpConstant %float 0
+%one = OpConstant %float 1
+%neg = OpConstant %float -0.75
+%pos = OpConstant %float 0.75
+%a = OpConstantComposite %v4 %neg %neg %zero %one
+%b = OpConstantComposite %v4 %pos %neg %zero %one
+%c = OpConstantComposite %v4 %zero %pos %zero %one
+%bool = OpTypeBool
+%main = OpFunction %void None %fun
+%entry = OpLabel
+%id = OpLoad %int %index
+%is0 = OpIEqual %bool %id %i0
+%is1 = OpIEqual %bool %id %i1
+OpSelectionMerge %merge0 None
+OpBranchConditional %is0 %yes0 %no0
+%yes0 = OpLabel
+OpBranch %merge0
+%no0 = OpLabel
+OpSelectionMerge %merge1 None
+OpBranchConditional %is1 %yes1 %no1
+%yes1 = OpLabel
+OpBranch %merge1
+%no1 = OpLabel
+OpBranch %merge1
+%merge1 = OpLabel
+%bc = OpPhi %v4 %b %yes1 %c %no1
+OpBranch %merge0
+%merge0 = OpLabel
+%out = OpPhi %v4 %a %yes0 %bc %merge1
+OpStore %position %out
+OpReturn
+OpFunctionEnd
