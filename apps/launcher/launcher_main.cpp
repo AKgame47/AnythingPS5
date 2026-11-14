@@ -23,6 +23,7 @@
 #include "scan/scan.hpp"
 #include "psn/psn_cli.hpp"
 #include "store/store_cli.hpp"
+#include "plugin/plugin_cli.hpp"
 
 static void usage() {
   std::puts("pnr-launcher (headless launcher core, not a desktop UI)\n"
@@ -42,6 +43,7 @@ static void usage() {
             "  pnr-launcher clean --orphans [--yes] [--json]   (orphan install dirs only; dry run by default)\n"
             "  pnr-launcher export <game-id> <out.tar> [--json]   (back up saves)\n"
             "  pnr-launcher restore-saves <game-id> <in.tar> [--overwrite] [--json]\n"
+            "  pnr-launcher plugin add <dir> | list | info <id> | enable <id> --grant <perms> | disable <id> | remove <id>   (plugins are untrusted; nothing runs yet)\n"
             "  pnr-launcher store source add <id> <https-index-url> --rights <statement> | store source remove <id> [--yes] | store source list\n"
             "  pnr-launcher store get <source> <package> | store queue list|run [<source> <package>] | store queue pause|resume|cancel <source> <package> [--yes] | store install <source> <package>\n"
             "  pnr-launcher store refresh [id] | store search [text] [--source id] | store show <source> <package> [--json]\n"
@@ -67,7 +69,7 @@ int main(int argc, char** argv) {
   bool after = false, complete = false, forget = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
   bool live_ok = false, no_model_sandbox = false, sandbox_on = false, allow_flagged = false, force = false, log_it = false;
   std::string out_file, sha256_arg, threshold_s = "0.8";
-  std::string note, limit_s = "20", file, platform, rights, source;
+  std::string note, limit_s = "20", file, platform, rights, source, grant;
   for (size_t i = 1; i < a.size(); ++i) {
     if (after) gameargs.push_back(a[i]);
     else if (a[i] == "--") after = true;
@@ -88,6 +90,7 @@ int main(int argc, char** argv) {
     else if (a[i] == "--forget-owned") forget = true;
     else if (a[i] == "--file" && i + 1 < a.size()) file = a[++i];
     else if (a[i] == "--rights" && i + 1 < a.size()) rights = a[++i];
+    else if (a[i] == "--grant" && i + 1 < a.size()) grant = a[++i];
     else if (a[i] == "--source" && i + 1 < a.size()) source = a[++i];
     else if (a[i] == "--platform" && i + 1 < a.size()) platform = a[++i];
     else if (a[i] == "--keep-saves") keep = true;
@@ -224,6 +227,11 @@ int main(int argc, char** argv) {
     std::string out;
     rc = pnr::research::cmd_research(pos, ro, pnr::store::store_dir_for(dbp ? dbp : "./pnr_data/library.db") + "/research", &out);
     std::fputs(out.c_str(), rc == 0 ? stdout : (rc == 64 ? stdout : stderr));
+  } else if (a[0] == "plugin") {
+    pnr::plugin::PluginManager pm(std::string(std::getenv("PNR_PLUGIN_HOME") ? std::getenv("PNR_PLUGIN_HOME") : "./pnr_data"));
+    std::string out;
+    rc = pnr::plugin::cmd_plugin(pm, std::vector<std::string>(pos.begin(), pos.end()), grant, yes, json, &out);
+    std::fputs(out.c_str(), stdout);
   } else if (a[0] == "store" && !pos.empty()) {
     pnr::store::Registry reg(pnr::store::store_dir_for(dbp ? dbp : "./pnr_data/library.db"));
     std::string out;
