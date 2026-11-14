@@ -1,7 +1,7 @@
 # Plugin system (slice P1: manifests, versions, manager core)
 
 State: **plugin manager core and sandboxed execution with a permission broker are Implemented and Tested on synthetic plugins (Linux).**
-Signing, GitHub analysis, and the hooks into the library and store are later slices.
+Static analysis and Ed25519 signatures are Implemented and Tested too. GitHub URL / package install and the hooks into the library and store are later slices.
 Windows: plugin execution is Blocked, same as running games (the core builds, nothing runs there).
 
 ## What a plugin is
@@ -50,7 +50,17 @@ Nothing in it grants anything.
   `[A-Za-z0-9._-]`, 64 KiB values); `result` ends the session. Anything else is refused and counted. Limits: wall-clock timeout, 1 MiB output, 500 requests.
 - Library, store and download calls through the broker are Planned (slice P4). The plugin has no network (empty network namespace).
 - Windows: plugin execution is Blocked.
-- No signatures yet (the store's Ed25519 verification will be reused). Unsigned plugins are the only kind that exist today.
 - Install from a GitHub URL, local package files, automatic updates and repository analysis are Planned.
 - No code from any repository is used. The ps5-library repository is a jailbreak and piracy ecosystem payload and is
   not used. If it is ever analysed, its dump catalogs and download providers are refused.
+
+## Analysis, signatures, pinned keys (P3a)
+- `plugin add` first analyses the tree without running anything. Refused: Sony SELF containers, FreeBSD-ABI ELF (console payload style),
+  `.self/.sprx/.pup`, links to file-locker or torrent hosts, magnet links, dump catalogs with download links, jailbreak/exploit
+  payload loaders, and any `net:` permission for a file-locker or torrent host. Native x86-64 ELF/PE files only produce a warning.
+  These checks are heuristics. A clean result is not a safety guarantee; the sandbox and your grants are the real controls.
+- Signatures: `pnr-plugin.sig` holds an Ed25519 key and signature over `path + sha512` of every other file. Any added, changed or
+  removed file breaks it. `plugin sign <dir>` reads the seed from the file named by `PNR_PLUGIN_SEED_FILE` (never from the command line).
+- `plugin trust add <name> <pubkey-hex> | list | remove <name>` pins keys (`plugins/trusted_keys.json`). A valid signature from an
+  unpinned key proves nothing and is shown as "untrusted". `--require-signed` installs only plugins signed by a pinned key.
+- Still Planned (P3b): install from a GitHub URL or a package file, automatic updates.
