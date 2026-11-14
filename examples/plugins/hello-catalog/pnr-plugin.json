@@ -1,0 +1,14 @@
+{
+  "id": "example.hello-catalog",
+  "name": "Hello Catalog (example)",
+  "version": "1.0.0",
+  "description": "A data-only example plugin. It declares a catalog and one permission. It contains no code.",
+  "author": "PNR examples",
+  "license": "GPL-2.0",
+  "pnr_api": ">=1.0.0 <2.0.0",
+  "kinds": ["catalog"],
+  "permissions": ["fs_write_plugin_data"],
+  "platforms": ["linux", "windows"],
+  "dependencies": {},
+  "entry": {"type": "data"}
+}
