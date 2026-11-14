@@ -140,8 +140,8 @@ Modules (see [docs/architecture.md](docs/architecture.md) and
 [docs/interface-contracts.md](docs/interface-contracts.md)):
 core runtime, loader and PRX layer, compat services, host OS abstraction,
 adaptive performance engine, laptop manager, game services, library,
-package/importer, headless launcher core, graphics. Planned: security
-manager (Module 11), desktop UI.
+package/importer, headless launcher core, graphics. Partial: security
+manager (Module 11, partial sandbox). Desktop UI: see `docs/ui.md`.
 
 ## Quick start
 
@@ -949,8 +949,8 @@ modules), not shipped inside the package.
 
 Status: **Implemented, Tested** (unit tests plus the `pnr_launcher_workflow`
 CTest). **There is no GUI**: no window, no artwork, no toolkit. The desktop
-launcher UI (module 10) is still **Planned**. This slice is the logic a UI
-would sit on, with a text/JSON front end.
+launcher UI (module 10) came later as `pnr-ui` (see `docs/ui.md`). This slice is the logic the UI
+sits on, with a text/JSON front end.
 
 - `launcher/launcher_core.*`: lists library games, shows details and
   compatibility status, launches by exact game id, records launch history.
@@ -1339,11 +1339,11 @@ STORE REFRESH
 | Store scan pipeline: hash always on, EMBER2024 model stage via external helper (OFF unless model+helper present), ClamAV (OFF unless installed); flagged blocks install; see docs/scan.md | Implemented + Tested with fakes; model stage Experimental, never run against a real model or ClamAV |
 | Autonomous research engine (a model deciding what to fetch on its own) | Planned, not started. Only the manual C1 research tools exist (see above) |
 | Downloading purchased games | Blocked: no authorized mechanism found; PNR will not bypass DRM or licensing |
-| Desktop launcher UI | Planned |
-| Security manager with a real isolation boundary (seccomp, namespaces) | Planned (required before any untrusted code) |
+| Desktop launcher UI | Implemented (SDL2 + Dear ImGui `pnr-ui`: Library, game page, Store, Settings/Plugins; see `docs/ui.md`); checked under Xvfb only, not in CI, Windows Blocked |
+| Security manager with a real isolation boundary (seccomp, namespaces) | Partial: `launch --sandbox` and plugin execution use a partial Linux sandbox (see `docs/sandbox.md`); no CPU/memory limits, not escape-proof |
 | Hardware GPU testing and a swapchain or window | Planned, untested |
 | Wider RDNA-to-SPIR-V coverage | Experimental, subset only |
-| Audio host backends | Planned |
+| Audio host backends | Planned (null backend only; see the audio slice) |
 | Windows execution path | Blocked (ELF cannot run on Windows) |
 | Prebuilt releases | Parked until the owner asks |
 | Real PS5 software | Blocked (proprietary formats, authorization, DRM) |
