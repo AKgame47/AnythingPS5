@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "launcher/launcher_core.hpp"
+#include "plugin/manager.hpp"
+#include "plugin/runner.hpp"
 #include "store/download.hpp"
 #include "store/store.hpp"
 
@@ -97,6 +99,23 @@ public:
   // Scan, then import, like `store install`. A flagged scan refuses (no override in the UI).
   std::string store_install(const std::string& source, const std::string& pkg, bool* ok, std::string* scan_text);
   void store_poll();
+
+  // Plugins (UI-4): the real PluginManager, same root as `pnr-launcher plugin`
+  // (PNR_PLUGIN_HOME, else the library folder). Plugins are untrusted: nothing
+  // is enabled or granted by installing; a person ticks each grant.
+  std::string plugin_home() const;
+  bool plugin_require_signed = false;  // this session only; applied to every manager call
+  std::vector<plugin::InstalledPlugin> plugin_list() const;
+  plugin::InstallResult plugin_install(const std::string& dir);
+  std::string plugin_enable(const std::string& id, const std::vector<std::string>& grant, bool* ok);
+  std::string plugin_disable(const std::string& id, bool* ok);
+  std::string plugin_remove(const std::string& id, bool* ok);
+  std::vector<plugin::PinnedKey> plugin_keys() const;
+  std::string plugin_pin(const std::string& name, const std::string& hex, bool* ok);
+  std::string plugin_unpin(const std::string& name, bool* ok);
+  // Runs an enabled process plugin through the real sandbox runner and the
+  // live broker (blocks up to the runner's 10 s timeout).
+  plugin::RunResult plugin_run(const std::string& id, std::string* refuse);
 
   // Folder scan and import, same backend calls as `scan` and `import`.
   Status scan(const std::string& dir, launcher::ScanReport* out);
