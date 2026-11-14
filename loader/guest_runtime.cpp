@@ -8,6 +8,10 @@
 #include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <chrono>
+#include <condition_variable>
+#include <map>
+#include <memory>
 #include <mutex>
 
 namespace pnr::loader {
@@ -267,6 +271,84 @@ std::int64_t guest_mutex_op(int op, std::int64_t* handle) {
     case 3: ::pthread_mutex_destroy(m); delete m; *handle = 0; return 0;
     default: return -2;
   }
+}
+
+// ---- Kernel sync objects (slice S1)
+namespace {
+struct Cond { pthread_cond_t c; };
+struct Sema { std::mutex m; std::condition_variable cv; std::int64_t count; std::int64_t max; bool dead = false; int waiters = 0; };
+std::mutex g_sync_mu;
+std::int64_t g_sync_next = 0x5000;
+std::map<std::int64_t, std::shared_ptr<Cond>> g_conds;
+std::map<std::int64_t, std::shared_ptr<Sema>> g_semas;
+std::shared_ptr<Cond> find_cond(std::int64_t h) { std::lock_guard<std::mutex> g(g_sync_mu); auto i = g_conds.find(h); return i == g_conds.end() ? nullptr : i->second; }
+std::shared_ptr<Sema> find_sema(std::int64_t h) { std::lock_guard<std::mutex> g(g_sync_mu); auto i = g_semas.find(h); return i == g_semas.end() ? nullptr : i->second; }
+}  // namespace
+
+std::int64_t guest_cond_init(std::int64_t* handle) {
+  if (!handle) return -2;
+  auto c = std::make_shared<Cond>();
+  pthread_condattr_t at; ::pthread_condattr_init(&at); ::pthread_condattr_setclock(&at, CLOCK_MONOTONIC);
+  ::pthread_cond_init(&c->c, &at); ::pthread_condattr_destroy(&at);
+  std::lock_guard<std::mutex> g(g_sync_mu);
+  *handle = g_sync_next++; g_conds[*handle] = c; return 0;
+}
+std::int64_t guest_cond_wait(std::int64_t cond, std::int64_t* mh, std::int64_t timeout_us) {
+  auto c = find_cond(cond);
+  if (!c || !mh || !*mh) return -2;
+  auto* m = reinterpret_cast<pthread_mutex_t*>(*mh);
+  if (timeout_us < 0) return ::pthread_cond_wait(&c->c, m) == 0 ? 0 : -3;
+  timespec ts{}; ::clock_gettime(CLOCK_MONOTONIC, &ts);
+  const std::int64_t ns = ts.tv_nsec + (timeout_us % 1000000) * 1000;
+  ts.tv_sec += timeout_us / 1000000 + ns / 1000000000; ts.tv_nsec = ns % 1000000000;
+  const int r = ::pthread_cond_timedwait(&c->c, m, &ts);
+  return r == 0 ? 0 : (r == ETIMEDOUT ? -4 : -3);
+}
+std::int64_t guest_cond_wake(std::int64_t cond, bool all) {
+  auto c = find_cond(cond); if (!c) return -2;
+  return (all ? ::pthread_cond_broadcast(&c->c) : ::pthread_cond_signal(&c->c)) == 0 ? 0 : -3;
+}
+std::int64_t guest_cond_destroy(std::int64_t* handle) {
+  if (!handle) return -2;
+  std::lock_guard<std::mutex> g(g_sync_mu);
+  auto i = g_conds.find(*handle); if (i == g_conds.end()) return -2;
+  ::pthread_cond_destroy(&i->second->c); g_conds.erase(i); *handle = 0; return 0;
+}
+std::int64_t guest_sema_create(std::int64_t* handle, std::int64_t initial, std::int64_t max) {
+  if (!handle || max <= 0 || max > 0x7fffffff || initial < 0 || initial > max) return -2;
+  auto s = std::make_shared<Sema>(); s->count = initial; s->max = max;
+  std::lock_guard<std::mutex> g(g_sync_mu);
+  *handle = g_sync_next++; g_semas[*handle] = s; return 0;
+}
+std::int64_t guest_sema_wait(std::int64_t sema, std::int64_t need, std::int64_t timeout_us) {
+  auto s = find_sema(sema);
+  if (!s || need <= 0 || need > s->max) return -2;
+  std::unique_lock<std::mutex> l(s->m);
+  auto ready = [&] { return s->dead || s->count >= need; };
+  ++s->waiters;
+  bool ok = true;
+  if (timeout_us < 0) s->cv.wait(l, ready);
+  else ok = s->cv.wait_for(l, std::chrono::microseconds(timeout_us), ready);
+  --s->waiters;
+  if (s->dead) return -2;
+  if (!ok) return -4;
+  s->count -= need; return 0;
+}
+std::int64_t guest_sema_signal(std::int64_t sema, std::int64_t count) {
+  auto s = find_sema(sema);
+  if (!s || count <= 0) return -2;
+  std::lock_guard<std::mutex> l(s->m);
+  if (s->count + count > s->max) return -3;   // would exceed the maximum: refused, count unchanged
+  s->count += count; s->cv.notify_all(); return 0;
+}
+std::int64_t guest_sema_destroy(std::int64_t* handle) {
+  if (!handle) return -2;
+  std::shared_ptr<Sema> s;
+  { std::lock_guard<std::mutex> g(g_sync_mu);
+    auto i = g_semas.find(*handle); if (i == g_semas.end()) return -2;
+    s = i->second; g_semas.erase(i); *handle = 0; }
+  { std::lock_guard<std::mutex> l(s->m); s->dead = true; }   // wakes waiters with an error
+  s->cv.notify_all(); return 0;
 }
 
 }  // namespace pnr::loader
