@@ -4,6 +4,7 @@
 #include "prx/prx.hpp"
 #include "loader/guest_runtime.hpp"
 #include "prx/libc_abi.hpp"
+#include "prx/hw_abi.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -232,6 +233,7 @@ PrxRegistry::PrxRegistry() {
   }));
   symbols_.push_back(impl("libkernel", "scePthreadSelf", [](V) -> std::int64_t { return loader::guest_thread_self(); }));
   add_libc_abi_symbols(symbols_);  // C3
+  add_hw_abi_symbols(symbols_);    // C5
   // Declared-only taxonomy entries (honest: no host implementation yet).
   symbols_.push_back(decl_only("libkernel", "sceKernelOpen"));
   symbols_.push_back(decl_only("libkernel", "sceKernelRead"));
