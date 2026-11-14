@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2511/2511 unit tests, 22/22 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2420 unit checks without it; the
+Test state: **2521/2521 unit tests, 22/22 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2430 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -209,12 +209,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2511/2511 unit tests pass (2420 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
+**2521/2521 unit tests pass (2430 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2511/2511
+not re-run for these counts). ASan+UBSan: 2521/2521
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -378,7 +378,7 @@ wrote /tmp/tri.png (262488 bytes)
 
 ### `pnr-launcher plugin` - plugin manager core (slice P1)
 
-Plugins are untrusted. Nothing runs yet. Output captured from a real run on the example plugin
+Plugins are untrusted. Output captured from a real run on the example plugin
 (`examples/plugins/hello-catalog`, data only):
 
 ```
@@ -386,7 +386,7 @@ $ pnr-launcher plugin add <repo>/examples/plugins/hello-catalog
 installed example.hello-catalog 1.0.0 (disabled)
 it asks for: fs_write_plugin_data
 to enable: plugin enable example.hello-catalog --grant fs_write_plugin_data
-plugins are untrusted. Nothing runs in this slice: isolated execution is not built yet.
+plugins are untrusted. Nothing runs until you enable it and run it; it then runs only in the partial sandbox.
 [exit 0]
 $ pnr-launcher plugin list
 example.hello-catalog 1.0.0 disabled catalog
@@ -415,6 +415,25 @@ removed example.hello-catalog
 ```
 
 See docs/plugins.md.
+
+### `pnr-launcher plugin run` - isolated execution + permission broker (slice P2)
+
+A `process` plugin runs only in the PNR Linux sandbox, which is **PARTIAL** isolation (see `sandbox/sandbox.hpp`; not
+escape-proof). If the sandbox is unusable the plugin is not started. The plugin talks to the host over a pipe and the
+broker serves only calls the user granted. Output captured from a real run of a synthetic demo plugin that logs,
+stores one value, tries a call that does not exist in this release, and checks whether it can see the host `/etc`:
+
+```
+$ pnr-launcher plugin add <demo>/echo
+$ pnr-launcher plugin enable example.echo --grant fs_write_plugin_data
+$ pnr-launcher plugin run example.echo
+plugin log: hello from inside the sandbox
+result: stored greeting; host /etc hidden
+broker: 3 served, 1 denied (sandbox is PARTIAL isolation, not a guarantee)
+$ pnr-launcher plugin disable example.echo
+$ pnr-launcher plugin run example.echo
+not run: plugin is not enabled
+```
 
 ### `pnr run ./ps_demo` - the PS-style showcase
 
