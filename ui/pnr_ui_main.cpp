@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <string>
 #include <utility>
@@ -30,6 +31,8 @@ struct Opts {
   std::string select_id, auto_launch, scan_dir;     // test hooks: same code paths as the mouse
   bool auto_sandbox = false;
   bool open_add = false;
+  std::string page_id;   // open the game page for this id at start (test hook)
+  int tab = 0;           // initial tab on the game page (test hook)
 };
 
 const ImVec4 kAccent(0.0f, 0.44f, 0.82f, 1.0f);
@@ -43,6 +46,8 @@ ImVec4 compat_color(const std::string& s) {
   if (s == "Blocked by Missing Dependency") return ImVec4(0.95f, 0.55f, 0.25f, 1);
   return ImVec4(0.65f, 0.67f, 0.72f, 1);  // Untested
 }
+
+ImVec4 A_(ImVec4 c, float a) { c.w = a; return c; }
 
 void apply_style() {
   ImGui::StyleColorsDark();
@@ -64,6 +69,9 @@ void apply_style() {
   c[ImGuiCol_TableHeaderBg] = ImVec4(0.13f, 0.145f, 0.18f, 1);
   c[ImGuiCol_TableRowBgAlt] = ImVec4(1, 1, 1, 0.025f);
   c[ImGuiCol_CheckMark] = kAccent;
+  c[ImGuiCol_Tab] = ImVec4(0, 0, 0, 0);
+  c[ImGuiCol_TabHovered] = A_(ImVec4(0.27f, 0.40f, 0.78f, 1), 0.6f);
+  c[ImGuiCol_TabSelected] = ImVec4(0.20f, 0.30f, 0.62f, 1);
 }
 
 const char* find_font(const std::vector<const char*>& paths) {
@@ -87,6 +95,31 @@ struct App {
   ImFont* mono = nullptr;
   std::string renderer_name, video_driver;
   bool show_scan = true;
+  // ---- game page (UI-2)
+  enum Screen { kLibrary = 0, kGame = 1 };
+  int screen = kLibrary;
+  int want_tab = -1;
+  std::string loaded_for;            // game id the page state below belongs to
+  int compat_idx = 0;
+  char compat_note[220] = "";
+  std::string compat_msg; bool compat_ok = false;
+  std::string verify_msg; bool verify_ok = false;
+  char export_path[400] = "";
+  std::string export_msg; bool export_ok = false;
+  bool keep_saves = true, have_dry = false;
+  pnr::launcher::RemoveOutcome dry;
+  std::string remove_msg;
+
+  void open_page(const std::string& id) { selected = id; screen = kGame; loaded_for.clear(); }
+  void load_page_state(const pnr::launcher::GameEntry& g) {
+    loaded_for = g.game_id;
+    const auto& st = pnr::launcher::compat_states();
+    compat_idx = 0;
+    for (size_t i = 0; i < st.size(); ++i) if (st[i] == g.compatibility) compat_idx = static_cast<int>(i);
+    std::snprintf(compat_note, sizeof compat_note, "%s", g.compatibility_notes.c_str());
+    compat_msg.clear(); verify_msg.clear(); export_msg.clear(); remove_msg.clear(); have_dry = false;
+    std::snprintf(export_path, sizeof export_path, "/tmp/%s-saves.tar", g.game_id.c_str());
+  }
 
   void do_launch(const std::string& id) {
     std::string why;
@@ -145,13 +178,17 @@ struct App {
     text_at(dl, ImVec2(o.x + 70, o.y + 26), 22, ImVec4(0.93f, 0.95f, 1, 1), "PNR");
     text_at(dl, ImVec2(o.x + 70, o.y + 50), 12, kMuted, "Native Runtime");
     struct Item { const char* name; const char* tag; bool on; };
-    const Item items[] = {{"Library", "", true}, {"Game page", "UI-2", false}, {"Store", "UI-3", false}, {"Settings", "UI-4", false},
-                          {"Hardware", "planned", false}, {"Diagnostics", "planned", false}, {"Reports", "planned", false}};
+    Item items[] = {{"Library", "", screen == kLibrary}, {"Game page", sel_game() ? "" : "pick a game", screen == kGame}, {"Store", "UI-3", false}, {"Settings", "UI-4", false},
+                    {"Hardware", "planned", false}, {"Diagnostics", "planned", false}, {"Reports", "planned", false}};
     float y = 96;
+    int idx = 0;
     for (const Item& it : items) {
       ImGui::SetCursorPos(ImVec2(0, y));
-      ImGui::InvisibleButton(it.name, ImVec2(228, 40));
-      bool hov = ImGui::IsItemHovered() && it.on == false ? false : ImGui::IsItemHovered();
+      bool clicked = ImGui::InvisibleButton(it.name, ImVec2(228, 40));
+      if (clicked && idx == 0) screen = kLibrary;
+      if (clicked && idx == 1 && sel_game()) open_page(selected);
+      ++idx;
+      bool hov = ImGui::IsItemHovered();
       ImVec2 a(o.x, o.y + y), b(o.x + 228, o.y + y + 40);
       if (it.on) {
         dl->AddRectFilled(a, b, U(A(kAccent, 0.14f)));
@@ -212,6 +249,9 @@ struct App {
     if (!blocker.empty()) ImGui::BeginDisabled();
     if (primary_button(model.launching() ? "Running..." : "Launch", ImVec2(190, 46), false)) do_launch(g->game_id);
     if (!blocker.empty()) ImGui::EndDisabled();
+    ImGui::SameLine(0, 14);
+    ImGui::SetCursorPosY(h - 62);
+    if (ImGui::Button("Details", ImVec2(110, 46))) open_page(g->game_id);
     ImGui::SameLine(0, 20);
     ImGui::SetCursorPosY(h - 52);
     ImGui::Checkbox("Run in sandbox", &sandbox);
@@ -263,6 +303,7 @@ struct App {
       ImVec2 p = ImGui::GetCursorScreenPos();
       ImGui::PushID(g.game_id.c_str());
       if (ImGui::InvisibleButton("card", ImVec2(cw, ch))) selected = g.game_id;
+      if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) open_page(g.game_id);
       bool hov = ImGui::IsItemHovered(), sel = g.game_id == selected;
       ImGui::PopID();
       ImVec2 a(p.x, p.y + (hov ? -3.0f : 0.0f)), b(a.x + cw, a.y + ch);
@@ -345,6 +386,219 @@ struct App {
     ImGui::PopStyleVar(2);
   }
 
+  void status_bar(float W, float H) {
+    const float status_h = 26;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(0, H - status_h), ImVec2(W, H), U(ImVec4(0.04f, 0.044f, 0.055f, 1)));
+    char sb[512];
+    std::snprintf(sb, sizeof sb, "Library %s     video %s, renderer %s     Windows: Blocked     untested on a real display/GPU", model.db_path().c_str(), video_driver.c_str(), renderer_name.c_str());
+    text_at(dl, ImVec2(16, H - status_h + 5), 13, kMuted, sb, W - 32);
+  }
+  static std::string fmt_time(double at) {
+    time_t t = static_cast<time_t>(at);
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    char b[64];
+    std::strftime(b, sizeof b, "%Y-%m-%d %H:%M:%S", &tmv);
+    return b;
+  }
+  static void kv_row(const char* k, const std::string& v, bool mono_font = false, ImFont* mono = nullptr) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextColored(kMuted, "%s", k);
+    ImGui::TableSetColumnIndex(1);
+    if (mono_font && mono) ImGui::PushFont(mono, 15.0f);
+    ImGui::TextWrapped("%s", v.empty() ? "-" : v.c_str());
+    if (mono_font && mono) ImGui::PopFont();
+  }
+  static void note_line(const std::string& msg, bool ok) {
+    if (msg.empty()) return;
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextColored(ok ? ImVec4(0.35f, 0.85f, 0.5f, 1) : ImVec4(0.95f, 0.5f, 0.4f, 1), "%s", msg.c_str());
+    ImGui::PopTextWrapPos();
+  }
+
+  void game_page(float mw, float body_h, float rail_w) {
+    const auto* gp = sel_game();
+    pnr::launcher::GameEntry g = *gp;
+    if (loaded_for != g.game_id) load_page_state(g);
+    // header
+    ImGui::SetCursorPos(ImVec2(rail_w + 36, 18));
+    if (ImGui::Button("< Library", ImVec2(110, 0))) screen = kLibrary;
+    ImGui::SameLine(0, 14);
+    ImGui::SetCursorPosY(24);
+    ImGui::TextColored(kMuted, "Library  /  %s", g.title.c_str());
+    ImGui::SetCursorPos(ImVec2(rail_w, 60));
+    const float hh = 200;
+    ImGui::BeginChild("ghead", ImVec2(mw, hh), false, ImGuiWindowFlags_NoScrollbar);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 o = ImGui::GetCursorScreenPos();
+    ImVec4 base(0.075f, 0.082f, 0.105f, 1);
+    ImVec4 c1 = tint(g.game_id, 0.62f, 0.50f);
+    dl->AddRectFilledMultiColor(o, ImVec2(o.x + mw, o.y + hh), U(ImVec4(c1.x * 0.8f, c1.y * 0.8f, c1.z * 0.8f, 1)), U(base), U(base), U(ImVec4(c1.x * 0.35f, c1.y * 0.35f, c1.z * 0.35f, 1)));
+    const float cs = hh - 40;
+    cover(dl, ImVec2(o.x + 36, o.y + 20), cs, g, 90);
+    float tx = o.x + 36 + cs + 28, tw = mw - (tx - o.x) - 24;
+    text_at(dl, ImVec2(tx, o.y + 18), 36, ImVec4(1, 1, 1, 1), g.title, tw);
+    chip(dl, ImVec2(tx, o.y + 68), g.compatibility, compat_color(g.compatibility), 15);
+    char meta[256];
+    std::snprintf(meta, sizeof meta, "%s   v%s   %s   %lld launch%s", g.game_id.c_str(), g.version.c_str(), g.platform.empty() ? "platform unknown" : g.platform.c_str(), static_cast<long long>(g.launch_count), g.launch_count == 1 ? "" : "es");
+    text_at(dl, ImVec2(tx, o.y + 106), 15, ImVec4(0.75f, 0.78f, 0.86f, 1), meta, tw);
+    std::string blocker = model.launch_blocker(g);
+    ImGui::SetCursorPos(ImVec2(tx - o.x, hh - 62));
+    if (!blocker.empty()) ImGui::BeginDisabled();
+    if (primary_button(model.launching() ? "Running..." : "Launch", ImVec2(190, 46), false)) do_launch(g.game_id);
+    if (!blocker.empty()) ImGui::EndDisabled();
+    ImGui::SameLine(0, 20);
+    ImGui::SetCursorPosY(hh - 52);
+    ImGui::Checkbox("Run in sandbox", &sandbox);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Linux namespaces, seccomp denylist and a private root.\nPARTIAL: not a complete sandbox. Refuses to start if unusable.");
+    if (!blocker.empty()) { ImGui::SameLine(0, 20); ImGui::TextColored(ImVec4(0.95f, 0.5f, 0.4f, 1), "%s", blocker.c_str()); }
+    ImGui::EndChild();
+    float y = 60 + hh;
+    auto r = model.last_launch();
+    if (r.game_id == g.game_id && (r.running || r.finished)) { ImGui::SetCursorPos(ImVec2(rail_w, y)); output_panel(mw); y += 118; }
+    // tabs
+    const float foot_h = 56;
+    ImGui::SetCursorPos(ImVec2(rail_w + 36, y + 14));
+    ImGui::BeginChild("gtabs", ImVec2(mw - 72, body_h - y - 14 - foot_h), false);
+    if (ImGui::BeginTabBar("gt")) {
+      auto tab_flags = [&](int i) { return want_tab == i ? ImGuiTabItemFlags_SetSelected : 0; };
+      if (ImGui::BeginTabItem("Overview", nullptr, tab_flags(0))) { tab_overview(g); ImGui::EndTabItem(); }
+      if (ImGui::BeginTabItem("Compatibility", nullptr, tab_flags(1))) { tab_compat(g); ImGui::EndTabItem(); }
+      if (ImGui::BeginTabItem("History", nullptr, tab_flags(2))) { tab_history(g); ImGui::EndTabItem(); }
+      if (ImGui::BeginTabItem("Manage", nullptr, tab_flags(3))) { tab_manage(g); ImGui::EndTabItem(); }
+      ImGui::EndTabBar();
+    }
+    want_tab = -1;
+    ImGui::EndChild();
+    // honesty footer
+    ImGui::SetCursorPos(ImVec2(rail_w + 36, body_h - foot_h + 8));
+    ImGui::PushTextWrapPos(rail_w + mw - 36);
+    ImGui::TextColored(kMuted, "State on the road: PNR runs developer-built x86-64 packages natively. Status is never set to Playable automatically. The sandbox is partial isolation. Verify re-checks file presence and the ELF header only, not payload checksums.");
+    ImGui::PopTextWrapPos();
+  }
+
+  void tab_overview(const pnr::launcher::GameEntry& g) {
+    ImGui::Dummy(ImVec2(0, 6));
+    if (ImGui::BeginTable("kv", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX)) {
+      ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 190);
+      ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
+      kv_row("Game id", g.game_id, true, mono);
+      kv_row("Title", g.title);
+      kv_row("Version", g.version);
+      kv_row("Platform", g.platform);
+      kv_row("Installed", g.installed ? "yes" : "no");
+      kv_row("Install path", g.install_path, true, mono);
+      kv_row("Entry point", g.executable, true, mono);
+      kv_row("Integrity", g.integrity.empty() ? "unknown" : g.integrity);
+      kv_row("Can launch", g.runnable ? "yes" : "no: " + g.not_runnable_reason);
+      kv_row("Launches", std::to_string(g.launch_count));
+      kv_row("Status set by", g.compat_human_set ? "a person" : "PNR bookkeeping (Untested or Launches Only only)");
+      ImGui::EndTable();
+    }
+  }
+
+  void tab_compat(const pnr::launcher::GameEntry& g) {
+    ImGui::Dummy(ImVec2(0, 6));
+    const auto& st = pnr::launcher::compat_states();
+    ImGui::TextColored(kMuted, "Current status");
+    ImGui::SameLine(0, 12);
+    ImGui::Text("%s%s", g.compatibility.c_str(), g.compat_human_set ? " (set by a person)" : " (automatic)");
+    if (!g.compatibility_notes.empty()) ImGui::TextColored(kMuted, "Note: %s", g.compatibility_notes.c_str());
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::TextColored(kMuted, "Set the status yourself");
+    ImGui::SetNextItemWidth(320);
+    if (ImGui::BeginCombo("##cs", st[static_cast<size_t>(compat_idx)].c_str())) {
+      for (size_t i = 0; i < st.size(); ++i) if (ImGui::Selectable(st[i].c_str(), static_cast<int>(i) == compat_idx)) compat_idx = static_cast<int>(i);
+      ImGui::EndCombo();
+    }
+    ImGui::SetNextItemWidth(560);
+    ImGui::InputTextWithHint("##cn", "Note, for example: tested 20 minutes, menu works", compat_note, sizeof compat_note);
+    if (primary_button("Save status", ImVec2(160, 40), false)) {
+      auto s2 = model.set_compat(g.game_id, st[static_cast<size_t>(compat_idx)], compat_note);
+      compat_ok = s2.ok;
+      compat_msg = s2.ok ? "Saved. This status is now yours: launches and re-imports will not change it." : "Not saved: " + s2.error.message;
+    }
+    note_line(compat_msg, compat_ok);
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextColored(kMuted, "PNR only moves Untested to Launches Only after a clean exit. Playable states exist only because you set them after playing the game.");
+    ImGui::PopTextWrapPos();
+  }
+
+  void tab_history(const pnr::launcher::GameEntry& g) {
+    ImGui::Dummy(ImVec2(0, 6));
+    auto rows = model.history(g.game_id, 50);
+    if (rows.empty()) { ImGui::TextColored(kMuted, "No launches recorded yet. Press Launch to run it natively."); return; }
+    if (ImGui::BeginTable("hist", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX)) {
+      ImGui::TableSetupColumn("When");
+      ImGui::TableSetupColumn("Result");
+      ImGui::TableSetupColumn("Duration");
+      ImGui::TableHeadersRow();
+      for (const auto& h : rows) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(fmt_time(h.at).c_str());
+        ImGui::TableSetColumnIndex(1);
+        if (h.exit_code == 0) ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.5f, 1), "exit 0");
+        else if (h.exit_code < 0) ImGui::TextColored(ImVec4(0.95f, 0.5f, 0.4f, 1), "killed by a signal");
+        else ImGui::TextColored(ImVec4(0.95f, 0.5f, 0.4f, 1), "exit %d", h.exit_code);
+        ImGui::TableSetColumnIndex(2); ImGui::Text("%.3f s", h.wall_seconds);
+      }
+      ImGui::EndTable();
+    }
+  }
+
+  void tab_manage(const pnr::launcher::GameEntry& g) {
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::PushFont(nullptr, 20.0f); ImGui::TextUnformatted("Verify files"); ImGui::PopFont();
+    ImGui::TextColored(kMuted, "Checks that the install exists and the entry point is an x86-64 ELF. Can only mark integrity failed, never verified.");
+    if (ImGui::Button("Verify now", ImVec2(150, 36))) {
+      auto v = model.verify(g.game_id);
+      verify_ok = v.ok;
+      if (v.ok) verify_msg = "Files look intact (presence and ELF header).";
+      else { verify_msg = "Problems found:"; for (auto& p : v.problems) verify_msg += "\n  " + p; }
+    }
+    note_line(verify_msg, verify_ok);
+    ImGui::Dummy(ImVec2(0, 14));
+    ImGui::PushFont(nullptr, 20.0f); ImGui::TextUnformatted("Back up saves"); ImGui::PopFont();
+    ImGui::TextColored(kMuted, "Writes the game's save folder to a tar archive. Refuses to overwrite an existing file.");
+    ImGui::SetNextItemWidth(520);
+    ImGui::InputText("##exp", export_path, sizeof export_path);
+    ImGui::SameLine();
+    if (ImGui::Button("Export saves", ImVec2(150, 0))) {
+      auto e = model.export_saves(g.game_id, export_path);
+      export_ok = e.ok;
+      char b[320];
+      if (e.ok) std::snprintf(b, sizeof b, "Exported %d file%s, %llu bytes.", e.files, e.files == 1 ? "" : "s", static_cast<unsigned long long>(e.bytes));
+      else std::snprintf(b, sizeof b, "Not exported: %s", e.error.c_str());
+      export_msg = b;
+    }
+    note_line(export_msg, export_ok);
+    ImGui::Dummy(ImVec2(0, 14));
+    ImGui::PushFont(nullptr, 20.0f); ImGui::TextUnformatted("Remove game"); ImGui::PopFont();
+    ImGui::TextColored(kMuted, "Step 1 shows exactly what would be deleted. Nothing is deleted until you confirm in step 2.");
+    if (ImGui::Checkbox("Keep my saves", &keep_saves)) have_dry = false;
+    ImGui::SameLine(0, 20);
+    if (ImGui::Button("1. Show what would be removed", ImVec2(310, 36))) { dry = model.remove(g.game_id, keep_saves, false); have_dry = true; remove_msg.clear(); }
+    if (have_dry) {
+      if (!dry.error.empty()) note_line("Cannot remove: " + dry.error, false);
+      else {
+        ImGui::Text("Install folder: %s%s", dry.install_path.c_str(), dry.install_exists ? "" : " (already missing)");
+        ImGui::Text("Saves folder:   %s%s", dry.jail_path.c_str(), keep_saves ? "  (kept)" : (dry.jail_exists ? "  (will be deleted)" : " (none)"));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.72f, 0.22f, 0.20f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.3f, 0.27f, 1));
+        if (ImGui::Button("2. Confirm: remove now", ImVec2(260, 38))) {
+          auto d = model.remove(g.game_id, keep_saves, true);
+          have_dry = false;
+          remove_msg = d.removed ? "Removed " + g.title + "." : "Not removed: " + (d.error.empty() ? std::string("refused") : d.error);
+          if (d.removed) screen = kLibrary;
+        }
+        ImGui::PopStyleColor(2);
+      }
+    }
+    note_line(remove_msg, false);
+  }
   void frame(float W, float H) {
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2(W, H));
@@ -359,6 +613,15 @@ struct App {
     ImGui::SameLine(0, 0);
     ImGui::BeginGroup();
     const float mw = W - rail_w;
+    if (screen == kGame && !sel_game()) screen = kLibrary;
+    if (screen == kGame) {
+      game_page(mw, body_h, rail_w);
+      ImGui::EndGroup();
+      status_bar(W, H);
+      add_popup();
+      ImGui::End();
+      return;
+    }
     // top bar
     ImGui::Dummy(ImVec2(mw, 22));
     ImGui::SetCursorPosX(rail_w + 36);
@@ -402,12 +665,7 @@ struct App {
       else grid(mw, body_h - cursor_y, idx);
     }
     ImGui::EndGroup();
-    // status bar
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(ImVec2(0, H - status_h), ImVec2(W, H), U(ImVec4(0.04f, 0.044f, 0.055f, 1)));
-    char sb[512];
-    std::snprintf(sb, sizeof sb, "Library %s     video %s, renderer %s     Windows: Blocked     untested on a real display/GPU", model.db_path().c_str(), video_driver.c_str(), renderer_name.c_str());
-    text_at(dl, ImVec2(16, H - status_h + 5), 13, kMuted, sb, W - 32);
+    status_bar(W, H);
     add_popup();
     ImGui::End();
   }
@@ -439,10 +697,12 @@ int main(int argc, char** argv) {
     else if (a == "--auto-launch") o.auto_launch = next();
     else if (a == "--auto-sandbox") o.auto_sandbox = true;
     else if (a == "--open-add") o.open_add = true;
+    else if (a == "--page") o.page_id = next();
+    else if (a == "--tab") o.tab = std::atoi(next().c_str());
     else if (a == "--scan-dir") o.scan_dir = next();
     else if (a == "--help" || a == "-h") {
       std::puts("pnr-ui [--db LIBRARY.db] [--size WxH]\n"
-                "test hooks (same code paths as the mouse): --frames N --shot N:file.bmp --select ID --auto-launch ID [--auto-sandbox] --scan-dir DIR --open-add");
+                "test hooks (same code paths as the mouse): --frames N --shot N:file.bmp --select ID --auto-launch ID [--auto-sandbox] --scan-dir DIR --open-add --page ID --tab N");
       return 0;
     } else { std::fprintf(stderr, "pnr-ui: unknown option %s\n", a.c_str()); return 64; }
   }
@@ -495,6 +755,7 @@ int main(int argc, char** argv) {
     }
     model.poll();
     if (frame == 5 && !o.scan_dir.empty()) app.do_scan();
+    if (frame == 3 && !o.page_id.empty()) { app.open_page(o.page_id); app.want_tab = o.tab; }
     if (frame == 8 && o.open_add) app.open_add = true;
     if (frame == 10 && !o.auto_launch.empty()) { app.selected = o.auto_launch; app.do_launch(o.auto_launch); }
 
