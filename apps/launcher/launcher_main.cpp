@@ -15,6 +15,7 @@
 #include <iterator>
 
 #include "launcher/launcher_core.hpp"
+#include "launcher/launch_guard.hpp"
 #include "sandbox/sandbox.hpp"
 #include "ask/ask.hpp"
 #include "ask/suggest.hpp"
@@ -109,30 +110,9 @@ int main(int argc, char** argv) {
     if (!core.get(pos[0], &e)) { std::fprintf(stderr, "launcher: no game with id '%s'\n", pos[0].c_str()); rc = 2; }
     else { std::fputs((json ? render_entry_json(e) + "\n" : render_entry_text(e)).c_str(), stdout); rc = 0; }
   } else if (a[0] == "launch" && pos.size() == 1) {
-    {  // slice B1b: games installed from a pinned-key source are re-verified before every launch
-      pnr::store::Registry preg(pnr::store::store_dir_for(dbp ? dbp : "./pnr_data/library.db"));
-      std::string note;
-      if (preg.load()) {
-        auto pv = pnr::store::check_provenance(preg.dir(), preg, pos[0], &note);
-        if (!pv) { std::printf("LAUNCH NOT STARTED: %s\n", pv.error.message.c_str()); return 1; }
-      }
-    }
-    if (sandbox_on) {  // no silent fallback: an unusable sandbox means the game is not started
-      auto sp = pnr::sandbox::probe();
-      if (!sp.usable()) { std::printf("LAUNCH NOT STARTED: --sandbox was requested but the sandbox is not usable here (%s)\n", sp.notes.c_str()); return 1; }
-      GameEntry sge;
-      if (core.get(pos[0], &sge)) {  // an unknown id is reported by launch() itself, before anything is forked
-        std::error_code aec;
-        auto gd = std::filesystem::absolute(sge.install_path, aec).lexically_normal();
-        std::string gds = gd.string(); while (gds.size() > 1 && gds.back() == '/') gds.pop_back();
-        if (aec || gds.empty()) { std::printf("LAUNCH NOT STARTED: cannot resolve the game directory for the sandbox\n"); return 1; }
-        // the game's jail root and the PS-ABI shim dir are what launch() gives it; both are env in the child
-        core.set_child_setup([gds](std::string* e) {
-          pnr::sandbox::Policy pol; pol.game_dir = gds;
-          if (const char* j = std::getenv("PNR_JAIL_ROOT")) if (*j) pol.rw_dirs.push_back(std::filesystem::absolute(j).lexically_normal().string());
-          if (const char* l = std::getenv("LD_LIBRARY_PATH")) { std::string s = l; size_t i = 0; while (i <= s.size()) { size_t k = s.find(':', i); if (k == std::string::npos) k = s.size(); if (k > i) pol.ro_dirs.push_back(std::filesystem::absolute(s.substr(i, k - i)).lexically_normal().string()); i = k + 1; } }
-          return pnr::sandbox::enter(pol, e); });
-      }
+    {  // provenance re-check (B1b) and optional sandbox, shared with the desktop UI
+      std::string refuse = pnr::launcher::prepare_launch(core, dbp ? dbp : "./pnr_data/library.db", pos[0], sandbox_on);
+      if (!refuse.empty()) { std::printf("%s\n", refuse.c_str()); return 1; }
     }
     auto o = core.launch(pos[0], gameargs);
     if (json) std::puts(render_outcome_json(pos[0], o).c_str());
