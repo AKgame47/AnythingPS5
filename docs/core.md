@@ -1,4 +1,4 @@
-# Translation core (slices C1-C4b: module loading, NID binding, libkernel ABI, libc, PM4 decode, register meaning)
+# Translation core (slices C1-C4e: module loading, NID binding, libkernel ABI, libc, PM4 decode, register meaning, GPU address map, first draw)
 
 Destination: running real PS5 games on a PC by translating the game's calls to the host, not by
 emulating a console. This page covers the first slice of that core. It is the current state on the
@@ -24,7 +24,9 @@ road, not the end of it.
 | Libc imports beyond this subset, floating point arguments, qsort and other callbacks into guest code | Planned |
 | PM4 command buffer decode and register-state tracking: packet types 0, 2, 3, SET_*_REG windows, draw and dispatch capture with the register state at each draw, indirect buffers through an address resolver, `pnr gnm-decode <file>` (`graphics/pm4`) | Implemented, Tested on SYNTHETIC buffers only. Opcode numbers, header layout and register windows verified against the public Linux kernel header soc15d.h. Draw packet body layouts are from public driver usage and NOT verified on a PlayStation |
 | Register meaning and draw bindings (`graphics/amd_regs.hpp`, `graphics/gfx_state`): shader addresses, user data, viewport, color target 0, primitive type | Implemented, Tested on SYNTHETIC buffers. Per public AMD headers, unverified on PlayStation |
-| Vertex and index fetch, GPU address map, Vulkan draw submission | Planned (slices C4c-C4e). No GPU work is done yet |
+| GPU virtual address map (`graphics/gpu_va`): range table to host memory, no stitching across regions, PM4 indirect-buffer resolver | Implemented, Tested on synthetic data. No page tables or coherency model |
+| Draw from tracked state to one Vulkan draw (`graphics/gfx_draw`): non-indexed triangle list, PNR test ABI, pixels read back and copied to the colour target address | Experimental, Tested on a SYNTHETIC command buffer with hand-assembled RDNA vertex kernels. Pixel shaders are NOT translated (fixed colour). No real game shader or command buffer has run. Needs a Vulkan device (tests skip without one; measured on Mesa llvmpipe, a software device) |
+| Indexed draws, vertex fetch from real shader resource descriptors, real pixel shaders, depth, blending | Planned |
 | Windows (the loader uses mmap and fork) | Blocked |
 
 ## What it proves
@@ -74,3 +76,14 @@ makes the load fail with a message naming it, and nothing runs.
 - Label for all of it: per public AMD headers, unverified on PlayStation. Nothing here was checked against a real console.
 - `extract_bindings` reads the tracked registers at a draw and lists what is missing in plain words.
 - `pnr gnm-decode` now prints register names, per-draw bindings and the written registers.
+
+## Slices C4c-C4e notes (address map, draw, triangle)
+- `GpuAddressSpace` maps GPU address ranges to host memory. A read must fit inside ONE mapping; nothing is stitched.
+  `pm4_resolver()` lets `pm4::interpret` follow indirect buffers through it.
+- `execute_draw` is the first GPU work. It is a PNR TEST ABI, not the PlayStation one: the vertex-stage memory holds a
+  "PVS1" blob (four restricted RDNA kernels), VS user data 0..3 point at a matrix and a vertex buffer, and the pixel
+  stage must be set and mapped but is not translated (a fixed pass-through colour is used and the result says so).
+- A real GCN/RDNA vertex program is refused with a plain message. Viewport registers are only checked against the target size.
+- The test builds a PM4 buffer, runs it through the decoder, address map, translator and Vulkan, and checks real pixels:
+  red-pixel count within 4% of the triangle area, clear colour in all four corners, and the target memory byte-equal to the image.
+- Source of every register meaning is still public AMD headers, unverified on PlayStation.
