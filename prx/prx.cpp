@@ -3,6 +3,7 @@
 // follows AnyPS5 (GPL-2.0) core/libs/prx - see prx.hpp header note.
 #include "prx/prx.hpp"
 #include "loader/guest_runtime.hpp"
+#include "prx/libc_abi.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -132,50 +133,6 @@ SceInt32 sceKernelQueryMemoryProtection(void* addr, void** start, void** end,
 
 namespace {
 
-// Bounded printf core: returns the formatted text (testable), printf wrapper
-// writes it to stdout. Supported: %d %i %u %x %s %c %%. Others stay literal.
-std::string format_bounded(const char* fmt, const std::vector<std::int64_t>& args) {
-  std::string out;
-  std::size_t ai = 0;
-  for (const char* p = fmt; p != nullptr && *p != '\0'; ++p) {
-    if (*p != '%') { out.push_back(*p); continue; }
-    ++p;
-    if (*p == '\0') { out.push_back('%'); break; }
-    switch (*p) {
-      case '%': out.push_back('%'); break;
-      case 'c':
-        if (ai < args.size()) out.push_back(static_cast<char>(args[ai++]));
-        break;
-      case 's': {
-        if (ai < args.size()) {
-          const char* sp = reinterpret_cast<const char*>(args[ai++]);
-          if (sp != nullptr) out += sp; else out += "(null)";
-        }
-        break;
-      }
-      case 'd': case 'i':
-        if (ai < args.size()) out += std::to_string(static_cast<long long>(args[ai++]));
-        break;
-      case 'u':
-        if (ai < args.size()) out += std::to_string(static_cast<unsigned long long>(args[ai++]));
-        break;
-      case 'x': {
-        if (ai < args.size()) {
-          char buf[24];
-          std::snprintf(buf, sizeof buf, "%llx", static_cast<unsigned long long>(args[ai++]));
-          out += buf;
-        }
-        break;
-      }
-      default:  // unsupported specifier: honest literal passthrough
-        out.push_back('%');
-        out.push_back(*p);
-        break;
-    }
-  }
-  return out;
-}
-
 }  // namespace
 
 void* sce_libc_memcpy(void* dst, const void* src, std::size_t n) {
@@ -199,7 +156,7 @@ void* sce_libc_malloc(std::size_t size) {
 }
 void sce_libc_free(void* ptr) { std::free(ptr); }
 int sce_libc_printf(const char* fmt, const std::vector<std::int64_t>& args) {
-  const std::string out = format_bounded(fmt, args);
+  const std::string out = format_c(fmt, args);
   std::fputs(out.c_str(), stdout);
   return static_cast<int>(out.size());
 }
@@ -274,6 +231,7 @@ PrxRegistry::PrxRegistry() {
     return loader::guest_thread_join(a[0], reinterpret_cast<std::int64_t*>(a[1]));
   }));
   symbols_.push_back(impl("libkernel", "scePthreadSelf", [](V) -> std::int64_t { return loader::guest_thread_self(); }));
+  add_libc_abi_symbols(symbols_);  // C3
   // Declared-only taxonomy entries (honest: no host implementation yet).
   symbols_.push_back(decl_only("libkernel", "sceKernelOpen"));
   symbols_.push_back(decl_only("libkernel", "sceKernelRead"));
