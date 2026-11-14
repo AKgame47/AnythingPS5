@@ -25,6 +25,11 @@ std::vector<std::uint8_t> build_synthetic_ps_elf(const SynthSpec& spec);
 struct KernelSpec { bool break_tls = false; };
 std::vector<std::uint8_t> build_synthetic_kernel_elf(const KernelSpec& spec);
 
+// Slice C3: a module that calls libc functions through NID-bound imports from machine code.
+// Returns 0 when all checks pass, else the number of the first failing check (1..5), and prints
+// "C3 libc ok 42" through the bound printf.
+std::vector<std::uint8_t> build_synthetic_libc_elf();
+
 extern const char* const kSynthMessage;
 constexpr int kSynthExitCode = 30;
 
