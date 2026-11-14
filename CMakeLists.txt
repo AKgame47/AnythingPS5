@@ -105,7 +105,7 @@ target_link_libraries(pnr_loader PUBLIC Threads::Threads pnr_platform)
 target_link_libraries(pnr_package PUBLIC pnr_library)
 
 # PSN connector (slice 1 offline core; slice 2 live sync over dlopen-ed libcurl)
-add_library(pnr_plugin plugin/semver.cpp plugin/manifest.cpp plugin/manager.cpp plugin/runner.cpp plugin/analyze.cpp plugin/signing.cpp plugin/plugin_cli.cpp)
+add_library(pnr_plugin plugin/semver.cpp plugin/manifest.cpp plugin/manager.cpp plugin/runner.cpp plugin/analyze.cpp plugin/signing.cpp plugin/archive.cpp plugin/fetch.cpp plugin/plugin_cli.cpp)
 target_include_directories(pnr_plugin PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pnr_plugin PUBLIC pnr_psn pnr_core pnr_sandbox pnr_store)
 add_library(pnr_psn psn/json.cpp psn/psn.cpp psn/psn_cli.cpp psn/http.cpp psn/curl_http.cpp psn/sync.cpp)
