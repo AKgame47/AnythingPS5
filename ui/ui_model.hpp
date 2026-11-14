@@ -55,6 +55,17 @@ public:
   // Blocks until no launch is running (tests, shutdown).
   void wait_idle();
 
+  // Game page (slice UI-2): every call is the same LauncherCore call the CLI makes.
+  // Mutating calls are refused while a launch is running. Nothing here ever
+  // sets a state on its own: set_compat is called only from a person's click.
+  bool game(const std::string& id, launcher::GameEntry* out);
+  std::vector<library::LaunchRow> history(const std::string& id, int limit);
+  Status set_compat(const std::string& id, const std::string& state, const std::string& note);
+  launcher::VerifyOutcome verify(const std::string& id);
+  launcher::SavesOutcome export_saves(const std::string& id, const std::string& out_path);
+  // Dry run unless confirmed. Refreshes the list after a real removal.
+  launcher::RemoveOutcome remove(const std::string& id, bool keep_saves, bool confirmed);
+
   // Folder scan and import, same backend calls as `scan` and `import`.
   Status scan(const std::string& dir, launcher::ScanReport* out);
   launcher::ImportOutcome import_package(const std::string& path);
