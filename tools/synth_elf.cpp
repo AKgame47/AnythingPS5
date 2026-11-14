@@ -154,4 +154,74 @@ std::vector<std::uint8_t> build_synthetic_kernel_elf(const KernelSpec& spec) {
   return b;
 }
 
+
+std::vector<std::uint8_t> build_synthetic_libc_elf() {
+  std::vector<std::uint8_t> b(0x740, 0);
+  const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
+  std::memcpy(b.data(), ident, 8);
+  p16(b, 0x10, 3); p16(b, 0x12, 62); p32(b, 0x14, 1);
+  p64(b, 0x18, 0x100); p64(b, 0x20, 0x40);
+  p16(b, 0x34, 64); p16(b, 0x36, 56); p16(b, 0x38, 2); p16(b, 0x3A, 64);
+  const std::size_t total = b.size();
+  p32(b, 0x40, 1); p32(b, 0x44, 7); p64(b, 0x48, 0); p64(b, 0x50, 0); p64(b, 0x58, 0); p64(b, 0x60, total); p64(b, 0x68, total); p64(b, 0x70, 0x1000);
+  p32(b, 0x78, 2); p32(b, 0x7C, 6); p64(b, 0x80, 0x6c0); p64(b, 0x88, 0x6c0); p64(b, 0x90, 0x6c0); p64(b, 0x98, 0x80); p64(b, 0xA0, 0x80); p64(b, 0xA8, 8);
+  auto str = [&](std::size_t at, const char* s) { std::memcpy(&b[at], s, std::strlen(s) + 1); };
+  const std::size_t FMT = 0x400, AB = 0x410, EXP = 0x420, HEX = 0x430, HELLO = 0x440, PF = 0x450, OK = 0x470;
+  str(FMT, "%d:%s:%x"); str(AB, "ab"); str(EXP, "-5:ab:ff"); str(HEX, "0x1f"); str(HELLO, "hello"); str(PF, "C3 libc %s %d\n"); str(OK, "ok");
+  enum { G_SNPRINTF, G_STRCMP, G_STRTOL, G_CALLOC, G_MEMMOVE, G_STRLEN, G_PRINTF, G_N };
+  std::size_t pc = 0x100;
+  std::vector<std::size_t> fails;
+  auto emit = [&](std::initializer_list<int> bytes) { for (int v : bytes) b[pc++] = static_cast<std::uint8_t>(v); };
+  auto imm32 = [&](std::uint32_t v) { p32(b, pc, v); pc += 4; };
+  auto call = [&](int g) { emit({0xFF, 0x15}); p32(b, pc, static_cast<std::uint32_t>(0x480 + 8 * g - (pc + 4))); pc += 4; };
+  auto rip = [&](std::initializer_list<int> op, std::size_t target) { emit(op); p32(b, pc, static_cast<std::uint32_t>(target - (pc + 4))); pc += 4; };
+  auto check = [&](int ok_jcc, int n) { emit({ok_jcc, 10, 0xB8}); imm32(n); emit({0xE9}); fails.push_back(pc); pc += 4; };
+
+  emit({0x53, 0x48, 0x83, 0xEC, 0x60});
+  // snprintf(buf, 64, "%d:%s:%x", -5, "ab", 255)
+  emit({0x48, 0x8D, 0x7C, 0x24, 0x20, 0xBE}); imm32(64);
+  rip({0x48, 0x8D, 0x15}, FMT);
+  emit({0x48, 0xC7, 0xC1, 0xFB, 0xFF, 0xFF, 0xFF});
+  rip({0x4C, 0x8D, 0x05}, AB);
+  emit({0x41, 0xB9}); imm32(255); call(G_SNPRINTF);
+  emit({0x83, 0xF8, 0x08}); check(0x74, 1);
+  emit({0x48, 0x8D, 0x7C, 0x24, 0x20}); rip({0x48, 0x8D, 0x35}, EXP); call(G_STRCMP);
+  emit({0x85, 0xC0}); check(0x74, 2);
+  // strtol("0x1f", 0, 0) == 31
+  rip({0x48, 0x8D, 0x3D}, HEX); emit({0x31, 0xF6, 0x31, 0xD2}); call(G_STRTOL);
+  emit({0x48, 0x83, 0xF8, 0x1F}); check(0x74, 3);
+  // calloc(4, 8): non-null and zeroed
+  emit({0xBF}); imm32(4); emit({0xBE}); imm32(8); call(G_CALLOC);
+  emit({0x48, 0x89, 0xC3, 0x48, 0x85, 0xC0}); check(0x75, 4);
+  emit({0x48, 0x83, 0x3B, 0x00}); check(0x74, 4);
+  // memmove(p, "hello", 6); strlen(p) == 5
+  emit({0x48, 0x89, 0xDF}); rip({0x48, 0x8D, 0x35}, HELLO); emit({0xBA}); imm32(6); call(G_MEMMOVE);
+  emit({0x48, 0x89, 0xDF}); call(G_STRLEN);
+  emit({0x48, 0x83, 0xF8, 0x05}); check(0x74, 5);
+  // printf("C3 libc %s %d\n", "ok", 42)
+  rip({0x48, 0x8D, 0x3D}, PF); rip({0x48, 0x8D, 0x35}, OK); emit({0xBA}); imm32(42); call(G_PRINTF);
+  emit({0x31, 0xC0});
+  const std::size_t epi = pc;
+  emit({0x48, 0x83, 0xC4, 0x60, 0x5B, 0xC3});
+  for (std::size_t f : fails) p32(b, f, static_cast<std::uint32_t>(epi - (f + 4)));
+
+  const char* names[G_N] = {"snprintf", "strcmp", "strtol", "calloc", "memmove", "strlen", "printf"};
+  std::size_t so = 0x580 + 1;
+  for (int i = 0; i < G_N; ++i) {
+    const std::string nm = pnr::loader::nid::compute_nid(names[i], "") + "#A#A";
+    const std::size_t sy = 0x4c0 + 24 * (i + 1);
+    p32(b, sy, static_cast<std::uint32_t>(so - 0x580)); b[sy + 4] = 0x12; p16(b, sy + 6, 0);
+    std::memcpy(&b[so], nm.c_str(), nm.size() + 1); so += nm.size() + 1;
+  }
+  const std::size_t strsz = so - 0x580;
+  for (int i = 0; i < G_N; ++i) {
+    const std::size_t r = 0x600 + 24 * i;
+    p64(b, r, 0x480 + 8 * i); p64(b, r + 8, (static_cast<std::uint64_t>(i + 1) << 32) | 6); p64(b, r + 16, 0);
+  }
+  std::size_t dy = 0x6c0;
+  auto dyn = [&](std::int64_t tag, std::uint64_t v) { p64(b, dy, static_cast<std::uint64_t>(tag)); p64(b, dy + 8, v); dy += 16; };
+  dyn(6, 0x4c0); dyn(5, 0x580); dyn(10, strsz); dyn(11, 24); dyn(7, 0x600); dyn(8, 24 * G_N); dyn(9, 24); dyn(0, 0);
+  return b;
+}
+
 }  // namespace pnr::tools
