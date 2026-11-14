@@ -178,19 +178,41 @@ void pnr_psn_sync_tests(int& pass, int& fail) {
     check(db.open(d + "/l.db").ok, "cmd_sync: scratch library opens");
     const std::string tp = d + "/psn/npsso.token";
     std::string out;
+    LiveConsent ok; ok.flag = true;
     Fake none = make_fake({0});
-    check(cmd_sync(db, tp, false, false, &out, &none) == 1 && none.log.empty() && has(out, "token"), "cmd_sync: without a token nothing is sent");
+    check(cmd_sync(db, tp, false, false, ok, &out, &none) == 1 && none.log.empty() && has(out, "token"), "cmd_sync: without a token nothing is sent");
     check(cmd_set_token(tp, kTok, false, &out) == 0, "cmd_sync: token stored for the test");
+    // F1 gate: no consent, no request
+    {
+      Fake gf = make_fake({0});
+      LiveConsent none_c;  // non-interactive, no flag
+      int r = cmd_sync(db, tp, false, false, none_c, &out, &gf);
+      check(r == 1 && gf.log.empty() && has(out, "--live-ok") && has(out, "UNOFFICIAL") && !has(out, kTok), "gate: non-interactive without --live-ok refuses, names the flag, sends nothing");
+      r = cmd_sync(db, tp, false, true, none_c, &out, &gf);
+      check(r == 1 && gf.log.empty() && has(out, "live-not-confirmed") && has(out, "--live-ok"), "gate: json refusal carries the stable kind");
+      LiveConsent no; no.interactive = true; bool shown = false; std::string w;
+      no.confirm = [&](const std::string& t) { shown = true; w = t; return false; };
+      r = cmd_sync(db, tp, false, false, no, &out, &gf);
+      check(r == 1 && gf.log.empty() && shown && has(w, "NEVER been tested") && has(w, "as sensitive as a password") && has(w, "at your own risk"), "gate: interactive decline shows the warning and sends nothing");
+      LiveConsent noconf; noconf.interactive = true;  // interactive but no confirm hook: must not proceed
+      r = cmd_sync(db, tp, false, false, noconf, &out, &gf);
+      check(r == 1 && gf.log.empty(), "gate: interactive without a confirm hook refuses");
+      Fake yf = make_fake({0});
+      LiveConsent yes_c; yes_c.interactive = true; yes_c.confirm = [](const std::string&) { return true; };
+      r = cmd_sync(db, tp, false, false, yes_c, &out, &yf);
+      check(r == 0 && !yf.log.empty() && has(out, "PSN SYNC OK") && !has(out, kTok), "gate: interactive yes proceeds");
+      check(has(std::string(live_warning()), "Offline alternative"), "gate: warning points at the offline import");
+    }
     Fake f = make_fake({50, 3});
-    int rc = cmd_sync(db, tp, false, false, &out, &f);
+    int rc = cmd_sync(db, tp, false, false, ok, &out, &f);
     check(rc == 0 && has(out, "PSN SYNC OK") && has(out, "Untested against real Sony") && has(out, "added 53") && !has(out, kTok) && db.list_owned().size() == 53, "cmd_sync: merge sync adds 53 rows over 2 pages, says Untested, never prints the token");
     Fake g = make_fake({50, 0});
-    rc = cmd_sync(db, tp, true, true, &out, &g);
+    rc = cmd_sync(db, tp, true, true, ok, &out, &g);
     check(rc == 0 && has(out, "\"complete_applied\":true") && has(out, "\"marked_missing\":3") && db.list_owned().size() == 53, "cmd_sync: --complete marks the 3 absent rows, deletes nothing");
     Fake cap = make_fake({2, 2, 2, 2, 2, 2, 2, 2});
     Fake bad; bad.fn = [](const HttpRequest&, HttpResponse* r) { r->status = 200; return pnr::Status::Ok(); };
     const size_t before = db.list_owned().size();
-    rc = cmd_sync(db, tp, true, false, &out, &bad);
+    rc = cmd_sync(db, tp, true, false, ok, &out, &bad);
     check(rc == 1 && has(out, "token-rejected") && has(out, "library is unchanged") && db.list_owned().size() == before && !has(out, kTok), "cmd_sync: a rejected token changes nothing and says what to do");
     fs::remove_all(d);
   }
