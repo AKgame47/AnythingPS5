@@ -1,6 +1,7 @@
 // PNR CLI - first launch driver for the master prompt's 10-step workflow.
 // Every step prints an explicit SUCCESS / FAILED / SKIPPED / BLOCKED line.
 // It never reports a game as run when only initialization succeeded.
+#include "graphics/pm4.hpp"
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -469,6 +470,32 @@ int cmd_module_run(const std::string& path) {
   return 0;
 }
 
+int cmd_gnm_synth(const std::string& out) {
+  using namespace pnr::graphics::pm4;
+  Builder b;
+  b.set_context(0xa010, 0x11).set_sh(0x2c10, 0x22).set_uconfig(0xc242, 4).num_instances(1).draw_auto(3)
+   .set_context(0xa010, 0x33).index_type(0).draw_indexed(0x100000, 6, 6).dispatch(8, 4, 1).write_data(0x200000, 0xbeef).packet3(0x6f, {1});
+  std::ofstream f(out, std::ios::binary);
+  f.write(reinterpret_cast<const char*>(b.dwords().data()), static_cast<std::streamsize>(b.dwords().size() * 4));
+  if (!f) { std::fprintf(stderr, "cannot write %s\n", out.c_str()); return 1; }
+  std::printf("wrote %s (SYNTHETIC PM4 command buffer, %zu dwords, not from a game)\n", out.c_str(), b.dwords().size());
+  return 0;
+}
+
+int cmd_gnm_decode(const std::string& path) {
+  using namespace pnr::graphics::pm4;
+  std::ifstream f(path, std::ios::binary);
+  if (!f) { std::printf("cannot open %s\n", path.c_str()); return 2; }
+  std::vector<char> raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  if (raw.size() % 4 != 0 || raw.empty()) { std::printf("not a PM4 dword stream: %zu bytes is not a multiple of 4\n", raw.size()); return 2; }
+  std::vector<std::uint32_t> dw(raw.size() / 4);
+  std::memcpy(dw.data(), raw.data(), raw.size());
+  std::vector<Issue> iss;
+  for (const auto& p : decode(dw.data(), dw.size(), &iss)) std::puts(describe(p).c_str());
+  std::fputs(report(interpret(dw.data(), dw.size())).c_str(), stdout);
+  return 0;
+}
+
 void usage() {
   std::puts("PNR CLI (AnythingPS5) - honest prototype\n"
             "usage:\n"
@@ -481,6 +508,8 @@ void usage() {
             "  pnr games                        list the game library\n"
             "  pnr imports <elf>                import coverage report (NID-form imports too)\n"
             "  pnr module-run <elf>             load a PlayStation-style ELF, bind imports by NID, run it\n"
+            "  pnr gnm-decode <file>            decode a raw PM4 command buffer (state and draws, no GPU)\n"
+            "  pnr gnm-synth <out>              write a SYNTHETIC PM4 test buffer\n"
             "  pnr hwinfo                       print detected host hardware\n"
             "  pnr gpu                          real Vulkan device enumeration");
 }
@@ -500,6 +529,8 @@ int main(int argc, char** argv) {
     return cmd_import(argv[2]);
   if (argc >= 3 && std::strcmp(argv[1], "imports") == 0) return cmd_imports(argv[2]);
   if (argc >= 3 && std::strcmp(argv[1], "module-run") == 0) return cmd_module_run(argv[2]);
+  if (argc >= 3 && std::strcmp(argv[1], "gnm-decode") == 0) return cmd_gnm_decode(argv[2]);
+  if (argc >= 3 && std::strcmp(argv[1], "gnm-synth") == 0) return cmd_gnm_synth(argv[2]);
   if (argc >= 2 && std::strcmp(argv[1], "games") == 0) return cmd_games();
   if (argc >= 3 && std::strcmp(argv[1], "run") == 0) {
     std::vector<std::string> args(argv + 3, argv + argc);
