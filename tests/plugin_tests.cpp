@@ -1,23 +1,31 @@
 // Plugin slice P1 tests: versions, manifests, manager. SYNTHETIC plugins written to /tmp.
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
 
 #include "plugin/manager.hpp"
 #include "plugin/analyze.hpp"
+#include "plugin/archive.hpp"
+#include "plugin/fetch.hpp"
 #include "plugin/manifest.hpp"
 #include "plugin/runner.hpp"
 #include "sandbox/sandbox.hpp"
 #include "plugin/semver.hpp"
 #include "plugin/signing.hpp"
+#include "psn/http.hpp"
 
 namespace fs = std::filesystem;
 using namespace pnr::plugin;
 
 namespace {
+// P3b fixtures: tar.gz made with Python's tarfile+gzip (GitHub style: pax global header, top folder, a .gitignore).
+static const unsigned char kGoodTgz[] = {31,139,8,0,0,0,0,0,2,255,237,152,207,107,219,48,20,199,125,238,95,33,116,217,165,81,36,59,73,71,105,199,160,135,245,176,67,239,99,12,197,122,115,212,217,146,145,228,53,161,228,127,223,83,204,24,4,50,54,104,82,218,190,15,6,73,79,95,255,128,167,175,252,144,152,138,233,199,59,189,190,5,109,32,20,71,65,142,28,106,165,44,203,63,253,28,87,82,45,22,5,107,138,19,48,196,164,3,190,190,120,155,168,247,172,246,93,7,46,93,235,101,173,202,234,172,32,222,16,186,238,96,82,251,159,16,226,100,92,0,211,163,248,255,98,62,63,236,255,253,190,82,10,183,4,54,39,255,63,71,254,123,23,38,125,59,52,214,137,251,232,221,211,228,127,49,155,29,204,127,53,223,207,255,76,73,220,255,37,229,255,232,60,114,107,248,37,111,86,98,92,4,252,156,59,221,1,134,110,126,143,115,99,189,195,144,18,165,144,24,49,16,235,96,251,52,70,13,70,244,144,86,62,224,64,227,160,181,53,184,152,159,241,233,238,243,100,188,5,23,213,55,221,91,140,125,184,86,66,10,201,174,202,220,224,212,15,235,76,228,151,95,120,7,73,27,157,52,255,138,122,8,157,141,249,189,121,42,7,90,157,190,251,208,237,148,173,117,195,58,203,12,244,224,12,184,218,2,78,60,110,207,57,254,201,194,6,187,60,109,250,252,9,187,7,110,183,180,211,255,179,255,157,79,16,69,90,167,167,220,255,255,226,255,170,154,237,251,191,194,139,252,127,10,118,46,103,58,36,182,75,59,67,139,177,180,2,54,68,8,239,34,243,15,142,181,118,25,116,216,8,70,90,210,146,150,180,164,37,237,75,209,82,133,247,223,245,159,104,108,178,141,243,1,78,83,255,229,211,129,253,250,79,97,136,234,191,19,176,28,108,107,166,116,232,71,16,4,65,16,4,65,16,4,65,16,4,241,90,249,5,224,51,168,148,0,40,0,0};
+static const unsigned char kSymTgz[] = {31,139,8,0,0,0,0,0,2,255,237,213,65,75,195,48,20,7,240,158,253,20,37,103,219,38,221,58,69,156,8,30,244,224,193,187,136,196,38,206,104,155,150,36,211,137,236,187,251,98,17,97,178,225,97,211,131,255,223,37,201,75,214,14,94,222,107,94,228,197,233,149,92,92,104,169,180,75,118,130,15,214,141,156,151,229,215,60,198,5,23,147,73,146,206,146,95,48,247,65,58,122,125,242,63,137,195,180,238,218,86,219,48,149,119,181,40,71,123,9,252,35,178,110,117,86,119,207,218,249,108,184,0,197,78,234,255,160,170,214,215,255,234,92,8,65,45,33,173,80,255,127,145,255,222,186,172,111,230,51,99,243,71,223,217,237,228,127,50,30,175,205,255,168,90,205,255,88,112,234,255,28,249,223,185,55,102,20,59,98,179,135,124,184,4,108,159,89,217,106,10,157,125,174,227,96,58,75,33,145,151,57,167,136,210,190,118,166,15,67,84,81,68,206,195,67,231,104,33,105,209,152,90,91,31,159,113,126,117,153,13,63,161,75,117,43,123,67,177,147,169,200,121,206,211,227,50,14,180,245,100,172,242,236,232,154,181,58,72,37,131,100,55,116,94,187,214,248,248,222,184,21,3,141,12,247,157,107,63,78,54,198,206,23,241,152,210,189,182,74,219,218,104,218,120,91,238,51,250,146,185,87,154,178,240,218,199,191,240,241,192,229,18,157,254,199,245,175,159,77,179,245,254,191,169,254,191,247,255,49,167,150,144,150,133,14,117,209,75,239,95,20,234,31,0,0,0,0,0,0,0,0,0,0,0,0,0,96,179,119,239,74,146,216,0,40,0,0};
 std::string manifest_json(const std::string& id, const std::string& ver, const std::string& extra = "", const std::string& perms = "[]",
                           const std::string& deps = "{}", const std::string& entry = "{\"type\":\"data\"}", const std::string& kinds = "[\"catalog\"]") {
   return "{\"id\":\"" + id + "\",\"name\":\"N " + id + "\",\"version\":\"" + ver + "\",\"author\":\"t\",\"license\":\"GPL-2.0\",\"pnr_api\":\">=1.0.0 <2.0.0\","
@@ -262,5 +270,87 @@ void pnr_plugin_tests(int& pass, int& fail) {
     fs::path s8 = mkd("sg.eight", "[]"); write(s8 / "data.txt", "hello"); sign_dir(s8.string(), seed, &pub, &err);
     check(am.install_from_dir(s8.string()).ok, "require-signed: a valid signature from a pinned key installs");
     check(am.unpin_key("alice").ok && !am.unpin_key("alice").ok && am.pinned_keys().empty(), "pin: unpin removes the key, and an unknown name is an error");
+  }
+
+  // ---- P3b: package files and GitHub URLs (fixtures and a fake HTTP client only; nothing contacts GitHub) ----
+  {
+    GithubRef g; std::string why;
+    check(parse_github_url("https://github.com/acme/covers", &g, &why) && g.owner == "acme" && g.repo == "covers" && g.ref == "HEAD", "github: a plain repo URL parses with ref HEAD");
+    check(parse_github_url("https://github.com/acme/covers.git/", &g, &why) && g.repo == "covers" && github_archive_url(g) == "https://codeload.github.com/acme/covers/tar.gz/HEAD", "github: .git and a trailing slash are tolerated; the archive URL is on codeload.github.com");
+    check(parse_github_url("https://github.com/acme/covers/tree/v1.2.0", &g, &why) && g.ref == "v1.2.0", "github: /tree/<ref> selects the ref");
+    check(!parse_github_url("http://github.com/acme/covers", &g, &why) && !parse_github_url("https://evil.example/acme/covers", &g, &why) && !parse_github_url("https://github.com.evil.example/a/b", &g, &why) && !parse_github_url("https://user@github.com/a/b", &g, &why) && !parse_github_url("https://github.com/a/b?x=1", &g, &why) && !parse_github_url("https://github.com/a", &g, &why) && !parse_github_url("https://github.com/a/b/blob/main/x", &g, &why) && !parse_github_url("https://github.com/a/../b", &g, &why), "github: other schemes, hosts, look-alikes, user-info, queries and odd paths are refused");
+
+    std::string gz((const char*)kGoodTgz, sizeof kGoodTgz), plain, e;
+    check(gunzip(gz, &plain, 1 << 20, &e) && plain.size() % 512 == 0 && plain.size() > 1000, "gunzip: a real gzip stream inflates to a whole number of tar blocks");
+    std::string bad = gz; bad[bad.size() - 6] ^= 0x55;
+    check(!gunzip(bad, &plain, 1 << 20, &e) && !gunzip(gz.substr(0, gz.size() / 2), &plain, 1 << 20, &e) && !gunzip("not gzip at all, really not gzip", &plain, 1 << 20, &e), "gunzip: a bad checksum, a truncated stream and non-gzip input are errors");
+    check(!gunzip(gz, &plain, 100, &e) && e.find("limit") != std::string::npos, "gunzip: output past the limit is refused (zip-bomb guard)");
+
+    PluginManager gm(root + "/ghome");
+    std::string base = root + "/gpk"; fs::create_directories(base);
+    { std::ofstream(base + "/covers.tar.gz", std::ios::binary).write((const char*)kGoodTgz, sizeof kGoodTgz); }
+    auto ri = install_from_archive_file(gm, base + "/covers.tar.gz");
+    InstalledPlugin gp;
+    check(ri.ok && ri.manifest.id == "gh.covers" && gm.get("gh.covers", &gp) && !gp.enabled, "package: a GitHub-style tar.gz installs (top folder stripped), disabled");
+    check(fs::exists(root + "/ghome/plugins/gh.covers/notes.txt") && !fs::exists(root + "/ghome/plugins/gh.covers/.gitignore"), "package: .gitignore and other hidden files are dropped, the rest is installed");
+    check(!fs::exists(root + "/ghome/plugins/.stage-0") && [&] { for (auto& d : fs::directory_iterator(root + "/ghome/plugins")) if (d.path().filename().string().rfind(".stage-", 0) == 0) return false; return true; }(), "package: the staging directory is cleaned up");
+    check(gunzip(gz, &plain, 1 << 20, &e), "gunzip: the same stream inflates again");
+    { std::ofstream(base + "/covers.tar", std::ios::binary) << plain; }
+    gm.remove("gh.covers");
+    check(install_from_archive_file(gm, base + "/covers.tar").ok, "package: a plain .tar works too");
+    { std::ofstream(base + "/sym.tgz", std::ios::binary).write((const char*)kSymTgz, sizeof kSymTgz); }
+    auto rs = install_from_archive_file(gm, base + "/sym.tgz");
+    check(!rs.ok && !rs.errors.empty() && rs.errors[0].find("symlinks") != std::string::npos, "package: an archive containing a symlink is refused");
+    auto tarhdr = [](const std::string& name, std::size_t size, char type) {
+      std::string h(512, '\0'); std::memcpy(&h[0], name.data(), std::min<std::size_t>(name.size(), 100));
+      std::snprintf(&h[100], 8, "%07o", 0644); std::snprintf(&h[124], 12, "%011o", (unsigned)size); h[156] = type; std::memcpy(&h[257], "ustar", 5);
+      std::memset(&h[148], ' ', 8); unsigned sum = 0; for (unsigned char c : h) sum += c; std::snprintf(&h[148], 7, "%06o", sum); h[154] = 0; h[155] = ' ';
+      return h;
+    };
+    auto mktar = [&](const std::string& name, const std::string& data) { std::string t = tarhdr(name, data.size(), '0') + data + std::string((512 - data.size() % 512) % 512, '\0') + std::string(1024, '\0'); return t; };
+    std::string ex;
+    check(!extract_archive(mktar("../escape.txt", "x"), root + "/gx1", ArchiveLimits{}, &ex) && !fs::exists(root + "/gx1") && !fs::exists(root + "/escape.txt"), "archive: a '..' path is refused and nothing is written");
+    check(!extract_archive(mktar("/abs/file", "x"), root + "/gx2", ArchiveLimits{}, &ex) && !fs::exists(root + "/gx2"), "archive: an absolute path is refused");
+    std::string two = tarhdr("a.txt", 1, '0') + "x" + std::string(511, '\0') + tarhdr("a.txt", 1, '0') + "y" + std::string(511, '\0') + std::string(1024, '\0');
+    check(!extract_archive(two, root + "/gx3", ArchiveLimits{}, &ex), "archive: a path listed twice is refused");
+    ArchiveLimits tiny; tiny.max_files = 1;
+    check(!extract_archive(two, root + "/gx4", tiny, &ex) && ex.find("too many") != std::string::npos, "archive: the file-count limit is enforced");
+    check(!extract_archive(mktar("a.txt", "x").substr(0, 700), root + "/gx5", ArchiveLimits{}, &ex), "archive: a truncated tar is an error");
+    std::string hdrbad = mktar("a.txt", "x"); hdrbad[10] ^= 1;
+    check(!extract_archive(hdrbad, root + "/gx6", ArchiveLimits{}, &ex) && ex.find("checksum") != std::string::npos, "archive: a corrupted tar header is refused");
+    check(!extract_archive(mktar("pnr-plugin.json", "{}"), root + "/ghome", ArchiveLimits{}, &ex), "archive: an existing destination is never overwritten");
+
+    // analysis still applies to package installs
+    std::string piracy = mktar("pnr-plugin.json", manifest_json("gh.dl", "1.0.0"));
+    piracy.resize(piracy.size() - 1024);
+    std::string cat = "{\"u\":\"https://mega.nz/file/abc\"}";
+    piracy += tarhdr("catalog.json", cat.size(), '0') + cat + std::string((512 - cat.size() % 512) % 512, '\0') + std::string(1024, '\0');
+    { std::ofstream(base + "/pir.tar", std::ios::binary) << piracy; }
+    auto rp = install_from_archive_file(gm, base + "/pir.tar");
+    check(!rp.ok && !fs::exists(root + "/ghome/plugins/gh.dl"), "package: the same analysis refuses a download-provider payload inside a package");
+
+    // GitHub install through a fake client: checks the exact URL, status handling and size cap
+    struct Fake : pnr::psn::HttpClient {
+      std::string url, body; int status = 200; int calls = 0;
+      pnr::Status perform(const pnr::psn::HttpRequest&, pnr::psn::HttpResponse*) override { return pnr::Status::Fail(1, "t", "unused"); }
+      pnr::Status download(const pnr::psn::HttpRequest& r, const pnr::psn::BodySink& sink, pnr::psn::HttpResponse* res) override {
+        ++calls; url = r.url; res->status = status;
+        if (status == 200) { std::size_t off = 0; while (off < body.size()) { std::size_t n = std::min<std::size_t>(100, body.size() - off); if (!sink(*res, body.data() + off, n)) return pnr::Status::Fail(2, "t", "aborted"); off += n; } }
+        return pnr::Status::Ok();
+      }
+    } fake;
+    fake.body = gz;
+    PluginManager hm(root + "/hhome");
+    auto rg = install_from_github(hm, fake, "https://github.com/acme/covers/tree/v1.2.0");
+    check(rg.ok && fake.url == "https://codeload.github.com/acme/covers/tar.gz/v1.2.0" && hm.get("gh.covers", &gp) && !gp.enabled, "github: installs from the codeload archive URL, disabled, after analysis");
+    PluginManager hm2(root + "/hhome2"); fake.status = 404;
+    auto r404 = install_from_github(hm2, fake, "https://github.com/acme/covers");
+    check(!r404.ok && r404.errors[0].find("404") != std::string::npos && hm2.list().empty(), "github: an HTTP error installs nothing and says why");
+    fake.status = 200;
+    auto rbig = install_from_github(hm2, fake, "https://github.com/acme/covers", 200);
+    check(!rbig.ok && rbig.errors[0].find("larger") != std::string::npos && hm2.list().empty(), "github: a download past the size cap is aborted and nothing is installed");
+    int before = fake.calls;
+    auto rbad = install_from_github(hm2, fake, "https://evil.example/acme/covers");
+    check(!rbad.ok && fake.calls == before, "github: a non-GitHub URL never reaches the network");
   }
   fs::remove_all(root); }
