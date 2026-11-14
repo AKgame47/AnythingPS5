@@ -6,10 +6,17 @@ a PlayStation-style system-call shim, a package and library system, a
 headless launcher, and an offscreen Vulkan graphics path. Written in C++,
 licensed GPL-2.0.
 
-> **Honest status.** PNR cannot run any commercial PS5 game. No Sony
-> firmware, SDK code, keys or game files are used, and no DRM is bypassed.
-> Everything below runs on Linux x86-64, headless, with developer-built demo
-> programs. There is **no GUI yet** and no window or display output. The file
+> **Destination.** The goal of PNR is to run real PS5 games on a PC by
+> translating them to the host (not emulating a console), starting from games
+> you own. That is a long road and it is built in slices.
+>
+> **Honest status today.** PNR cannot yet run any commercial PS5 game. It does
+> not decrypt packages and loads only x86-64 ELF programs: these are current
+> limits on the road, not exclusions. No Sony firmware, SDK code, keys or game
+> files are used, and no DRM is bypassed. Everything below runs on Linux
+> x86-64 with developer-built demo programs. A native desktop window
+> (`pnr-ui`, optional build, Library screen only so far, see docs/ui.md) is
+> untested on a real display or GPU. The file
 > "jail" is application-level path routing, **not a security sandbox**. **Optional Linux sandbox: `launch --sandbox` (partial isolation, with a private pivot_root filesystem since slice B2b; see docs/sandbox.md).**
 
 **Contents:**
