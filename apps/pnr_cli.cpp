@@ -17,6 +17,7 @@
 #include "graphics/vulkan.hpp"
 #include "core/runtime.hpp"
 #include "loader/import_resolver.hpp"
+#include "loader/module_loader.hpp"
 #include "prx/prx.hpp"
 #include "prx/prx_file.hpp"
 #include "library/game_db.hpp"
@@ -437,6 +438,37 @@ int cmd_run(const std::string& exe, const std::vector<std::string>& args,
   return session.last_exit_code();
 }
 
+// Import coverage report for a Sony-style ELF (Core slice C1): what it needs, what PNR can bind.
+int cmd_imports(const std::string& path) {
+  pnr::prx::PrxRegistry reg;
+  pnr::loader::ImportResolution ir;
+  const auto st = pnr::loader::resolve_imports(path, reg, &ir);
+  if (!st) { std::printf("IMPORTS FAILED: %s\n", st.error.message.c_str()); return 2; }
+  const int missing = ir.prx_declared + ir.unknown;
+  std::printf("%s: %zu imports. %d implemented, %d declared-only, %d unknown, %d host, %d pnr-extension\n",
+              path.c_str(), ir.imports.size(), ir.prx_implemented, ir.prx_declared, ir.unknown, ir.host, ir.pnr_extension);
+  for (const auto& e : ir.imports) {
+    const std::string label = e.sony_form ? (e.resolved_name.empty() ? "(NID not in table)" : e.resolved_name) + "  NID " + e.nid : e.name;
+    std::printf("  %-48s %s\n", label.c_str(), pnr::loader::import_class_name(e.klass));
+  }
+  if (missing > 0) std::printf("COVERAGE: %d import(s) cannot be bound yet. These are what must be built next.\n", missing);
+  else std::printf("COVERAGE: every PlayStation-style import is implemented by a PNR host function.\n");
+  return 0;
+}
+
+// Loads a Sony-style ELF in-process, binds its imports by NID and runs it in a child process.
+int cmd_module_run(const std::string& path) {
+  pnr::prx::PrxRegistry reg;
+  pnr::loader::ModuleLoadReport rep;
+  pnr::loader::ModuleRunResult rr;
+  const auto st = pnr::loader::run_module(path, reg, &rr, &rep);
+  if (!st) { std::printf("MODULE NOT STARTED: %s\n", st.error.message.c_str()); return 2; }
+  std::printf("MODULE: %d relocations applied, %zu imports bound by NID\n", rep.relocations, rep.bound.size());
+  if (rr.signaled) { std::printf("MODULE CRASHED: signal %d\n", rr.signal); return 1; }
+  std::printf("MODULE FINISHED: exit %d\n", rr.exit_code);
+  return 0;
+}
+
 void usage() {
   std::puts("PNR CLI (AnythingPS5) - honest prototype\n"
             "usage:\n"
@@ -447,6 +479,8 @@ void usage() {
             "  pnr validate <executable>        ELF/x86-64 validation only\n"
             "  pnr import <file.pnrgame>        verify + install a dev package\n"
             "  pnr games                        list the game library\n"
+            "  pnr imports <elf>                import coverage report (NID-form imports too)\n"
+            "  pnr module-run <elf>             load a PlayStation-style ELF, bind imports by NID, run it\n"
             "  pnr hwinfo                       print detected host hardware\n"
             "  pnr gpu                          real Vulkan device enumeration");
 }
@@ -464,6 +498,8 @@ int main(int argc, char** argv) {
     return cmd_validate(loader, argv[2]);
   if (argc >= 3 && std::strcmp(argv[1], "import") == 0)
     return cmd_import(argv[2]);
+  if (argc >= 3 && std::strcmp(argv[1], "imports") == 0) return cmd_imports(argv[2]);
+  if (argc >= 3 && std::strcmp(argv[1], "module-run") == 0) return cmd_module_run(argv[2]);
   if (argc >= 2 && std::strcmp(argv[1], "games") == 0) return cmd_games();
   if (argc >= 3 && std::strcmp(argv[1], "run") == 0) {
     std::vector<std::string> args(argv + 3, argv + argc);
