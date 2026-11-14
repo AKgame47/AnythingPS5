@@ -1,4 +1,4 @@
-# Translation core (slices C1-C4a: module loading, NID binding, libkernel ABI, libc, PM4 decode)
+# Translation core (slices C1-C4b: module loading, NID binding, libkernel ABI, libc, PM4 decode, register meaning)
 
 Destination: running real PS5 games on a PC by translating the game's calls to the host, not by
 emulating a console. This page covers the first slice of that core. It is the current state on the
@@ -23,7 +23,8 @@ road, not the end of it.
 | libSceSysmodule `LoadModule`, `IsLoaded`, `UnloadModule` | Experimental stubs: ids are recorded, nothing is loaded, id values unverified |
 | Libc imports beyond this subset, floating point arguments, qsort and other callbacks into guest code | Planned |
 | PM4 command buffer decode and register-state tracking: packet types 0, 2, 3, SET_*_REG windows, draw and dispatch capture with the register state at each draw, indirect buffers through an address resolver, `pnr gnm-decode <file>` (`graphics/pm4`) | Implemented, Tested on SYNTHETIC buffers only. Opcode numbers, header layout and register windows verified against the public Linux kernel header soc15d.h. Draw packet body layouts are from public driver usage and NOT verified on a PlayStation |
-| Shader binding from registers, vertex and index fetch, Vulkan draw submission | Planned (slice C4b onward). No GPU work is done by PM4 decode |
+| Register meaning and draw bindings (`graphics/amd_regs.hpp`, `graphics/gfx_state`): shader addresses, user data, viewport, color target 0, primitive type | Implemented, Tested on SYNTHETIC buffers. Per public AMD headers, unverified on PlayStation |
+| Vertex and index fetch, GPU address map, Vulkan draw submission | Planned (slices C4c-C4e). No GPU work is done yet |
 | Windows (the loader uses mmap and fork) | Blocked |
 
 ## What it proves
@@ -63,3 +64,13 @@ makes the load fail with a message naming it, and nothing runs.
   against a public source. A write that runs past its register window is stopped and reported.
 - Indirect buffers hold GPU addresses. Without a resolver they are counted and reported as not followed.
 - `pnr gnm-synth OUT` writes a SYNTHETIC test buffer. No real game command buffer has been decoded.
+
+## Slice C4b notes (register meaning)
+- `graphics/amd_regs.hpp` names a small set of registers: VS/PS shader addresses and resource words, user data,
+  viewport scale/offset, color target 0, primitive type. Absolute number = `mm` offset from gc_10_3_0_offset.h
+  plus segment base (SH 0x1260, context and uconfig 0xA000, from sienna_cichlid_ip_offset.h).
+- Sources: torvalds/linux `drivers/gpu/drm/amd/include/asic_reg/gc/gc_10_3_0_offset.h`,
+  `.../include/sienna_cichlid_ip_offset.h`, and shadPS4 `regs_vertex.h` for primitive type numbers only.
+- Label for all of it: per public AMD headers, unverified on PlayStation. Nothing here was checked against a real console.
+- `extract_bindings` reads the tracked registers at a draw and lists what is missing in plain words.
+- `pnr gnm-decode` now prints register names, per-draw bindings and the written registers.
