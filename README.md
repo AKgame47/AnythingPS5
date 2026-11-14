@@ -33,15 +33,16 @@ licensed GPL-2.0.
 | Library | SQLite store of games, installs, launches and compatibility state |
 | Launcher core | `pnr-launcher`: list, show, launch, history, set compatibility, scan, import, remove, verify, doctor, clean, save export and restore |
 | Graphics | Offscreen Vulkan rendering on software Vulkan (lavapipe): triangle, spinning triangle, cube, lit, textured and lit-textured meshes, game-supplied meshes. Hand-authored SPIR-V, plus a restricted RDNA-to-SPIR-V translation path (experimental) |
-| PSN purchases | Unofficial NPSSO connector: local token store, saved-response import, owned-on-PSN rows kept separate from installed games, manual linking to compatibility, and a live `psn sync` (libcurl loaded at runtime, TLS verified, Sony hosts only). **Live Sony behaviour is Untested; no download feature** |
+| PSN purchases | Unofficial NPSSO connector: local token store, saved-response import, owned-on-PSN rows kept separate from installed games, manual linking to compatibility, and a live `psn sync` (libcurl loaded at runtime, TLS verified, Sony hosts only) behind a warning gate: confirm on a terminal or pass `--live-ok`; scripts without the flag are refused. **Live Sony behaviour is Untested and the route is unofficial; no download feature** |
 | Performance | Rule-based adaptive performance engine and laptop power-mode caps |
 
 Not done: verification of live PSN sync against real Sony (Untested), game downloads (no authorized mechanism found), real PS5 binaries, Sony APIs, a window or swapchain, hardware GPU
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2263/2263 unit tests, 18/18 CTest suites** on a fresh Linux
-Release `-Werror` build (details in the capability section below).
+Test state: **2269/2269 unit tests, 18/18 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2178 unit checks without it; the
+rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
 
@@ -195,20 +196,38 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Game services: virtual filesystem (jailed areas, per-game/user save isolation) | Implemented, Tested |
 | Game services: input (evdev enumeration, mapping profiles, virtual device) | Implemented, Tested |
 | Game services: audio (interface + honest null backend) | Interface Implemented, host backends Planned |
-| Windows backend | Partial: hwinfo via Win32 Implemented; game launch Blocked. Cross-compiles with llvm-mingw (no CI exists; not run on real Windows) |
+| CI (`.github/workflows/ci.yml`) | Implemented (Linux x86-64 only: Release `-Werror` build + unit suite + CTest, and an ASan+UBSan job; Windows not built or run there, no packaging, no GPU). Check the Actions tab for the current result |
+| Windows backend | Partial: hwinfo via Win32 Implemented; game launch Blocked. Cross-compiles with llvm-mingw (not built by CI and not run on real Windows) |
 | Rust components | Planned (no Rust toolchain in current sandbox) |
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2263/2263 unit tests pass, 18/18 CTest suites pass** (unit, end-to-end native
+**2269/2269 unit tests pass (2178 without `spirv-val`), 18/18 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
-and on a build against the official Vulkan headers. ASan+UBSan: 2263/2263
+and on a build against the official Vulkan headers. ASan+UBSan: 2269/2269
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
 are claimed.
+
+## CI
+
+`.github/workflows/ci.yml` (slice F2) runs on GitHub Actions, Linux x86-64 only
+(`ubuntu-22.04`), on pushes to `main` and on pull requests:
+
+- `linux-release`: fresh Release `-Werror` build, the unit suite, then CTest.
+- `linux-asan`: ASan+UBSan build, unit suite and CTest with leak detection off.
+  The one known artifact `pnr_psgame_workflow` runs in a separate step that
+  cannot fail the job.
+
+What CI is not: no packaging, no release uploads, no Windows job (nothing runs
+on Windows), no real GPU. Vulkan tests use software Vulkan if the runner has
+it, and `spirv-val` checks skip. A green run proves the code builds and the
+tests pass on that runner, not that anything works on a GPU or on Windows.
+Whether the workflow is green on GitHub is shown by the Actions tab, not by
+this document.
 
 ## Build (Linux)
 
@@ -954,7 +973,8 @@ restore REFUSED: not a valid archive: truncated header
 
 Full details: [docs/psn.md](docs/psn.md). **Status: Implemented. Tested
 against synthetic fixtures, a scripted fake and a local test server only.
-`psn sync` (live) is Untested against real Sony until you run it with your own token.**
+`psn sync` (live) is Untested against real Sony until you run it with your own token.
+It is an unofficial, community-derived route and sits behind a warning gate (slice F1): on a terminal you must type `yes`; non-interactive use is refused unless you pass `--live-ok`. Offline `psn import-json` is never gated.**
 
 Three different things, kept apart everywhere in PNR:
 
