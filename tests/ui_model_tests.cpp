@@ -60,6 +60,28 @@ void pnr_ui_model_tests(int& pass, int& fail) {
   r = ui.last_launch();
   check(r.finished && r.sandbox && ((r.clean && has(r.summary, "LAUNCH OK")) || has(r.summary, "LAUNCH NOT STARTED")), "ui: sandboxed launch runs or refuses loudly");
 
+  // ---- UI-2 game page: same core calls as the CLI
+  {
+    pnr::launcher::GameEntry ge;
+    check(ui.game("ui.demo", &ge) && ge.title == "UI Demo Game" && !ui.game("nope", &ge), "ui2: game() finds an exact id and rejects an unknown one");
+    auto hist = ui.history("ui.demo", 10);
+    check(hist.size() >= 2 && hist[0].at >= hist.back().at && ui.history("nope", 10).empty(), "ui2: history lists real launches newest first; unknown id is empty");
+    check(!ui.set_compat("ui.demo", "Not A State", "").ok, "ui2: an unknown status name is rejected");
+    check(!ui.set_compat("nope", "Untested", "").ok, "ui2: set_compat on an unknown id is rejected");
+    check(ui.set_compat("ui.demo", "Playable With Issues", "tested by hand").ok, "ui2: a person can set a status");
+    check(ui.games()[0].compatibility == "Playable With Issues" && ui.games()[0].compat_human_set, "ui2: the list shows the human-set status");
+    ui.start_launch("ui.demo", false, &why); ui.wait_idle(); ui.poll();
+    check(ui.games()[0].compatibility == "Playable With Issues", "ui2: a later launch never overwrites a human-set status");
+    auto v = ui.verify("ui.demo");
+    check(v.found && v.ok, "ui2: verify passes on intact files");
+    std::string tarp = dir + "/saves.tar";
+    auto ex = ui.export_saves("ui.demo", tarp);
+    check(ex.ok || !ex.error.empty(), "ui2: export saves returns a definite result");
+    if (ex.ok) check(!ui.export_saves("ui.demo", tarp).ok, "ui2: export refuses to overwrite an existing file");
+    auto d1 = ui.remove("ui.demo", true, false);
+    check(d1.found && !d1.removed && d1.needs_confirmation && fs::exists(d1.install_path) && ui.games().size() == 1, "ui2: remove without confirmation is a dry run and deletes nothing");
+  }
+
   // a game whose files vanished cannot launch
   fs::remove_all(dir + "/lib/games");
   ui.refresh();
@@ -67,6 +89,12 @@ void pnr_ui_model_tests(int& pass, int& fail) {
   ui.wait_idle(); ui.poll();
   r = ui.last_launch();
   check(r.finished && !r.running, "ui: a launch of a game with missing files ends (no hang)");
+  {
+    auto v2 = ui.verify("ui.demo");
+    check(v2.found && !v2.ok && !v2.problems.empty(), "ui2: verify reports missing files and marks integrity failed");
+    auto d2 = ui.remove("ui.demo", false, true);
+    check(d2.removed && ui.games().empty(), "ui2: a confirmed remove deletes the entry and the list refreshes");
+  }
   check(!ui.launching(), "ui: nothing is running at the end");
   fs::remove_all(dir);
 }
