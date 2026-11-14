@@ -9,6 +9,7 @@
 #include <cstdlib>
 
 #include "launcher/launch_guard.hpp"
+#include "plugin/host.hpp"
 #include "scan/scan.hpp"
 #include "store/store_cli.hpp"
 
@@ -363,6 +364,77 @@ std::string UiModel::store_install(const std::string& source, const std::string&
   refresh();
   if (ok) *ok = true;
   return "Installed " + o.title + " " + o.version + " from source '" + source + "' (sha256 checked against the source's index; the importer then ran its own checks). New games start as Untested.";
+}
+
+std::string UiModel::plugin_home() const {
+  if (const char* e = std::getenv("PNR_PLUGIN_HOME")) if (*e) return e;
+  auto pos = db_path_.rfind('/');
+  return pos == std::string::npos ? std::string(".") : db_path_.substr(0, pos);
+}
+
+std::vector<plugin::InstalledPlugin> UiModel::plugin_list() const {
+  plugin::PluginManager pm(plugin_home());
+  return pm.list();
+}
+
+plugin::InstallResult UiModel::plugin_install(const std::string& dir) {
+  plugin::PluginManager pm(plugin_home());
+  pm.require_signed = plugin_require_signed;
+  return pm.install_from_dir(dir);
+}
+
+std::string UiModel::plugin_enable(const std::string& id, const std::vector<std::string>& grant, bool* ok) {
+  plugin::PluginManager pm(plugin_home());
+  auto st = pm.enable(id, grant);
+  if (ok) *ok = st.ok;
+  return st.ok ? "Enabled " + id + " with " + std::to_string(grant.size()) + " granted permission(s)." : "Not enabled: " + st.error.message;
+}
+
+std::string UiModel::plugin_disable(const std::string& id, bool* ok) {
+  plugin::PluginManager pm(plugin_home());
+  auto st = pm.disable(id);
+  if (ok) *ok = st.ok;
+  return st.ok ? "Disabled " + id + "." : "Not disabled: " + st.error.message;
+}
+
+std::string UiModel::plugin_remove(const std::string& id, bool* ok) {
+  plugin::PluginManager pm(plugin_home());
+  auto st = pm.remove(id);
+  if (ok) *ok = st.ok;
+  return st.ok ? "Removed " + id + "." : "Not removed: " + st.error.message;
+}
+
+std::vector<plugin::PinnedKey> UiModel::plugin_keys() const {
+  plugin::PluginManager pm(plugin_home());
+  return pm.pinned_keys();
+}
+
+std::string UiModel::plugin_pin(const std::string& name, const std::string& hex, bool* ok) {
+  plugin::PluginManager pm(plugin_home());
+  auto st = pm.pin_key(name, hex);
+  if (ok) *ok = st.ok;
+  return st.ok ? "Pinned key " + name + ". A valid signature proves the key holder made the plugin, not that it is safe." : "Not pinned: " + st.error.message;
+}
+
+std::string UiModel::plugin_unpin(const std::string& name, bool* ok) {
+  plugin::PluginManager pm(plugin_home());
+  auto st = pm.unpin_key(name);
+  if (ok) *ok = st.ok;
+  return st.ok ? "Unpinned " + name + "." : "Not unpinned: " + st.error.message;
+}
+
+plugin::RunResult UiModel::plugin_run(const std::string& id, std::string* refuse) {
+  plugin::RunResult rr;
+  plugin::PluginManager pm(plugin_home());
+  plugin::InstalledPlugin p;
+  if (!pm.get(id, &p)) { if (refuse) *refuse = "no installed plugin '" + id + "'"; return rr; }
+  if (!p.enabled) { if (refuse) *refuse = "plugin is not enabled"; return rr; }
+  if (p.manifest.entry_type != "process") { if (refuse) *refuse = "this is a data plugin: it has nothing to run"; return rr; }
+  plugin::LiveBrokerHost host(db_path_, p.manifest.id);
+  plugin::RunOptions ro; ro.host = &host;
+  rr = plugin::run_plugin(p, pm.root(), ro);
+  if (!rr.started && refuse) *refuse = rr.error;
+  return rr;
 }
 
 }  // namespace pnr::ui
