@@ -7,7 +7,19 @@
 #include <string>
 
 #include "package/importer.hpp"
+#include "psn/http.hpp"
 #include "ui/ui_model.hpp"
+
+namespace {
+struct UiFakeHttp : pnr::psn::HttpClient {
+  std::string body; std::vector<std::string> urls; bool fail = false;
+  pnr::Status perform(const pnr::psn::HttpRequest& r, pnr::psn::HttpResponse* res) override {
+    urls.push_back(r.url); *res = pnr::psn::HttpResponse{};
+    if (fail) return pnr::Status::Fail(214, "psn", "tls");
+    res->status = 200; res->body = body; return pnr::Status::Ok();
+  }
+};
+}  // namespace
 
 void pnr_ui_model_tests(int& pass, int& fail) {
   using namespace pnr::ui;
@@ -96,5 +108,39 @@ void pnr_ui_model_tests(int& pass, int& fail) {
     check(d2.removed && ui.games().empty(), "ui2: a confirmed remove deletes the entry and the list refreshes");
   }
   check(!ui.launching(), "ui: nothing is running at the end");
+  // ---- UI-3 store: same cmd_* code as the CLI; the network is a fake client here
+  {
+    UiModel st(dir + "/slib/library.db");
+    std::string e3;
+    check(st.open(&e3) && st.store_sources().empty(), "ui3: a fresh library has no store source (no default source)");
+    bool ok = false;
+    std::string msg = st.store_add_source("demo", "https://games.example.invalid/index.json", "", &ok);
+    check(!ok && has(msg, "rights"), "ui3: a source needs a declared rights statement");
+    msg = st.store_add_source("demo", "http://games.example.invalid/index.json", "mine", &ok);
+    check(!ok, "ui3: a non-https source URL is refused");
+    msg = st.store_add_source("demo", "https://games.example.invalid/index.json", "Author's own games", &ok);
+    check(ok && st.store_sources().size() == 1 && has(msg, "cannot be verified"), "ui3: a source with a rights statement is added; rights are labelled unverified");
+    check(st.store_rows("", "").empty(), "ui3: nothing is listed before a refresh");
+    UiFakeHttp fk;
+    std::string h = "\"format\":\"pnr-store-index-1\",\"name\":\"Demo\",\"rights\":\"Own games by the author\"";
+    auto pk = [](const std::string& id, const std::string& kind) { return "{\"id\":\"" + id + "\",\"name\":\"Game " + id + "\",\"version\":\"1.0\",\"license\":\"MIT\",\"kind\":\"" + kind + "\",\"size\":1234,\"sha256\":\"" + std::string(64, 'a') + "\",\"url\":\"https://games.example.invalid/p/" + id + ".pnrgame\",\"description\":\"A tiny demo\",\"category\":\"puzzle\"}"; };
+    fk.body = "{" + h + ",\"packages\":[" + pk("alpha", "pnr-package") + "," + pk("beta", "ps5-pkg") + "]}";
+    check(st.store_start_refresh("demo", &fk), "ui3: refresh starts on a worker");
+    st.wait_idle(); st.store_poll();
+    check(st.store_job().finished && st.store_job().ok && !fk.urls.empty() && fk.urls[0] == "https://games.example.invalid/index.json", "ui3: refresh fetched only the source's own index URL");
+    auto rows = st.store_rows("", "");
+    check(rows.size() == 2 && rows[0].label == "supported" && rows[1].label == "unsupported", "ui3: packages listed; a non-pnr kind is labelled unsupported");
+    check(st.store_rows("", "alph").size() == 1 && st.store_rows("demo", "zzz").empty() && st.store_rows("nope", "").empty(), "ui3: search and source filters work");
+    fk.fail = true;
+    st.store_start_refresh("demo", &fk); st.wait_idle(); st.store_poll();
+    check(st.store_job().finished && !st.store_job().ok && st.store_rows("", "").size() == 2, "ui3: a failed refresh is reported and keeps the cached list");
+    bool iok = true; std::string scan;
+    std::string im = st.store_install("demo", "alpha", &iok, &scan);
+    check(!iok && !im.empty(), "ui3: install of a package that was never downloaded is refused");
+    msg = st.store_remove_source("demo", false, &ok);
+    check(!ok && st.store_sources().size() == 1 && has(msg, "WOULD REMOVE"), "ui3: remove source is a dry run until confirmed");
+    msg = st.store_remove_source("demo", true, &ok);
+    check(ok && st.store_sources().empty() && st.store_rows("", "").empty(), "ui3: confirmed remove deletes the source and its cached index");
+  }
   fs::remove_all(dir);
 }
