@@ -2,6 +2,7 @@
 // Taxonomy (which symbols exist, library grouping, NID binding concept)
 // follows AnyPS5 (GPL-2.0) core/libs/prx - see prx.hpp header note.
 #include "prx/prx.hpp"
+#include "loader/guest_runtime.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -243,6 +244,36 @@ PrxRegistry::PrxRegistry() {
         void* arg = a.size() > 1 ? reinterpret_cast<void*>(a[1]) : nullptr;
         return sceKernelCreateThread("pnr-prx-thread", entry, arg);
       }));
+  // C2: libkernel ABI subset (Sony constants translated in loader/guest_runtime).
+  using V = const std::vector<std::int64_t>&;
+  symbols_.push_back(impl("libkernel", "mmap", [](V a) -> std::int64_t {
+    if (a.size() < 6) return -1;
+    return loader::sony_mmap(a[0], a[1], a[2], a[3], a[4], a[5]);
+  }));
+  symbols_.push_back(impl("libkernel", "sceKernelClockGettime", [](V a) -> std::int64_t {
+    return a.size() < 2 ? SCE_KERNEL_ERROR_EINVAL : loader::sony_clock_gettime(a[0], a[1]);
+  }));
+  symbols_.push_back(impl("libkernel", "scePthreadMutexInit", [](V a) -> std::int64_t {
+    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_mutex_op(0, reinterpret_cast<std::int64_t*>(a[0]));
+  }));
+  symbols_.push_back(impl("libkernel", "scePthreadMutexLock", [](V a) -> std::int64_t {
+    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_mutex_op(1, reinterpret_cast<std::int64_t*>(a[0]));
+  }));
+  symbols_.push_back(impl("libkernel", "scePthreadMutexUnlock", [](V a) -> std::int64_t {
+    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_mutex_op(2, reinterpret_cast<std::int64_t*>(a[0]));
+  }));
+  symbols_.push_back(impl("libkernel", "scePthreadMutexDestroy", [](V a) -> std::int64_t {
+    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_mutex_op(3, reinterpret_cast<std::int64_t*>(a[0]));
+  }));
+  symbols_.push_back(impl("libkernel", "scePthreadCreate", [](V a) -> std::int64_t {
+    if (a.size() < 4) return SCE_KERNEL_ERROR_EINVAL;
+    return loader::guest_thread_create(reinterpret_cast<std::int64_t*>(a[0]), a[2], a[3]);
+  }));
+  symbols_.push_back(impl("libkernel", "scePthreadJoin", [](V a) -> std::int64_t {
+    if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
+    return loader::guest_thread_join(a[0], reinterpret_cast<std::int64_t*>(a[1]));
+  }));
+  symbols_.push_back(impl("libkernel", "scePthreadSelf", [](V) -> std::int64_t { return loader::guest_thread_self(); }));
   // Declared-only taxonomy entries (honest: no host implementation yet).
   symbols_.push_back(decl_only("libkernel", "sceKernelOpen"));
   symbols_.push_back(decl_only("libkernel", "sceKernelRead"));
