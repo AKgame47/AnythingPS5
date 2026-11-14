@@ -1,6 +1,7 @@
 // PNR CLI - first launch driver for the master prompt's 10-step workflow.
 // Every step prints an explicit SUCCESS / FAILED / SKIPPED / BLOCKED line.
 // It never reports a game as run when only initialization succeeded.
+#include "graphics/gfx_state.hpp"
 #include "graphics/pm4.hpp"
 #include <chrono>
 #include <cstdio>
@@ -473,7 +474,12 @@ int cmd_module_run(const std::string& path) {
 int cmd_gnm_synth(const std::string& out) {
   using namespace pnr::graphics::pm4;
   Builder b;
-  b.set_context(0xa010, 0x11).set_sh(0x2c10, 0x22).set_uconfig(0xc242, 4).num_instances(1).draw_auto(3)
+  namespace amd = pnr::graphics::amd;
+  auto f2u = [](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); return u; };
+  b.set_reg(SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x1000, 0}).set_reg(SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x2000, 0})
+   .set_reg(SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(960.f), f2u(960.f), f2u(-540.f), f2u(540.f), f2u(0.5f), f2u(0.5f)})
+   .set_context(amd::CB_COLOR0_BASE, 0x4000).set_context(amd::CB_TARGET_MASK, 0xf)
+   .set_context(0xa010, 0x11).set_sh(0x2c10, 0x22).set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(3)
    .set_context(0xa010, 0x33).index_type(0).draw_indexed(0x100000, 6, 6).dispatch(8, 4, 1).write_data(0x200000, 0xbeef).packet3(0x6f, {1});
   std::ofstream f(out, std::ios::binary);
   f.write(reinterpret_cast<const char*>(b.dwords().data()), static_cast<std::streamsize>(b.dwords().size() * 4));
@@ -492,7 +498,17 @@ int cmd_gnm_decode(const std::string& path) {
   std::memcpy(dw.data(), raw.data(), raw.size());
   std::vector<Issue> iss;
   for (const auto& p : decode(dw.data(), dw.size(), &iss)) std::puts(describe(p).c_str());
-  std::fputs(report(interpret(dw.data(), dw.size())).c_str(), stdout);
+  const auto sum = interpret(dw.data(), dw.size());
+  std::fputs(report(sum).c_str(), stdout);
+  int n = 0;
+  for (const auto& d : sum.draws) {
+    std::printf("draw %d state:\n%s", n++, pnr::graphics::describe_bindings(pnr::graphics::extract_bindings(d)).c_str());
+  }
+  std::puts("registers written:");
+  for (const auto& kv : sum.regs) {
+    const char* nm = pnr::graphics::amd::register_name(kv.first);
+    std::printf("  0x%05x %-28s = 0x%08x\n", kv.first, nm ? nm : "(unnamed)", kv.second);
+  }
   return 0;
 }
 
