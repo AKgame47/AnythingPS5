@@ -11,6 +11,7 @@
 
 #include "core/runtime.hpp"
 #include "plugin/manifest.hpp"
+#include "plugin/signing.hpp"
 
 namespace pnr::plugin {
 
@@ -26,6 +27,8 @@ struct InstallResult {
   bool updated = false;            // replaced an older installed version
   bool disabled_by_update = false; // update asked for permissions the user had not granted
   std::vector<std::string> errors; // plain words
+  std::string signature = "unsigned";  // unsigned | valid (key name) | untrusted key
+  std::vector<std::string> warnings;     // from static analysis, install still allowed
   Manifest manifest;
 };
 
@@ -34,6 +37,12 @@ class PluginManager {
   // root holds <root>/plugins/<id>/ and <root>/plugins/state.json.
   explicit PluginManager(std::string root);
   const std::string& root() const { return root_; }
+  // Pinned Ed25519 keys (<root>/plugins/trusted_keys.json). Pinning is the user's decision, by name and hex key.
+  std::vector<PinnedKey> pinned_keys() const;
+  Status pin_key(const std::string& name, const std::string& pubkey_hex);
+  Status unpin_key(const std::string& name);
+  // When true, only plugins with a valid signature from a pinned key install. Default false (unsigned plugins allowed, shown as such).
+  bool require_signed = false;
 
   InstallResult install_from_dir(const std::string& src_dir);
   // grant must contain every permission in the manifest (names exactly as declared).
