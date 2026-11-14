@@ -31,6 +31,7 @@ struct Opts {
   std::string select_id, auto_launch, scan_dir;     // test hooks: same code paths as the mouse
   bool auto_sandbox = false;
   bool open_add = false;
+  bool open_store = false;
   std::string page_id;   // open the game page for this id at start (test hook)
   int tab = 0;           // initial tab on the game page (test hook)
 };
@@ -96,7 +97,7 @@ struct App {
   std::string renderer_name, video_driver;
   bool show_scan = true;
   // ---- game page (UI-2)
-  enum Screen { kLibrary = 0, kGame = 1 };
+  enum Screen { kLibrary = 0, kGame = 1, kStore = 2 };
   int screen = kLibrary;
   int want_tab = -1;
   std::string loaded_for;            // game id the page state below belongs to
@@ -178,7 +179,7 @@ struct App {
     text_at(dl, ImVec2(o.x + 70, o.y + 26), 22, ImVec4(0.93f, 0.95f, 1, 1), "PNR");
     text_at(dl, ImVec2(o.x + 70, o.y + 50), 12, kMuted, "Native Runtime");
     struct Item { const char* name; const char* tag; bool on; };
-    Item items[] = {{"Library", "", screen == kLibrary}, {"Game page", sel_game() ? "" : "pick a game", screen == kGame}, {"Store", "UI-3", false}, {"Settings", "UI-4", false},
+    Item items[] = {{"Library", "", screen == kLibrary}, {"Game page", sel_game() ? "" : "pick a game", screen == kGame}, {"Store", "", screen == kStore}, {"Settings", "UI-4", false},
                     {"Hardware", "planned", false}, {"Diagnostics", "planned", false}, {"Reports", "planned", false}};
     float y = 96;
     int idx = 0;
@@ -187,6 +188,7 @@ struct App {
       bool clicked = ImGui::InvisibleButton(it.name, ImVec2(228, 40));
       if (clicked && idx == 0) screen = kLibrary;
       if (clicked && idx == 1 && sel_game()) open_page(selected);
+      if (clicked && idx == 2) { screen = kStore; store_dirty(); }
       ++idx;
       bool hov = ImGui::IsItemHovered();
       ImVec2 a(o.x, o.y + y), b(o.x + 228, o.y + y + 40);
@@ -479,6 +481,192 @@ struct App {
     ImGui::PopTextWrapPos();
   }
 
+
+  // ---- store screen (UI-3)
+  std::vector<pnr::ui::StoreRow> srows;
+  int srows_age = 1000;
+  char ssearch[96] = "";
+  char add_id[48] = "", add_url[300] = "", add_rights[300] = "";
+  std::string add_msg; bool add_ok = false;
+  bool open_src = false;
+  std::string store_msg; bool store_msg_ok = false;
+  std::string install_scan, pending_remove;
+  bool store_open_hook = false;
+
+  void store_dirty() { srows_age = 1000; }
+  static const char* human_size(long long b, char* buf, size_t n) {
+    if (b >= (1LL << 20)) std::snprintf(buf, n, "%.1f MiB", b / 1048576.0);
+    else if (b >= 1024) std::snprintf(buf, n, "%.1f KiB", b / 1024.0);
+    else std::snprintf(buf, n, "%lld B", b);
+    return buf;
+  }
+
+  void store_page(float mw, float body_h, float rail_w) {
+    if (srows_age++ > 30) { srows = model.store_rows("", ssearch); srows_age = 0; }
+    ImGui::Dummy(ImVec2(mw, 22));
+    ImGui::SetCursorPosX(rail_w + 36);
+    ImGui::PushFont(nullptr, 30.0f); ImGui::TextUnformatted("Store"); ImGui::PopFont();
+    ImGui::SameLine(0, 22);
+    ImGui::SetCursorPosY(24);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 18);
+    ImGui::SetNextItemWidth(340);
+    if (ImGui::InputTextWithHint("##ssearch", "Search name, id, category", ssearch, sizeof ssearch)) store_dirty();
+    ImGui::SameLine(0, 0);
+    ImGui::SetCursorPosX(rail_w + mw - 36 - 130 - 10 - 150);
+    ImGui::SetCursorPosY(24);
+    auto job = model.store_job();
+    if (job.running) ImGui::BeginDisabled();
+    if (ImGui::Button("Refresh all", ImVec2(140, 0))) { model.store_start_refresh(""); store_msg.clear(); }
+    if (job.running) ImGui::EndDisabled();
+    ImGui::SameLine(0, 10);
+    ImGui::SetCursorPosY(24);
+    if (primary_button("Add source", ImVec2(130, 34), false)) open_src = true;
+    ImGui::PopStyleVar();
+    // honesty banner
+    ImGui::SetCursorPos(ImVec2(rail_w + 36, 72));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.12f, 0.08f, 1));
+    ImGui::BeginChild("sbanner", ImVec2(mw - 72, 54), false, ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetCursorPos(ImVec2(14, 8));
+    ImGui::PushTextWrapPos(mw - 72 - 14);
+    ImGui::TextColored(ImVec4(0.92f, 0.82f, 0.5f, 1), "No default source: PNR lists only sources you add. The rights statement is yours; PNR cannot verify it. Only pnr-package files install, every download is hash-checked and scanned, and a flagged scan refuses the install.");
+    ImGui::PopTextWrapPos();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    float y = 72 + 54 + 12;
+    const auto& srcs = model.store_sources();
+    if (srcs.empty()) {
+      ImGui::SetCursorPos(ImVec2(rail_w + 36, y + 70));
+      ImGui::PushFont(nullptr, 26.0f); ImGui::TextUnformatted("No sources yet"); ImGui::PopFont();
+      ImGui::SetCursorPosX(rail_w + 36);
+      ImGui::TextColored(kMuted, "Add the https index URL of a source you have the right to use, and say why.");
+      ImGui::SetCursorPosX(rail_w + 36);
+      ImGui::Dummy(ImVec2(0, 6));
+      ImGui::SetCursorPosX(rail_w + 36);
+      if (primary_button("Add source", ImVec2(170, 42), true)) open_src = true;
+    } else {
+      // sources strip
+      ImGui::SetCursorPos(ImVec2(rail_w + 36, y));
+      for (const auto& s : srcs) {
+        ImGui::PushID(s.id.c_str());
+        ImGui::BeginGroup();
+        ImGui::TextColored(ImVec4(0.9f, 0.92f, 1, 1), "%s", s.id.c_str());
+        ImGui::SameLine(0, 8);
+        ImGui::TextColored(kMuted, "%s%s", s.host.c_str(), s.pubkey.empty() ? "" : "  (key pinned)");
+        ImGui::SameLine(0, 14);
+        if (ImGui::SmallButton("Refresh")) { model.store_start_refresh(s.id); store_msg.clear(); }
+        ImGui::SameLine(0, 6);
+        if (pending_remove == s.id) {
+          if (ImGui::SmallButton("Confirm remove")) { bool ok = false; store_msg = model.store_remove_source(s.id, true, &ok); store_msg_ok = ok; pending_remove.clear(); store_dirty(); }
+          ImGui::SameLine(0, 6);
+          if (ImGui::SmallButton("Keep")) pending_remove.clear();
+        } else if (ImGui::SmallButton("Remove")) pending_remove = s.id;
+        ImGui::EndGroup();
+        ImGui::PopID();
+        ImGui::SameLine(0, 36);
+      }
+      ImGui::NewLine();
+      ImGui::SetCursorPosX(rail_w + 36);
+      ImGui::TextColored(kMuted, "Declared rights (unverified): %s", srcs[0].rights.c_str());
+      y = ImGui::GetCursorPosY() + 10;
+      // package list
+      const float job_h = 44;
+      ImGui::SetCursorPos(ImVec2(rail_w + 36, y));
+      ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+      ImGui::BeginChild("spk", ImVec2(mw - 72, body_h - y - job_h - 4), false);
+      ImDrawList* dl = ImGui::GetWindowDrawList();
+      if (srows.empty()) ImGui::TextColored(kMuted, "No packages listed. Press Refresh to fetch the source's index.");
+      const float rw = mw - 72 - 14, rh = 92;
+      int n = 0;
+      for (const auto& r : srows) {
+        ImGui::SetCursorPos(ImVec2(0, 4 + n * (rh + 10)));
+        ++n;
+        ImVec2 a = ImGui::GetCursorScreenPos();
+        dl->AddRectFilled(a, ImVec2(a.x + rw, a.y + rh), U(ImVec4(0.105f, 0.115f, 0.145f, 1)), 6);
+        pnr::launcher::GameEntry fake; fake.game_id = r.id; fake.title = r.name;
+        cover(dl, ImVec2(a.x + 10, a.y + 10), rh - 20, fake, 40);
+        float tx = a.x + rh + 8;
+        text_at(dl, ImVec2(tx, a.y + 10), 19, ImVec4(0.95f, 0.96f, 1, 1), r.name + "  v" + r.version, rw - rh - 330);
+        char sz[32]; human_size(r.size, sz, sizeof sz);
+        text_at(dl, ImVec2(tx, a.y + 36), 14, kMuted, r.category + "   " + r.license + "   " + sz + "   " + r.source + "/" + r.id, rw - rh - 330);
+        text_at(dl, ImVec2(tx, a.y + 58), 14, ImVec4(0.7f, 0.73f, 0.8f, 1), r.description, rw - rh - 330);
+        ImVec4 lc = r.label == "supported" ? ImVec4(0.35f, 0.85f, 0.5f, 1) : r.label == "experimental" ? ImVec4(0.95f, 0.75f, 0.25f, 1) : ImVec4(0.95f, 0.5f, 0.4f, 1);
+        chip(dl, ImVec2(a.x + rw - 320, a.y + 12), r.label, lc, 13);
+        if (!r.status.empty()) chip(dl, ImVec2(a.x + rw - 320, a.y + 50), r.status, kAccent, 13);
+        ImGui::SetCursorPos(ImVec2(rw - 150, 4 + (n - 1) * (rh + 10) + 24));
+        ImGui::PushID((r.source + "/" + r.id).c_str());
+        bool busy = job.running;
+        if (r.label == "unsupported") { ImGui::BeginDisabled(); ImGui::Button("Unsupported", ImVec2(130, 40)); ImGui::EndDisabled(); }
+        else if (r.status == "installed") { ImGui::BeginDisabled(); ImGui::Button("Installed", ImVec2(130, 40)); ImGui::EndDisabled(); }
+        else if (r.status == "verified") {
+          if (busy) ImGui::BeginDisabled();
+          if (primary_button("Install", ImVec2(130, 40), false)) {
+            bool ok = false; store_msg = model.store_install(r.source, r.id, &ok, &install_scan); store_msg_ok = ok; store_dirty();
+          }
+          if (busy) ImGui::EndDisabled();
+        } else {
+          if (busy) ImGui::BeginDisabled();
+          if (primary_button(r.status.empty() ? "Get" : "Resume", ImVec2(130, 40), false)) { model.store_start_get(r.source, r.id); store_msg.clear(); }
+          if (busy) ImGui::EndDisabled();
+        }
+        ImGui::PopID();
+      }
+      ImGui::SetCursorPos(ImVec2(0, 4 + n * (rh + 10)));
+      ImGui::Dummy(ImVec2(1, 1));
+      ImGui::EndChild();
+      ImGui::PopStyleColor();
+      // job / message strip
+      ImGui::SetCursorPos(ImVec2(rail_w + 36, body_h - job_h));
+      ImGui::PushTextWrapPos(rail_w + mw - 36);
+      std::string line = store_msg;
+      ImVec4 col = store_msg_ok ? ImVec4(0.35f, 0.85f, 0.5f, 1) : ImVec4(0.95f, 0.5f, 0.4f, 1);
+      if (line.empty() && (job.running || job.finished)) {
+        line = job.what + ": " + job.summary;
+        col = job.running ? kAccent : (job.ok ? ImVec4(0.35f, 0.85f, 0.5f, 1) : ImVec4(0.95f, 0.5f, 0.4f, 1));
+      }
+      while (!line.empty() && (line.back() == '\n' || line.back() == ' ')) line.pop_back();
+      // the outcome is the last line that is not a trailing "(...)" hint
+      for (;;) {
+        size_t nl = line.rfind('\n');
+        if (nl == std::string::npos) break;
+        std::string last = line.substr(nl + 1);
+        size_t f = last.find_first_not_of(' ');
+        if (f != std::string::npos && last[f] == '(') { line.resize(nl); continue; }
+        line = last.substr(f == std::string::npos ? 0 : f);
+        break;
+      }
+      ImGui::TextColored(col, "%s", line.c_str());
+      ImGui::PopTextWrapPos();
+    }
+    if (job.finished && !job.running && last_job_what != job.what + job.summary) { last_job_what = job.what + job.summary; store_dirty(); }
+    src_popup();
+  }
+  std::string last_job_what;
+
+  void src_popup() {
+    if (open_src) { ImGui::OpenPopup("Add source"); open_src = false; }
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->Size.x / 2, vp->Size.y / 2), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(760.0f, vp->Size.x - 80), 400), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28, 24));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10);
+    if (ImGui::BeginPopupModal("Add source", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+      ImGui::PushFont(nullptr, 26.0f); ImGui::TextUnformatted("Add source"); ImGui::PopFont();
+      ImGui::TextColored(kMuted, "Nothing is fetched until you press Refresh. PNR cannot check your rights statement.");
+      ImGui::Dummy(ImVec2(0, 6));
+      ImGui::SetNextItemWidth(-1); ImGui::InputTextWithHint("##aid", "Short id, for example mygames", add_id, sizeof add_id);
+      ImGui::SetNextItemWidth(-1); ImGui::InputTextWithHint("##aurl", "https index URL", add_url, sizeof add_url);
+      ImGui::SetNextItemWidth(-1); ImGui::InputTextWithHint("##arights", "Rights statement, for example: these are my own games", add_rights, sizeof add_rights);
+      if (primary_button("Add", ImVec2(120, 40), false)) {
+        bool ok = false; add_msg = model.store_add_source(add_id, add_url, add_rights, &ok); add_ok = ok;
+        if (ok) { add_id[0] = add_url[0] = add_rights[0] = 0; store_dirty(); ImGui::CloseCurrentPopup(); }
+      }
+      ImGui::SameLine(); if (ImGui::Button("Cancel", ImVec2(110, 40))) ImGui::CloseCurrentPopup();
+      if (!add_msg.empty() && !add_ok) { std::string m = add_msg.substr(0, add_msg.find('\n')); ImGui::PushTextWrapPos(0); ImGui::TextColored(ImVec4(0.95f, 0.5f, 0.4f, 1), "%s", m.c_str()); ImGui::PopTextWrapPos(); }
+      ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar(2);
+  }
+
   void tab_overview(const pnr::launcher::GameEntry& g) {
     ImGui::Dummy(ImVec2(0, 6));
     if (ImGui::BeginTable("kv", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX)) {
@@ -613,6 +801,14 @@ struct App {
     ImGui::SameLine(0, 0);
     ImGui::BeginGroup();
     const float mw = W - rail_w;
+    if (screen == kStore) {
+      store_page(mw, body_h, rail_w);
+      ImGui::EndGroup();
+      status_bar(W, H);
+      add_popup();
+      ImGui::End();
+      return;
+    }
     if (screen == kGame && !sel_game()) screen = kLibrary;
     if (screen == kGame) {
       game_page(mw, body_h, rail_w);
@@ -698,11 +894,12 @@ int main(int argc, char** argv) {
     else if (a == "--auto-sandbox") o.auto_sandbox = true;
     else if (a == "--open-add") o.open_add = true;
     else if (a == "--page") o.page_id = next();
+    else if (a == "--store") o.open_store = true;
     else if (a == "--tab") o.tab = std::atoi(next().c_str());
     else if (a == "--scan-dir") o.scan_dir = next();
     else if (a == "--help" || a == "-h") {
       std::puts("pnr-ui [--db LIBRARY.db] [--size WxH]\n"
-                "test hooks (same code paths as the mouse): --frames N --shot N:file.bmp --select ID --auto-launch ID [--auto-sandbox] --scan-dir DIR --open-add --page ID --tab N");
+                "test hooks (same code paths as the mouse): --frames N --shot N:file.bmp --select ID --auto-launch ID [--auto-sandbox] --scan-dir DIR --open-add --page ID --tab N --store");
       return 0;
     } else { std::fprintf(stderr, "pnr-ui: unknown option %s\n", a.c_str()); return 64; }
   }
@@ -754,6 +951,8 @@ int main(int argc, char** argv) {
       if (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_CLOSE) quit = true;
     }
     model.poll();
+    model.store_poll();
+    if (frame == 3 && o.open_store) { app.screen = App::kStore; app.store_dirty(); }
     if (frame == 5 && !o.scan_dir.empty()) app.do_scan();
     if (frame == 3 && !o.page_id.empty()) { app.open_page(o.page_id); app.want_tab = o.tab; }
     if (frame == 8 && o.open_add) app.open_add = true;
