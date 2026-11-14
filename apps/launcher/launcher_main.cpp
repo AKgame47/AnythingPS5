@@ -52,7 +52,7 @@ static void usage() {
             "  pnr-launcher psn status [--json]   (local state; no network)\n"
             "  pnr-launcher psn set-token [--file PATH]   (token from stdin or a file, never argv)\n"
             "  pnr-launcher psn import-json <file> [--complete] [--json]   (saved purchased-games response)\n"
-            "  pnr-launcher psn sync [--complete] [--json]   (LIVE: contacts Sony hosts with your stored token; untested vs Sony)\n"
+            "  pnr-launcher psn sync [--complete] [--json] [--live-ok]   (LIVE: contacts Sony hosts with your stored token; untested vs Sony)\n"
             "  pnr-launcher psn owned [--platform PS4|PS5] [--json]\n"
             "  pnr-launcher psn link <entitlement-id> <game-id> | psn unlink <entitlement-id>\n"
             "  pnr-launcher psn disconnect [--forget-owned] [--yes]");
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
   bool json = false;
   std::vector<std::string> pos, gameargs;
   bool after = false, complete = false, forget = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
-  bool no_model_sandbox = false, sandbox_on = false, allow_flagged = false, force = false, log_it = false;
+  bool live_ok = false, no_model_sandbox = false, sandbox_on = false, allow_flagged = false, force = false, log_it = false;
   std::string out_file, sha256_arg, threshold_s = "0.8";
   std::string note, limit_s = "20", file, platform, rights, source;
   for (size_t i = 1; i < a.size(); ++i) {
@@ -72,6 +72,7 @@ int main(int argc, char** argv) {
     else if (a[i] == "--") after = true;
     else if (a[i] == "--json") json = true;
     else if (a[i] == "--yes") yes = true;
+    else if (a[i] == "--live-ok") live_ok = true;
     else if (a[i] == "--sandbox") sandbox_on = true;
     else if (a[i] == "--no-model-sandbox") no_model_sandbox = true;
     else if (a[i] == "--out" && i + 1 < a.size()) out_file = a[++i];
@@ -307,7 +308,22 @@ int main(int argc, char** argv) {
       rc = pnr::psn::cmd_set_token(tp, in, json, &out);
     }
     else if (pos[0] == "import-json" && pos.size() == 2) rc = pnr::psn::cmd_import_json(core.db(), pos[1], complete, json, &out);
-    else if (pos[0] == "sync" && pos.size() == 1) rc = pnr::psn::cmd_sync(core.db(), tp, complete, json, &out);
+    else if (pos[0] == "sync" && pos.size() == 1) {
+      pnr::psn::LiveConsent lc;
+      lc.flag = live_ok;
+      lc.interactive = ::isatty(0) && ::isatty(2);
+      lc.confirm = [](const std::string& warning) {
+        std::fputs(warning.c_str(), stderr);
+        std::fputs("Type 'yes' to continue, anything else cancels: ", stderr);
+        std::fflush(stderr);
+        char buf[64];
+        if (!std::fgets(buf, sizeof buf, stdin)) return false;
+        std::string r(buf);
+        while (!r.empty() && (r.back() == '\n' || r.back() == '\r' || r.back() == ' ')) r.pop_back();
+        return r == "yes";
+      };
+      rc = pnr::psn::cmd_sync(core.db(), tp, complete, json, lc, &out);
+    }
     else if (pos[0] == "owned" && pos.size() == 1) rc = pnr::psn::cmd_owned(core.db(), json, platform, &out);
     else if (pos[0] == "link" && pos.size() == 3) rc = pnr::psn::cmd_link(core.db(), pos[1], pos[2], json, &out);
     else if (pos[0] == "unlink" && pos.size() == 2) rc = pnr::psn::cmd_unlink(core.db(), pos[1], json, &out);
