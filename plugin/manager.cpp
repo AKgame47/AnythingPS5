@@ -9,6 +9,8 @@
 #include <set>
 #include <sstream>
 
+#include "crypto/ed25519.hpp"
+#include "plugin/analyze.hpp"
 #include "psn/json.hpp"
 
 namespace pnr::plugin {
@@ -86,6 +88,43 @@ Status PluginManager::save_state(const std::vector<std::pair<std::string, State>
   return ec ? Status::Fail(420, "plugin", "cannot replace plugin state: " + ec.message()) : Status::Ok();
 }
 
+std::vector<PinnedKey> PluginManager::pinned_keys() const {
+  std::vector<PinnedKey> out;
+  std::string text;
+  if (!read_file(plugins_dir() + "/trusted_keys.json", &text, 1 << 16)) return out;
+  Json j; std::string err;
+  if (!psn::json_parse(text, &j, &err) || !j.is(Json::T::Obj)) return out;
+  for (const auto& kv : j.o) if (kv.second.is(Json::T::Str)) out.push_back({kv.first, kv.second.s});
+  return out;
+}
+
+Status PluginManager::pin_key(const std::string& name, const std::string& hex) {
+  std::string raw;
+  if (name.empty() || name.size() > 64 || !valid_plugin_id(name)) return Status::Fail(400, "plugin", "key name must look like a plugin id (letters, digits, . _ -)");
+  if (!crypto::hex_decode(hex, &raw) || raw.size() != 32) return Status::Fail(400, "plugin", "public key must be 64 hex characters");
+  auto k = pinned_keys();
+  for (auto& x : k) if (x.name == name) return Status::Fail(409, "plugin", "a key named '" + name + "' is already pinned; unpin it first");
+  k.push_back({name, hex});
+  std::string o = "{\n";
+  for (std::size_t i = 0; i < k.size(); ++i) o += "  \"" + json_escape(k[i].name) + "\": \"" + json_escape(k[i].pubkey_hex) + "\"" + (i + 1 < k.size() ? ",\n" : "\n");
+  o += "}\n";
+  std::error_code ec; fs::create_directories(plugins_dir(), ec);
+  std::ofstream f(plugins_dir() + "/trusted_keys.json", std::ios::binary | std::ios::trunc); f << o;
+  return f ? Status::Ok() : Status::Fail(420, "plugin", "cannot write trusted_keys.json");
+}
+
+Status PluginManager::unpin_key(const std::string& name) {
+  auto k = pinned_keys();
+  auto it = std::find_if(k.begin(), k.end(), [&](const PinnedKey& x) { return x.name == name; });
+  if (it == k.end()) return Status::Fail(404, "plugin", "no pinned key named '" + name + "'");
+  k.erase(it);
+  std::string o = "{\n";
+  for (std::size_t i = 0; i < k.size(); ++i) o += "  \"" + json_escape(k[i].name) + "\": \"" + json_escape(k[i].pubkey_hex) + "\"" + (i + 1 < k.size() ? ",\n" : "\n");
+  o += "}\n";
+  std::ofstream f(plugins_dir() + "/trusted_keys.json", std::ios::binary | std::ios::trunc); f << o;
+  return f ? Status::Ok() : Status::Fail(420, "plugin", "cannot write trusted_keys.json");
+}
+
 bool PluginManager::get(const std::string& id, InstalledPlugin* out) const {
   if (!valid_plugin_id(id)) return false;
   std::string text;
@@ -145,6 +184,17 @@ InstallResult PluginManager::install_from_dir(const std::string& src_dir) {
   if (auto why = check_compatible(m); !why.empty()) { r.errors = why; return r; }
   std::size_t files = 0; std::uint64_t bytes = 0; std::string why;
   if (!scan_tree(src, &files, &bytes, &why)) { r.errors.push_back(why); return r; }
+  {  // static analysis (never runs anything), net host check, signature
+    Analysis an = analyze_dir(src.string());
+    for (auto& p : m.permissions) if (p.rfind("net:", 0) == 0 && is_refused_host(p.substr(4))) an.reasons.push_back("permission '" + p + "' asks for a file-locker or torrent host"), an.refused = true;
+    if (an.refused) { r.errors.push_back("refused by analysis (PNR does not install download providers for copyrighted games, jailbreak payloads or console binaries):"); for (auto& x : an.reasons) r.errors.push_back(x); return r; }
+    r.warnings = an.warnings;
+    SigCheck sc = check_signature(src.string(), pinned_keys());
+    if (sc.state == SigState::Invalid) { r.errors.push_back("signature check failed: " + sc.detail); return r; }
+    if (sc.state == SigState::Valid) r.signature = "valid, pinned key '" + sc.key_name + "'";
+    else if (sc.state == SigState::UntrustedKey) r.signature = "untrusted: signed by a key you have not pinned";
+    if (require_signed && sc.state != SigState::Valid) { r.errors.push_back("signed plugins only is on, and this one is " + std::string(sc.state == SigState::Unsigned ? "unsigned" : "not signed by a pinned key")); return r; }
+  }
   if (m.entry_type == "process" && !fs::is_regular_file(src / m.entry_path, ec)) { r.errors.push_back("entry.path '" + m.entry_path + "' is not a file in the plugin"); return r; }
 
   // Dependency cycle check over the installed set plus this plugin.
