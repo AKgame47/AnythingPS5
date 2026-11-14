@@ -1,0 +1,14 @@
+{
+  "id": "example.hello-process",
+  "name": "Hello Process (SDK example)",
+  "version": "1.0.0",
+  "description": "Example process plugin. Lists the games in your library and keeps a note in its own data folder. Shell script, no network.",
+  "author": "PNR",
+  "license": "GPL-2.0",
+  "pnr_api": ">=1.0.0 <2.0.0",
+  "kinds": ["metadata"],
+  "permissions": ["library_read", "fs_write_plugin_data"],
+  "platforms": ["linux"],
+  "dependencies": {},
+  "entry": {"type": "process", "path": "bin/run.sh"}
+}
