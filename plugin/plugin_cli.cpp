@@ -3,6 +3,8 @@
 
 #include <sstream>
 
+#include "plugin/runner.hpp"
+
 namespace pnr::plugin {
 namespace {
 std::vector<std::string> split_csv(const std::string& s) {
@@ -27,7 +29,7 @@ std::string kinds_of(const Manifest& m) { std::vector<std::string> k; for (auto 
 
 int cmd_plugin(PluginManager& pm, const std::vector<std::string>& a, const std::string& grant, bool yes, bool json, std::string* out) {
   (void)yes;
-  if (a.empty()) { *out = "usage: plugin add <dir> | list | info <id> | enable <id> --grant <perms> | disable <id> | remove <id>\n"; return 2; }
+  if (a.empty()) { *out = "usage: plugin add <dir> | list | info <id> | enable <id> --grant <perms> | disable <id> | remove <id> | run <id>\n"; return 2; }
   const std::string& c = a[0];
   if (c == "add" && a.size() == 2) {
     auto r = pm.install_from_dir(a[1]);
@@ -40,7 +42,7 @@ int cmd_plugin(PluginManager& pm, const std::vector<std::string>& a, const std::
     if (r.disabled_by_update) *out += "this update asks for permissions you had not granted, so it stays disabled until you grant them\n";
     if (!r.manifest.permissions.empty()) *out += "it asks for: " + join(r.manifest.permissions, " ") + "\nto enable: plugin enable " + r.manifest.id + " --grant " + join(r.manifest.permissions, ",") + "\n";
     else *out += "to enable: plugin enable " + r.manifest.id + "\n";
-    *out += "plugins are untrusted. Nothing runs in this slice: isolated execution is not built yet.\n";
+    *out += "plugins are untrusted. Nothing runs until you enable it and run it; it then runs only in the partial sandbox.\n";
     return 0;
   }
   if (c == "list" && a.size() == 1) {
@@ -66,7 +68,7 @@ int cmd_plugin(PluginManager& pm, const std::vector<std::string>& a, const std::
       *out = m.name + " (" + m.id + " " + m.version.str() + ")\n  author: " + m.author + "\n  license: " + m.license + "\n  kinds: " + kinds_of(m) +
              "\n  state: " + (p.enabled ? "enabled" : "disabled") + "\n  permissions asked: " + (m.permissions.empty() ? "none" : join(m.permissions, " ")) +
              "\n  permissions granted: " + (p.granted.empty() ? "none" : join(p.granted, " ")) + "\n  depends on: " + (deps.empty() ? "nothing" : join(deps, ", ")) +
-             "\n  runs code: " + (m.entry_type == "process" ? "declares a host process (" + m.entry_path + "), NOT run yet" : "no (data only)") + "\n";
+             "\n  runs code: " + (m.entry_type == "process" ? "declares a host process (" + m.entry_path + "), runs only in the partial sandbox via plugin run" : "no (data only)") + "\n";
     }
     return 0;
   }
@@ -76,9 +78,18 @@ int cmd_plugin(PluginManager& pm, const std::vector<std::string>& a, const std::
     *out = "enabled " + a[1] + "\n";
     return 0;
   }
+  if (c == "run" && a.size() == 2) {
+    InstalledPlugin p;
+    if (!pm.get(a[1], &p)) { *out = "no installed plugin '" + a[1] + "'\n"; return 1; }
+    RunResult rr = run_plugin(p, pm.root());
+    if (!rr.started) { *out = "not run: " + rr.error + "\n"; return 1; }
+    for (auto& l : rr.logs) *out += "plugin log: " + l + "\n";
+    *out += std::string(rr.completed ? "result: " + rr.result : "failed: " + rr.error) + "\nbroker: " + std::to_string(rr.served) + " served, " + std::to_string(rr.denied) + " denied (sandbox is PARTIAL isolation, not a guarantee)\n";
+    return rr.completed ? 0 : 1;
+  }
   if (c == "disable" && a.size() == 2) { auto s = pm.disable(a[1]); *out = s.ok ? "disabled " + a[1] + "\n" : "not disabled: " + s.error.message + "\n"; return s.ok ? 0 : 1; }
   if (c == "remove" && a.size() == 2) { auto s = pm.remove(a[1]); *out = s.ok ? "removed " + a[1] + "\n" : "not removed: " + s.error.message + "\n"; return s.ok ? 0 : 1; }
-  *out = "usage: plugin add <dir> | list | info <id> | enable <id> --grant <perms> | disable <id> | remove <id>\n";
+  *out = "usage: plugin add <dir> | list | info <id> | enable <id> --grant <perms> | disable <id> | remove <id> | run <id>\n";
   return 2;
 }
 
