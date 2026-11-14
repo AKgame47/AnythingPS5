@@ -10,12 +10,13 @@ Blocked.
 | Host | Status |
 |---|---|
 | Linux x86-64 | Implemented and Tested. This is the only platform where PNR runs anything. |
-| Windows x86-64, build | The core cross-compiles with llvm-mingw (reported in an earlier slice; not re-run in this audit). No CI exists. Never run on real Windows hardware. |
+| Windows x86-64, build | The core cross-compiles with llvm-mingw (reported in an earlier slice; not re-run in this audit). CI (Linux only) does not build it. Never run on real Windows hardware. |
 | Windows x86-64, hardware info (`pnr hwinfo`) | Implemented through Win32, untested on real Windows. |
 | Windows x86-64, running a game (`pnr run`, `pnr-launcher launch`) | **Blocked.** PNR loads ELF files, Windows cannot execute them. The Windows backend refuses and says so. |
 | Windows sandbox | Planned, notes only (docs/sandbox.md). Nothing built. |
 | Windows PSN token file hardening | Not implemented (docs/psn.md). |
 | Windows live PSN sync, store downloads, `ask`, `manifest suggest` | Not built or tested. These are Linux only. |
+| CI (GitHub Actions) | Implemented for Linux x86-64 only: Release `-Werror` build, unit suite, CTest, plus an ASan+UBSan job. Windows is not built or run there. No packaging, no release uploads, no GPU runners. |
 | macOS | Not supported. No backend exists. |
 | ARM or other non-x86-64 hosts | Not supported. PNR does not emulate x86-64. |
 
