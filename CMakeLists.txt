@@ -37,7 +37,7 @@ target_link_libraries(pnr_loader PUBLIC pnr_core)
 add_library(pnr_shader shader/rdna.cpp shader/translate.cpp shader/loop_memory.cpp)
 target_include_directories(pnr_shader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_library(pnr_graphics graphics/vulkan.cpp graphics/render.cpp graphics/spirv.cpp)
+add_library(pnr_graphics graphics/vulkan.cpp graphics/render.cpp graphics/spirv.cpp graphics/pm4.cpp)
 target_include_directories(pnr_graphics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pnr_graphics PUBLIC pnr_core dl)
 target_link_libraries(pnr_shader PUBLIC pnr_graphics)
@@ -157,7 +157,7 @@ set_target_properties(ps_cube_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
-add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp tests/psn_sync_tests.cpp tests/store_tests.cpp tests/download_tests.cpp tests/signature_tests.cpp tests/sandbox_tests.cpp tests/scan_tests.cpp tests/research_tests.cpp tests/ask_tests.cpp tests/suggest_tests.cpp tests/ui_model_tests.cpp tests/module_tests.cpp tests/kernel_tests.cpp tests/libc_tests.cpp)
+add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp tests/psn_sync_tests.cpp tests/store_tests.cpp tests/download_tests.cpp tests/signature_tests.cpp tests/sandbox_tests.cpp tests/scan_tests.cpp tests/research_tests.cpp tests/ask_tests.cpp tests/suggest_tests.cpp tests/ui_model_tests.cpp tests/module_tests.cpp tests/kernel_tests.cpp tests/libc_tests.cpp tests/pm4_tests.cpp)
 
 # Let the tests launch the real PS-style demo binary.
 target_compile_definitions(pnr_tests PRIVATE
@@ -173,6 +173,7 @@ target_link_libraries(pnr_tests PRIVATE pnr_synth pnr_ui_model pnr_core pnr_load
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
 add_test(NAME pnr_kernel_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_kernel.elf --kernel && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_kernel.elf | grep -q \"MODULE FINISHED: exit 0\"")
 add_test(NAME pnr_libc_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_libc.elf --libc && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_libc.elf | grep -q \"C3 libc ok 42\"")
+add_test(NAME pnr_gnm_decode COMMAND sh -c "$<TARGET_FILE:pnr> gnm-synth ${CMAKE_BINARY_DIR}/synth_pm4.bin && $<TARGET_FILE:pnr> gnm-decode ${CMAKE_BINARY_DIR}/synth_pm4.bin | grep -q \"2 draws\"")
 add_test(NAME pnr_module_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_ok.elf && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_ok.elf")
 set_tests_properties(pnr_module_run PROPERTIES PASS_REGULAR_EXPRESSION "MODULE FINISHED: exit 30")
 # The CLI runs a game that renders a rotating 3D cube through pnrGfx* calls.
