@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <fstream>
 #include <filesystem>
 #include <string>
 
@@ -141,6 +142,45 @@ void pnr_ui_model_tests(int& pass, int& fail) {
     check(!ok && st.store_sources().size() == 1 && has(msg, "WOULD REMOVE"), "ui3: remove source is a dry run until confirmed");
     msg = st.store_remove_source("demo", true, &ok);
     check(ok && st.store_sources().empty() && st.store_rows("", "").empty(), "ui3: confirmed remove deletes the source and its cached index");
+  }
+  // ---- UI-4 plugins: the real PluginManager behind the settings screen
+  {
+    UiModel pm(dir + "/plug/library.db");
+    std::string e4;
+    check(pm.open(&e4) && pm.plugin_list().empty() && pm.plugin_home() == dir + "/plug", "ui4: a fresh library has no plugins; the plugin home is the library folder");
+    fs::create_directories(dir + "/fx/good"); fs::create_directories(dir + "/fx/bad");
+    { std::ofstream f(dir + "/fx/good/pnr-plugin.json"); f << R"({"id":"ui.test-catalog","name":"UI Test Catalog","version":"1.0.0","description":"data only","author":"t","license":"GPL-2.0","pnr_api":">=1.0.0 <2.0.0","kinds":["catalog"],"permissions":["fs_write_plugin_data"],"platforms":["linux"],"dependencies":{},"entry":{"type":"data"}})"; }
+    { std::ofstream f(dir + "/fx/bad/pnr-plugin.json"); f << "{not json"; }
+    auto bad = pm.plugin_install(dir + "/fx/bad");
+    check(!bad.ok && !bad.errors.empty() && pm.plugin_list().empty(), "ui4: a damaged plugin is refused with reasons and installs nothing");
+    check(!pm.plugin_install(dir + "/fx/nope").ok, "ui4: a missing folder is refused");
+    pm.plugin_require_signed = true;
+    check(!pm.plugin_install(dir + "/fx/good").ok && pm.plugin_list().empty(), "ui4: require-signed refuses an unsigned plugin");
+    pm.plugin_require_signed = false;
+    auto good = pm.plugin_install(dir + "/fx/good");
+    auto pl = pm.plugin_list();
+    check(good.ok && good.signature == "unsigned" && pl.size() == 1 && !pl[0].enabled && pl[0].granted.empty(), "ui4: install succeeds, signature unsigned, NOT enabled, nothing granted");
+    bool ok = true;
+    std::string m1 = pm.plugin_enable("ui.test-catalog", {}, &ok);
+    check(!ok && has(m1, "did not grant") && !pm.plugin_list()[0].enabled, "ui4: enabling without the declared grant is refused");
+    m1 = pm.plugin_enable("ui.test-catalog", {"fs_write_plugin_data"}, &ok);
+    pl = pm.plugin_list();
+    check(ok && pl[0].enabled && pl[0].granted.size() == 1, "ui4: enabling with the grant works and records exactly that grant");
+    std::string why;
+    pm.plugin_run("ui.test-catalog", &why);
+    check(has(why, "data plugin"), "ui4: a data plugin has nothing to run");
+    check(!pm.plugin_enable("nope", {}, &ok).empty() && !ok, "ui4: enabling an unknown plugin fails");
+    pm.plugin_disable("ui.test-catalog", &ok);
+    why.clear(); pm.plugin_run("ui.test-catalog", &why);
+    check(ok && !pm.plugin_list()[0].enabled && has(why, "not enabled"), "ui4: disable works and a disabled plugin is not run");
+    pm.plugin_pin("k", "zz", &ok);
+    check(!ok && pm.plugin_keys().empty(), "ui4: a malformed key is not pinned");
+    pm.plugin_pin("author", std::string(64, 'a'), &ok);
+    check(ok && pm.plugin_keys().size() == 1, "ui4: a well-formed key pins");
+    pm.plugin_unpin("author", &ok);
+    check(ok && pm.plugin_keys().empty(), "ui4: unpin works");
+    pm.plugin_remove("ui.test-catalog", &ok);
+    check(ok && pm.plugin_list().empty(), "ui4: remove deletes the plugin");
   }
   fs::remove_all(dir);
 }
