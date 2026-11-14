@@ -105,6 +105,9 @@ target_link_libraries(pnr_loader PUBLIC Threads::Threads pnr_platform)
 target_link_libraries(pnr_package PUBLIC pnr_library)
 
 # PSN connector (slice 1 offline core; slice 2 live sync over dlopen-ed libcurl)
+add_library(pnr_plugin plugin/semver.cpp plugin/manifest.cpp plugin/manager.cpp plugin/plugin_cli.cpp)
+target_include_directories(pnr_plugin PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pnr_plugin PUBLIC pnr_psn pnr_core)
 add_library(pnr_psn psn/json.cpp psn/psn.cpp psn/psn_cli.cpp psn/http.cpp psn/curl_http.cpp psn/sync.cpp)
 target_include_directories(pnr_psn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pnr_psn PUBLIC pnr_library pnr_core ${CMAKE_DL_LIBS})
@@ -126,7 +129,7 @@ target_include_directories(pnr_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pnr_ui_model PUBLIC pnr_launcher pnr_store pnr_sandbox Threads::Threads)
 
 add_executable(pnr-launcher apps/launcher/launcher_main.cpp)
-target_link_libraries(pnr-launcher PRIVATE pnr_launcher pnr_psn pnr_store pnr_sandbox)
+target_link_libraries(pnr-launcher PRIVATE pnr_launcher pnr_psn pnr_store pnr_sandbox pnr_plugin)
 add_executable(pnr apps/pnr_cli.cpp)
 target_link_libraries(pnr PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics pnr_shader)
 
@@ -157,7 +160,7 @@ set_target_properties(ps_cube_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
-add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp tests/psn_sync_tests.cpp tests/store_tests.cpp tests/download_tests.cpp tests/signature_tests.cpp tests/sandbox_tests.cpp tests/scan_tests.cpp tests/research_tests.cpp tests/ask_tests.cpp tests/suggest_tests.cpp tests/ui_model_tests.cpp tests/module_tests.cpp tests/kernel_tests.cpp tests/libc_tests.cpp tests/pm4_tests.cpp tests/gfx_state_tests.cpp tests/gpu_va_tests.cpp tests/gfx_draw_tests.cpp tests/hw_tests.cpp)
+add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp tests/psn_sync_tests.cpp tests/store_tests.cpp tests/download_tests.cpp tests/signature_tests.cpp tests/sandbox_tests.cpp tests/scan_tests.cpp tests/research_tests.cpp tests/ask_tests.cpp tests/suggest_tests.cpp tests/ui_model_tests.cpp tests/module_tests.cpp tests/kernel_tests.cpp tests/libc_tests.cpp tests/pm4_tests.cpp tests/gfx_state_tests.cpp tests/gpu_va_tests.cpp tests/gfx_draw_tests.cpp tests/hw_tests.cpp tests/plugin_tests.cpp)
 
 # Let the tests launch the real PS-style demo binary.
 target_compile_definitions(pnr_tests PRIVATE
@@ -168,7 +171,7 @@ target_compile_definitions(pnr_tests PRIVATE
   PNR_PS_TEX_DEMO_PATH="$<TARGET_FILE:ps_tex_demo>"
   PNR_PS_LITTEX_DEMO_PATH="$<TARGET_FILE:ps_littex_demo>"
   PNR_PSABI_DIR="$<TARGET_FILE_DIR:pnr_psabi>")
-target_link_libraries(pnr_tests PRIVATE pnr_synth pnr_ui_model pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics pnr_shader pnr_launcher pnr_psn pnr_store pnr_sandbox)
+target_link_libraries(pnr_tests PRIVATE pnr_synth pnr_ui_model pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics pnr_shader pnr_launcher pnr_psn pnr_store pnr_sandbox pnr_plugin)
 
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
 add_test(NAME pnr_kernel_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_kernel.elf --kernel && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_kernel.elf | grep -q \"MODULE FINISHED: exit 0\"")
