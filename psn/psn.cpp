@@ -35,6 +35,7 @@ const char* error_kind(int c) {
     case kErrSonyErrors: return "sony-errors";
     case kErrBadInput: return "bad-input";
     case kErrLibrary: return "library-write";
+    case kErrConsent: return "live-not-confirmed";
     default: return "unknown";
   }
 }
@@ -56,6 +57,7 @@ const char* error_advice(int c) {
     case kErrSonyErrors: return "Sony reported errors and returned no data: nothing was imported";
     case kErrBadInput: return "could not read the input file";
     case kErrLibrary: return "the local library could not be written: nothing was imported; check disk space and permissions";
+    case kErrConsent: return "nothing was sent; run on a terminal and confirm, or pass --live-ok to accept the risk";
     default: return "";
   }
 }
