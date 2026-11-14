@@ -355,6 +355,27 @@ machine define `PNR_USE_SYSTEM_SQLITE3` and use the system header.
 SUCCESS / FAILED / BLOCKED / SKIPPED markers — a BLOCKED graphics step is
 reported, never hidden.
 
+### `pnr gnm-triangle` - a synthetic GNM buffer drawn through the translator
+
+Experimental. A hand-built PM4 buffer, a GPU address map, a hand-assembled RDNA vertex kernel blob (PNR test
+format, not the PlayStation one) and one Vulkan draw. The pixel shader is NOT translated. Output captured from a
+real run (Mesa llvmpipe, a software Vulkan device):
+
+```
+SYNTHETIC GNM command buffer, 39 dwords (not from a game)
+decoded: 10 packets, 18 register writes, 1 draw
+GPU address map:
+  0x000000100000..0x000000100268 vertex stage (PNR PVS1 test blob)
+  0x000000200000..0x000000200004 pixel stage (not translated)
+  0x000000300000..0x000000300040 matrix
+  0x000000400000..0x000000400048 vertices
+  0x000000500000..0x000000540000 colour target
+device: llvmpipe (LLVM 15.0.7, 256 bits)
+draw ok: 256x256, 3 vertices, 20808 of 65536 pixels covered, copied to target memory: yes
+note: pixel shader not translated: fixed pass-through colour used; vertex shader is a PNR PVS1 test blob
+wrote /tmp/tri.png (262488 bytes)
+```
+
 ### `pnr run ./ps_demo` - the PS-style showcase
 
 `ps_demo` imports only `sceKernel*` (plus plain libc) symbols. The CLI
