@@ -2,7 +2,7 @@
 
 Status: **Implemented. Tested against synthetic fixtures, a scripted fake server and a local test server. `psn sync` against real Sony: Untested until you run it with your own token.**
 
-Only `pnr-launcher psn sync` talks to the network. Everything else is local.
+Only `pnr-launcher psn sync` talks to the network, and since slice F1 it sits behind a warning gate (below). Everything else is local, and offline `psn import-json` is never gated.
 It stores a token you paste locally, and turns either a saved "purchased
 games" response (`import-json`) or a live fetch (`sync`) into owned-on-PSN
 rows in the PNR library.
@@ -53,7 +53,7 @@ This is the same unofficial route used by trophy-tracker tools. It does not need
 pnr-launcher psn status [--json]
 pnr-launcher psn set-token [--file PATH]          (stdin by default)
 pnr-launcher psn import-json <file> [--complete] [--json]
-pnr-launcher psn sync [--complete] [--json]       (LIVE, contacts Sony)
+pnr-launcher psn sync [--complete] [--json] [--live-ok]   (LIVE, contacts Sony, warning gate)
 pnr-launcher psn owned [--platform PS4|PS5] [--json]
 pnr-launcher psn link <entitlement-id> <game-id>
 pnr-launcher psn unlink <entitlement-id>
@@ -118,9 +118,34 @@ What this is based on (limits stated plainly):
 | Owner-only token file | Implemented and tested | Not implemented (planned: ACLs) |
 | Live sync (libcurl via dlopen) | Built and tested (needs libcurl.so.4 installed) | **Not built or tested.** The loader uses `dlopen`; a Windows loader for libcurl.dll is not written |
 
+## Warning gate for live sync (slice F1)
+
+The owner chose to keep the live connection, with a gate. Before `psn sync`
+sends anything, PNR prints this warning:
+
+- the route is UNOFFICIAL, derived from community projects, not an approved Sony integration;
+- it has NEVER been tested against real Sony servers, it may fail, and it may be against Sony's terms;
+- the token is as sensitive as a password (sent only to Sony's official hosts, never printed or logged);
+- use at your own risk, and `psn import-json` is the offline alternative.
+
+Then, as implemented and unit tested with a fake client:
+
+| Situation | Result |
+|---|---|
+| Terminal (stdin and stderr are a TTY), no flag | Warning shown, you must type `yes`. Anything else cancels and nothing is sent. |
+| Not a terminal (script, pipe, CI), no flag | **Refuses**, exit 1, names `--live-ok`, nothing is sent. |
+| `--live-ok` | Skips the prompt (the warning text is still printed in text mode). You accept the risk in advance. |
+| No token stored | Fails first with the usual no-token message. |
+
+`--live-ok` is a consent flag, not a safety feature: it does not make the route
+official or tested. Only `psn sync` talks to Sony, so it is the only gated
+path. The test suite never passes `--live-ok` to the real binary, so no test
+contacts Sony. The gate is a speed bump for a person, not a security control
+against local malware that can already read your token file.
+
 ## Live sync (slice 2)
 
-`pnr-launcher psn sync [--complete]` does this, following the MIT psn-api sources:
+`pnr-launcher psn sync [--complete] --live-ok` (after the gate above) does this, following the MIT psn-api sources:
 
 1. `GET https://ca.account.sony.com/api/authz/v3/oauth/authorize?...` with your NPSSO as a `Cookie` header, redirects **not followed**. The authorization code is read from the `Location` header. No code means Sony did not accept the token (`token-rejected`).
 2. `POST .../oauth/token` to exchange the code for an access token and refresh token.
