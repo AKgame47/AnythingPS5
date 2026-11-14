@@ -1,6 +1,7 @@
 // PNR CLI - first launch driver for the master prompt's 10-step workflow.
 // Every step prints an explicit SUCCESS / FAILED / SKIPPED / BLOCKED line.
 // It never reports a game as run when only initialization succeeded.
+#include "graphics/gfx_draw.hpp"
 #include "graphics/gfx_state.hpp"
 #include "graphics/pm4.hpp"
 #include <chrono>
@@ -488,6 +489,93 @@ int cmd_gnm_synth(const std::string& out) {
   return 0;
 }
 
+namespace {
+std::uint32_t png_crc(const std::uint8_t* d, std::size_t n, std::uint32_t c = 0xffffffffu) {
+  for (std::size_t i = 0; i < n; ++i) { c ^= d[i]; for (int k = 0; k < 8; ++k) c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1u))); }
+  return c;
+}
+void png_chunk(std::vector<std::uint8_t>& o, const char* type, const std::vector<std::uint8_t>& data) {
+  auto be = [&](std::uint32_t v) { for (int i = 3; i >= 0; --i) o.push_back(std::uint8_t(v >> (8 * i))); };
+  be(static_cast<std::uint32_t>(data.size()));
+  std::vector<std::uint8_t> td(type, type + 4);
+  td.insert(td.end(), data.begin(), data.end());
+  o.insert(o.end(), td.begin(), td.end());
+  be(~png_crc(td.data(), td.size()));
+}
+// Minimal RGBA PNG using stored (uncompressed) deflate blocks. No compression, valid file.
+std::vector<std::uint8_t> encode_png(const std::vector<std::uint8_t>& rgba, std::uint32_t w, std::uint32_t h) {
+  std::vector<std::uint8_t> raw;
+  for (std::uint32_t y = 0; y < h; ++y) { raw.push_back(0); raw.insert(raw.end(), rgba.begin() + std::size_t(y) * w * 4, rgba.begin() + std::size_t(y + 1) * w * 4); }
+  std::vector<std::uint8_t> z = {0x78, 0x01};
+  for (std::size_t off = 0; off < raw.size();) {
+    std::size_t n = std::min<std::size_t>(65535, raw.size() - off);
+    z.push_back(off + n == raw.size() ? 1 : 0);
+    z.push_back(std::uint8_t(n)); z.push_back(std::uint8_t(n >> 8)); z.push_back(std::uint8_t(~n)); z.push_back(std::uint8_t((~n) >> 8));
+    z.insert(z.end(), raw.begin() + off, raw.begin() + off + n); off += n;
+  }
+  std::uint32_t a = 1, b = 0;
+  for (auto c : raw) { a = (a + c) % 65521; b = (b + a) % 65521; }
+  std::uint32_t ad = (b << 16) | a;
+  for (int i = 3; i >= 0; --i) z.push_back(std::uint8_t(ad >> (8 * i)));
+  std::vector<std::uint8_t> o = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+  std::vector<std::uint8_t> ihdr;
+  for (std::uint32_t v : {w, h}) for (int i = 3; i >= 0; --i) ihdr.push_back(std::uint8_t(v >> (8 * i)));
+  ihdr.insert(ihdr.end(), {8, 6, 0, 0, 0});
+  png_chunk(o, "IHDR", ihdr); png_chunk(o, "IDAT", z); png_chunk(o, "IEND", {});
+  return o;
+}
+}  // namespace
+
+int cmd_gnm_triangle(const std::string& out_png) {
+  namespace g = pnr::graphics;
+  namespace amd = pnr::graphics::amd;
+  using namespace pnr::graphics::pm4;
+  constexpr std::uint32_t W = 256, H = 256;
+  auto f2u = [](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); return u; };
+  g::GpuAddressSpace mem;
+  auto vs = g::make_pnr_vs_blob(3);
+  std::vector<std::uint32_t> ps = {0xbf810000}, mat(16, 0);
+  for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
+  std::vector<float> vb = {-0.8f, -0.8f, 0, 1, 0, 0,  0.8f, -0.8f, 0, 0, 1, 0,  0, 0.8f, 0, 0, 0, 1};
+  std::vector<std::uint8_t> target(W * H * 4, 0);
+  mem.map_external(0x100000, vs.data(), vs.size() * 4, "vertex stage (PNR PVS1 test blob)");
+  mem.map_external(0x200000, ps.data(), 4, "pixel stage (not translated)");
+  mem.map_external(0x300000, mat.data(), 64, "matrix");
+  mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+  mem.map_external(0x500000, target.data(), target.size(), "colour target");
+  Builder b;
+  b.set_reg(SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0}).set_reg(SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0})
+   .set_reg(SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0})
+   .set_reg(SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)})
+   .set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf)
+   .set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W)
+   .set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(3);
+  std::printf("SYNTHETIC GNM command buffer, %zu dwords (not from a game)\n", b.dwords().size());
+  const auto sum = interpret(b.dwords().data(), b.dwords().size());
+  std::printf("decoded: %zu packets, %zu register writes, %zu draw\n", sum.packets, sum.register_writes, sum.draws.size());
+  if (sum.draws.size() != 1) return 1;
+  std::printf("GPU address map:\n%s", mem.describe().c_str());
+  g::VulkanBackend vk;
+  auto st = vk.open();
+  if (st) st = vk.create_instance("pnr-gnm-triangle");
+  if (st && vk.devices().empty()) st = pnr::Status::Fail(1, "vulkan", "no Vulkan device");
+  if (st) st = vk.create_device(0);
+  if (!st) { std::printf("SKIP: %s\n", st.error.message.c_str()); return 3; }
+  std::printf("device: %s\n", vk.devices()[0].name.c_str());
+  auto r = g::execute_draw(vk, mem, sum.draws[0]);
+  if (!r.ok) { std::printf("DRAW FAILED: %s\n", r.error.c_str()); return 1; }
+  std::size_t lit = 0;
+  for (std::size_t i = 0; i < r.rgba.size(); i += 4) lit += (r.rgba[i] | r.rgba[i + 1] | r.rgba[i + 2]) != 0;
+  std::printf("draw ok: %ux%u, %u vertices, %zu of %u pixels covered, copied to target memory: %s\n", r.width, r.height, r.vertices, lit, W * H, r.wrote_target ? "yes" : "no");
+  std::printf("note: %s\n", r.notes.c_str());
+  auto png = encode_png(r.rgba, r.width, r.height);
+  std::ofstream f(out_png, std::ios::binary);
+  f.write(reinterpret_cast<const char*>(png.data()), static_cast<std::streamsize>(png.size()));
+  if (!f) { std::printf("cannot write %s\n", out_png.c_str()); return 1; }
+  std::printf("wrote %s (%zu bytes)\n", out_png.c_str(), png.size());
+  return 0;
+}
+
 int cmd_gnm_decode(const std::string& path) {
   using namespace pnr::graphics::pm4;
   std::ifstream f(path, std::ios::binary);
@@ -525,6 +613,7 @@ void usage() {
             "  pnr imports <elf>                import coverage report (NID-form imports too)\n"
             "  pnr module-run <elf>             load a PlayStation-style ELF, bind imports by NID, run it\n"
             "  pnr gnm-decode <file>            decode a raw PM4 command buffer (state and draws, no GPU)\n"
+            "  pnr gnm-triangle <out.png>       run a SYNTHETIC GNM buffer through the translator and Vulkan, write a PNG\n"
             "  pnr gnm-synth <out>              write a SYNTHETIC PM4 test buffer\n"
             "  pnr hwinfo                       print detected host hardware\n"
             "  pnr gpu                          real Vulkan device enumeration");
@@ -546,6 +635,7 @@ int main(int argc, char** argv) {
   if (argc >= 3 && std::strcmp(argv[1], "imports") == 0) return cmd_imports(argv[2]);
   if (argc >= 3 && std::strcmp(argv[1], "module-run") == 0) return cmd_module_run(argv[2]);
   if (argc >= 3 && std::strcmp(argv[1], "gnm-decode") == 0) return cmd_gnm_decode(argv[2]);
+  if (argc >= 3 && std::strcmp(argv[1], "gnm-triangle") == 0) return cmd_gnm_triangle(argv[2]);
   if (argc >= 3 && std::strcmp(argv[1], "gnm-synth") == 0) return cmd_gnm_synth(argv[2]);
   if (argc >= 2 && std::strcmp(argv[1], "games") == 0) return cmd_games();
   if (argc >= 3 && std::strcmp(argv[1], "run") == 0) {
