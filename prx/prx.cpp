@@ -232,6 +232,30 @@ PrxRegistry::PrxRegistry() {
     return loader::guest_thread_join(a[0], reinterpret_cast<std::int64_t*>(a[1]));
   }));
   symbols_.push_back(impl("libkernel", "scePthreadSelf", [](V) -> std::int64_t { return loader::guest_thread_self(); }));
+  // S1: condition variables and semaphores (registry handles; see loader/guest_runtime.hpp).
+  symbols_.push_back(impl("libkernel", "scePthreadCondInit", [](V a) -> std::int64_t {
+    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_init(reinterpret_cast<std::int64_t*>(a[0])); }));
+  symbols_.push_back(impl("libkernel", "scePthreadCondWait", [](V a) -> std::int64_t {
+    return a.size() < 2 ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_wait(*reinterpret_cast<std::int64_t*>(a[0]), reinterpret_cast<std::int64_t*>(a[1]), -1); }));
+  symbols_.push_back(impl("libkernel", "scePthreadCondTimedwait", [](V a) -> std::int64_t {
+    return a.size() < 3 ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_wait(*reinterpret_cast<std::int64_t*>(a[0]), reinterpret_cast<std::int64_t*>(a[1]), a[2]); }));
+  symbols_.push_back(impl("libkernel", "scePthreadCondSignal", [](V a) -> std::int64_t {
+    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_wake(*reinterpret_cast<std::int64_t*>(a[0]), false); }));
+  symbols_.push_back(impl("libkernel", "scePthreadCondBroadcast", [](V a) -> std::int64_t {
+    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_wake(*reinterpret_cast<std::int64_t*>(a[0]), true); }));
+  symbols_.push_back(impl("libkernel", "scePthreadCondDestroy", [](V a) -> std::int64_t {
+    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_destroy(reinterpret_cast<std::int64_t*>(a[0])); }));
+  symbols_.push_back(impl("libkernel", "sceKernelCreateSema", [](V a) -> std::int64_t {
+    return a.size() < 5 ? SCE_KERNEL_ERROR_EINVAL : loader::guest_sema_create(reinterpret_cast<std::int64_t*>(a[0]), a[3], a[4]); }));
+  symbols_.push_back(impl("libkernel", "sceKernelWaitSema", [](V a) -> std::int64_t {
+    if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
+    std::int64_t us = -1;
+    if (a[2]) us = static_cast<std::int64_t>(*reinterpret_cast<std::uint32_t*>(a[2]));
+    return loader::guest_sema_wait(a[0], a[1], us); }));
+  symbols_.push_back(impl("libkernel", "sceKernelSignalSema", [](V a) -> std::int64_t {
+    return a.size() < 2 ? SCE_KERNEL_ERROR_EINVAL : loader::guest_sema_signal(a[0], a[1]); }));
+  symbols_.push_back(impl("libkernel", "sceKernelDeleteSema", [](V a) -> std::int64_t {
+    std::int64_t h = a.empty() ? 0 : a[0]; return loader::guest_sema_destroy(&h); }));
   add_libc_abi_symbols(symbols_);  // C3
   add_hw_abi_symbols(symbols_);    // C5
   // Declared-only taxonomy entries (honest: no host implementation yet).
