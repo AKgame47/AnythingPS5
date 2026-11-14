@@ -87,19 +87,24 @@ if(NOT out MATCHES "present-loose-permissions")
 endif()
 execute_process(COMMAND chmod 600 ${WS}/lib/psn/npsso.token)
 
-# live sync: no token -> clear error and no change; with a token and no
-# reachable Sony (this environment may have none) it must fail cleanly and
-# change nothing. Real Sony behaviour is NOT tested here.
+# live sync gate (F1): with a token stored but no --live-ok and no terminal,
+# the command must refuse, name the flag, send nothing and change nothing.
+# The workflow never passes --live-ok, so it never contacts Sony; the
+# fake-client unit tests cover the live path.
 run_launcher(out rc psn sync)
-if(rc EQUAL 0 OR NOT out MATCHES "token")
-  message(FATAL_ERROR "sync with a token missing/invalid wrong: ${rc} ${out}")
+if(rc EQUAL 0 OR NOT out MATCHES "--live-ok" OR NOT out MATCHES "UNOFFICIAL" OR NOT out MATCHES "NEVER been tested")
+  message(FATAL_ERROR "sync gate wrong: ${rc} ${out}")
 endif()
 if(out MATCHES "${TOK}")
   message(FATAL_ERROR "token echoed by sync")
 endif()
+run_launcher(out rc psn sync --json)
+if(rc EQUAL 0 OR NOT out MATCHES "live-not-confirmed")
+  message(FATAL_ERROR "sync gate json wrong: ${rc} ${out}")
+endif()
 run_launcher(out rc psn status)
 if(NOT out MATCHES "owned entries: 2 ")
-  message(FATAL_ERROR "failed sync changed the library: ${out}")
+  message(FATAL_ERROR "refused sync changed the library: ${out}")
 endif()
 
 # disconnect
