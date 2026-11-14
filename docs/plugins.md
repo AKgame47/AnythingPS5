@@ -1,7 +1,7 @@
 # Plugin system (slice P1: manifests, versions, manager core)
 
 State: **plugin manager core and sandboxed execution with a permission broker are Implemented and Tested on synthetic plugins (Linux).**
-Static analysis and Ed25519 signatures are Implemented and Tested too. GitHub URL / package install (EXPERIMENTAL, offline-tested) and the hooks into the library and store are later slices.
+Static analysis, Ed25519 signatures and broker calls for library, store and download queueing are Implemented and Tested too. GitHub URL / package install is EXPERIMENTAL (offline-tested). The SDK reference is docs/plugin-sdk.md.
 Windows: plugin execution is Blocked, same as running games (the core builds, nothing runs there).
 
 ## What a plugin is
@@ -48,9 +48,9 @@ Nothing in it grants anything.
   no CPU or memory limits yet. If the sandbox is unusable the plugin is not started (no silent fallback).
 - Broker (JSON lines on stdout/stdin): `log` always; `data_put` and `data_get` need the granted `fs_write_plugin_data` (own data dir only, names
   `[A-Za-z0-9._-]`, 64 KiB values); `result` ends the session. Anything else is refused and counted. Limits: wall-clock timeout, 1 MiB output, 500 requests.
-- Library, store and download calls through the broker are Planned (slice P4). The plugin has no network (empty network namespace).
+- Library, store and download calls go through the broker only with the matching grant (P4, see docs/plugin-sdk.md). The plugin has no network (empty network namespace).
 - Windows: plugin execution is Blocked.
-- Install from a GitHub URL, local package files, automatic updates and repository analysis are Planned.
+- Automatic updates are Planned. Package-file and GitHub URL install and repository analysis exist (see below; GitHub is Experimental).
 - No code from any repository is used. The ps5-library repository is a jailbreak and piracy ecosystem payload and is
   not used. If it is ever analysed, its dump catalogs and download providers are refused.
 
