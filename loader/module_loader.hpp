@@ -10,7 +10,8 @@
 //  - relocations: RELATIVE, 64, GLOB_DAT, JUMP_SLOT. Anything else is refused.
 //  - up to 64 bound imports per process, each called with up to 6 integer arguments.
 //    No floating point arguments, no varargs beyond the 6 registers.
-//  - no TLS setup, no init/fini arrays, no dependent modules yet (later slices).
+//  - C2 added: PT_TLS setup (variant II TCB), entry(args, exit_handler), guest FS switching
+//    around host calls. Still no init/fini arrays and no dependent modules.
 #pragma once
 #include <cstdint>
 #include <memory>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "core/runtime.hpp"
+#include "loader/guest_runtime.hpp"
 #include "loader/import_resolver.hpp"
 #include "prx/prx.hpp"
 
@@ -32,6 +34,7 @@ class ModuleImage {
   std::uint8_t* base = nullptr;
   std::size_t span = 0;
   std::uint64_t entry_vaddr = 0;
+  TlsTemplate tls;
   std::vector<int> slots;  // thunk slots held by this image
   std::uint8_t* entry() const { return base + entry_vaddr; }
 };
@@ -56,7 +59,7 @@ pnr::Status resolve_imports_from_program_headers(const std::vector<std::uint8_t>
 pnr::Status load_module(const std::string& path, const pnr::prx::PrxRegistry& reg,
                         std::unique_ptr<ModuleImage>* out, ModuleLoadReport* report);
 
-// Loads, then runs the entry point `int entry(void)` in a forked child.
+// Loads, then runs the entry point `int entry(void* args, void (*exit)(void))` in a forked child.
 pnr::Status run_module(const std::string& path, const pnr::prx::PrxRegistry& reg, ModuleRunResult* result,
                        ModuleLoadReport* report);
 
