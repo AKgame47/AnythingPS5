@@ -1,4 +1,4 @@
-# Translation core (slices C1-C4e: module loading, NID binding, libkernel ABI, libc, PM4 decode, register meaning, GPU address map, first draw)
+# Translation core (slices C1-C5: module loading, NID binding, libkernel ABI, libc, PM4 decode, register meaning, GPU address map, first draw, audio, pad, save data)
 
 Destination: running real PS5 games on a PC by translating the game's calls to the host, not by
 emulating a console. This page covers the first slice of that core. It is the current state on the
@@ -26,6 +26,9 @@ road, not the end of it.
 | Register meaning and draw bindings (`graphics/amd_regs.hpp`, `graphics/gfx_state`): shader addresses, user data, viewport, color target 0, primitive type | Implemented, Tested on SYNTHETIC buffers. Per public AMD headers, unverified on PlayStation |
 | GPU virtual address map (`graphics/gpu_va`): range table to host memory, no stitching across regions, PM4 indirect-buffer resolver | Implemented, Tested on synthetic data. No page tables or coherency model |
 | Draw from tracked state to one Vulkan draw (`graphics/gfx_draw`): non-indexed triangle list, PNR test ABI, pixels read back and copied to the colour target address | Experimental, Tested on a SYNTHETIC command buffer with hand-assembled RDNA vertex kernels. Pixel shaders are NOT translated (fixed colour). No real game shader or command buffer has run. Needs a Vulkan device (tests skip without one; measured on Mesa llvmpipe, a software device) |
+| libSceAudioOut `Init`, `Open`, `Output`, `Close` (`prx/hw_abi`) | Experimental, Tested from the registry by NID. Frames are captured and handed to an optional host sink. With no sink nothing is played. No mixing, latency or timing model. Argument order and format codes come from public homebrew documentation, unverified on PlayStation |
+| libScePad `Init`, `Open`, `ReadState`, `Close` with a host input mapping (evdev style names to pad bits and 0..255 axes) | Experimental, Tested. Writes only buttons, sticks and triggers (offsets 0..9) of the guest's buffer. Button bit values and the offsets are from public homebrew documentation, unverified on PlayStation. One pad, no touchpad, motion, haptics or lightbar |
+| Save data model (`services/save_data`): named save directories in the jailed per-user, per-game area, name validation, quota, list and remove | Implemented, Tested. The PlayStation SaveData API is NOT bound (structure-heavy, layouts unverified): Planned. The jail is path routing, not a security sandbox |
 | Indexed draws, vertex fetch from real shader resource descriptors, real pixel shaders, depth, blending | Planned |
 | Windows (the loader uses mmap and fork) | Blocked |
 
@@ -89,3 +92,14 @@ makes the load fail with a message naming it, and nothing runs.
 - Source of every register meaning is still public AMD headers, unverified on PlayStation.
 - `pnr gnm-triangle <out.png>` runs that test scene end to end and writes a 256x256 PNG (stored deflate, uncompressed).
   The image is the Vulkan draw read back from the colour target memory. Needs a Vulkan device; exits 3 with SKIP without one.
+
+## Slice C5 notes (audio, pad, save data)
+- These are host models behind a few symbols, not the PlayStation services. Signatures use integer and pointer
+  arguments only. Nothing here was checked on a console.
+- Audio: `sceAudioOutOpen(user, type, index, len, freq, format)` accepts 44100 or 48000 Hz, length 1..4096 frames,
+  formats S16 and float, mono and stereo, up to 8 ports. Float samples convert to S16 and clip at full scale.
+  `sceAudioOutOutput` returns at once. A real-time clock and a host audio device are Planned.
+- Pad: host events are applied with `pad_apply_host_event`. Sticks map to 0..255 with 128 at centre.
+  Wiring a live evdev device to it is Planned.
+- Save data: names are 1..32 characters of letters, digits, dot, underscore and dash, not starting with a dot.
+  A write that would pass the directory quota is refused and leaves nothing behind.
