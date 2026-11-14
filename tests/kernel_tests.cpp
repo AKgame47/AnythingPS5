@@ -3,7 +3,11 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <thread>
+#include <vector>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -56,6 +60,54 @@ void pnr_kernel_tests(int& pass, int& fail) {
   timespec ts{};
   check(sony_clock_gettime(4, reinterpret_cast<std::int64_t>(&ts)) == 0 && (ts.tv_sec || ts.tv_nsec), "clock: reads a real monotonic time");
   check(sony_clock_gettime(99, reinterpret_cast<std::int64_t>(&ts)) != 0 && sony_clock_gettime(4, 0) != 0, "clock: bad id or null pointer is an error");
+
+  // S1: condition variables and semaphores (same entry points the PRX symbols call), driven by real host threads.
+  {
+    std::int64_t mh = 0, ch = 0, sh = 0;
+    check(guest_mutex_op(0, &mh) == 0 && guest_cond_init(&ch) == 0, "sync: mutex and condition variable are created");
+    check(guest_cond_wake(0x1234, false) < 0 && guest_cond_wait(0x1234, &mh, 10) < 0, "sync: a forged condition handle is an error, not a crash");
+    guest_mutex_op(1, &mh);
+    check(guest_cond_wait(ch, &mh, 20000) == -4, "sync: a timed condition wait with no signal times out");
+    guest_mutex_op(2, &mh);
+    std::atomic<int> ready{0}, woke{0};
+    std::vector<std::thread> th;
+    for (int i = 0; i < 4; ++i) th.emplace_back([&] {
+      guest_mutex_op(1, &mh); ++ready;
+      while (ready.load() < 100) { if (guest_cond_wait(ch, &mh, -1) != 0) break; }
+      ++woke; guest_mutex_op(2, &mh); });
+    while (true) { guest_mutex_op(1, &mh); int r = ready.load(); guest_mutex_op(2, &mh); if (r >= 4) break; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+    guest_mutex_op(1, &mh); ready = 100; guest_mutex_op(2, &mh);
+    check(guest_cond_wake(ch, true) == 0, "sync: broadcast succeeds");
+    for (auto& x : th) x.join();
+    check(woke.load() == 4, "sync: broadcast woke all 4 waiting threads");
+    check(guest_cond_destroy(&ch) == 0 && ch == 0 && guest_cond_wake(ch, false) < 0, "sync: destroyed condition handle is invalid");
+    guest_mutex_op(3, &mh);
+
+    check(guest_sema_create(&sh, 5, 3) < 0 && guest_sema_create(&sh, 0, 0) < 0 && guest_sema_create(&sh, -1, 3) < 0, "sema: invalid initial/max refused");
+    check(guest_sema_create(&sh, 1, 2) == 0, "sema: created with count 1, max 2");
+    check(guest_sema_wait(sh, 1, 0) == 0 && guest_sema_wait(sh, 1, 10000) == -4, "sema: wait takes the count, then times out at zero");
+    check(guest_sema_signal(sh, 3) == -3 && guest_sema_signal(sh, 2) == 0 && guest_sema_signal(sh, 1) == -3, "sema: signalling past the maximum is refused and leaves the count alone");
+    check(guest_sema_wait(sh, 3, 0) == -2, "sema: asking for more than the maximum is an argument error");
+    check(guest_sema_wait(sh, 2, 0) == 0, "sema: the count from the signal is consumed exactly");
+    std::atomic<std::int64_t> wr{12345};
+    std::thread w([&] { wr = guest_sema_wait(sh, 1, -1); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    check(wr.load() == 12345, "sema: a waiter really blocks until signalled");
+    guest_sema_signal(sh, 1); w.join();
+    check(wr.load() == 0, "sema: a signal releases the blocked waiter");
+    std::atomic<std::int64_t> wd{12345};
+    std::thread w2([&] { wd = guest_sema_wait(sh, 1, -1); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    std::int64_t keep = sh;
+    check(guest_sema_destroy(&sh) == 0, "sema: destroy with a waiter blocked");
+    w2.join();
+    check(wd.load() == -2 && guest_sema_signal(keep, 1) < 0, "sema: destroying wakes the waiter with an error, and the handle is dead");
+  }
+
+  { pnr::prx::PrxRegistry r2; bool all = true;
+    for (const char* n : {"scePthreadCondInit", "scePthreadCondWait", "scePthreadCondTimedwait", "scePthreadCondSignal", "scePthreadCondBroadcast", "scePthreadCondDestroy", "sceKernelCreateSema", "sceKernelWaitSema", "sceKernelSignalSema", "sceKernelDeleteSema"}) {
+      const auto* sy = r2.find_name(n); if (!sy || !sy->implemented) all = false; }
+    check(all, "sync: all 10 condition-variable and semaphore symbols are registered as implemented"); }
 
   // Entry args.
   auto args = build_entry_args({"/game/eboot.elf", "-x"});
