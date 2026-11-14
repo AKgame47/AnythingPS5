@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "launcher/launcher_core.hpp"
+#include "store/download.hpp"
+#include "store/store.hpp"
 
 namespace pnr::ui {
 
@@ -23,6 +25,21 @@ struct LaunchResult {
   bool compat_advanced = false;
   std::string summary;     // one line a person can read, same wording as the CLI
   std::string output;      // what the game printed (stdout+stderr, last 8 KiB)
+};
+
+// Store screen (slice UI-3). One row per package in a user-added source's
+// cached index. There is no default source.
+struct StoreRow {
+  std::string source, id, name, version, description, license, rights, category, kind;
+  std::string label;   // supported | experimental | unsupported (from the index kind)
+  std::string status;  // "", queued, paused, partial, verified, failed, installed
+  long long size = 0, have = 0;
+  std::string error;
+};
+struct StoreJob {
+  bool running = false, finished = false, ok = false;
+  std::string what;     // "refresh demo", "download demo/alpha"
+  std::string summary;  // the CLI's own result text
 };
 
 class UiModel {
@@ -66,6 +83,21 @@ public:
   // Dry run unless confirmed. Refreshes the list after a real removal.
   launcher::RemoveOutcome remove(const std::string& id, bool keep_saves, bool confirmed);
 
+  // Store (UI-3). Same cmd_* code as `pnr-launcher store ...`. Network work
+  // (refresh, download) runs on a worker with its own Registry; the list is
+  // reloaded when it ends. `http` overrides the real client (tests only).
+  void store_reload();
+  const std::vector<store::Source>& store_sources() const { return sources_; }
+  std::string store_add_source(const std::string& id, const std::string& url, const std::string& rights, bool* ok);
+  std::string store_remove_source(const std::string& id, bool confirmed, bool* ok);
+  std::vector<StoreRow> store_rows(const std::string& source, const std::string& query);
+  bool store_start_refresh(const std::string& source_or_empty, psn::HttpClient* http = nullptr);
+  bool store_start_get(const std::string& source, const std::string& pkg, psn::HttpClient* http = nullptr);
+  StoreJob store_job() const;
+  // Scan, then import, like `store install`. A flagged scan refuses (no override in the UI).
+  std::string store_install(const std::string& source, const std::string& pkg, bool* ok, std::string* scan_text);
+  void store_poll();
+
   // Folder scan and import, same backend calls as `scan` and `import`.
   Status scan(const std::string& dir, launcher::ScanReport* out);
   launcher::ImportOutcome import_package(const std::string& path);
@@ -80,6 +112,12 @@ private:
   LaunchResult last_;
   std::thread th_;
   bool worker_done_ = false;
+  std::vector<store::Source> sources_;
+  mutable std::mutex smu_;
+  StoreJob sjob_;
+  std::thread sth_;
+  bool sworker_done_ = false;
+  std::string store_dir() const;
 };
 
 }  // namespace pnr::ui
