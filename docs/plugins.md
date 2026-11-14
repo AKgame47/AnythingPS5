@@ -1,7 +1,7 @@
 # Plugin system (slice P1: manifests, versions, manager core)
 
 State: **plugin manager core and sandboxed execution with a permission broker are Implemented and Tested on synthetic plugins (Linux).**
-Static analysis and Ed25519 signatures are Implemented and Tested too. GitHub URL / package install and the hooks into the library and store are later slices.
+Static analysis and Ed25519 signatures are Implemented and Tested too. GitHub URL / package install (EXPERIMENTAL, offline-tested) and the hooks into the library and store are later slices.
 Windows: plugin execution is Blocked, same as running games (the core builds, nothing runs there).
 
 ## What a plugin is
@@ -63,4 +63,13 @@ Nothing in it grants anything.
   removed file breaks it. `plugin sign <dir>` reads the seed from the file named by `PNR_PLUGIN_SEED_FILE` (never from the command line).
 - `plugin trust add <name> <pubkey-hex> | list | remove <name>` pins keys (`plugins/trusted_keys.json`). A valid signature from an
   unpinned key proves nothing and is shown as "untrusted". `--require-signed` installs only plugins signed by a pinned key.
-- Still Planned (P3b): install from a GitHub URL or a package file, automatic updates.
+- Still Planned: automatic updates.
+
+## Install from a package file or a GitHub URL (P3b)
+- `plugin add <file.tar|file.tar.gz|file.tgz>`: unpacked in memory (own inflate + ustar/pax reader, no zlib). Limits: 2000 files, 64 MiB unpacked.
+  Refused: symlinks, hard links, devices, `..`, absolute paths, backslashes, duplicate paths, bad checksums. One top-level folder is stripped.
+  Hidden files (`.git`, `.github`, `.gitignore`) are dropped, never installed. Then the normal analysis and signature checks run.
+- `plugin add https://github.com/<owner>/<repo>[/tree/<ref>]` maps to `https://codeload.github.com/<owner>/<repo>/tar.gz/<ref>` (ref `HEAD`
+  when omitted, unverified against GitHub), through a guard that allows only that host over https, with a 32 MiB cap. It needs `--live-ok`.
+  **EXPERIMENTAL:** tested offline with a fake HTTP client; the live fetch has not been run.
+- A repository is untrusted like any plugin. A repo that looks like a download provider or exploit payload is refused by the analysis.
