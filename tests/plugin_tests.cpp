@@ -133,4 +133,5 @@ void pnr_plugin_tests(int& pass, int& fail) {
   pm.enable("demo.base", {"fs_write_plugin_data", "library_read"});
   check(again.get("demo.base", &ip) && ip.enabled && again.enabled_of_kind(Kind::Catalog).size() == 1 && again.enabled_of_kind(Kind::Installer).empty(), "manager: state persists and enabled_of_kind filters");
   fs::remove_all(root);
+  // end of pnr_plugin_tests
            }
