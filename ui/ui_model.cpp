@@ -180,6 +180,46 @@ void UiModel::wait_idle() {
   if (th_.joinable()) th_.join();
 }
 
+bool UiModel::game(const std::string& id, launcher::GameEntry* out) { return opened_ && core_.get(id, out); }
+
+std::vector<library::LaunchRow> UiModel::history(const std::string& id, int limit) {
+  std::vector<library::LaunchRow> rows;
+  if (opened_) core_.history(id, limit, &rows);
+  return rows;
+}
+
+Status UiModel::set_compat(const std::string& id, const std::string& state, const std::string& note) {
+  if (!opened_) return Status::Fail(2, "ui", "library is not open");
+  if (launching()) return Status::Fail(2, "ui", "a launch is running; try again when it finishes");
+  auto st = core_.set_compat(id, state, note);
+  if (st.ok) refresh();
+  return st;
+}
+
+launcher::VerifyOutcome UiModel::verify(const std::string& id) {
+  launcher::VerifyOutcome o;
+  if (!opened_ || launching()) { o.problems.push_back(opened_ ? "a launch is running; try again when it finishes" : "library is not open"); return o; }
+  o = core_.verify(id);
+  refresh();
+  return o;
+}
+
+launcher::SavesOutcome UiModel::export_saves(const std::string& id, const std::string& out_path) {
+  if (!opened_) { launcher::SavesOutcome o; o.error = "library is not open"; return o; }
+  return core_.export_saves(id, out_path);
+}
+
+launcher::RemoveOutcome UiModel::remove(const std::string& id, bool keep_saves, bool confirmed) {
+  if (!opened_ || launching()) {
+    launcher::RemoveOutcome o;
+    o.error = opened_ ? "a launch is running; try again when it finishes" : "library is not open";
+    return o;
+  }
+  auto o = core_.remove(id, keep_saves, confirmed);
+  if (o.removed) refresh();
+  return o;
+}
+
 Status UiModel::scan(const std::string& dir, launcher::ScanReport* out) { return core_.scan(dir, out); }
 
 launcher::ImportOutcome UiModel::import_package(const std::string& path) {
