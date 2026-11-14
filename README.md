@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2521/2521 unit tests, 22/22 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2430 unit checks without it; the
+Test state: **2544/2544 unit tests, 22/22 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2453 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -209,12 +209,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2521/2521 unit tests pass (2430 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
+**2544/2544 unit tests pass (2453 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2521/2521
+not re-run for these counts). ASan+UBSan: 2544/2544
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -433,6 +433,36 @@ broker: 3 served, 1 denied (sandbox is PARTIAL isolation, not a guarantee)
 $ pnr-launcher plugin disable example.echo
 $ pnr-launcher plugin run example.echo
 not run: plugin is not enabled
+```
+
+### `pnr-launcher plugin` analysis, signing and pinned keys (slice P3a)
+
+Before anything is installed, PNR reads the plugin (it never runs it) and refuses Sony SELF containers, FreeBSD-ABI
+console ELFs, `.self/.sprx/.pup` files, download providers pointing at file-locker or torrent hosts, dump catalogs of
+game packages with links, and jailbreak/exploit payload loaders. These are HEURISTICS (names, magic bytes, text); a
+clean result is not a safety guarantee. Signatures are Ed25519 over every file; a key counts only after you pin it.
+GitHub URL and package-file install are not built yet (P3b). Output captured from a real run on synthetic plugins:
+
+```
+$ pnr-launcher plugin add bad   # a "download provider" pointing at a file locker
+plugin not installed:
+  - refused by analysis (PNR does not install download providers for copyrighted games, jailbreak payloads or console binaries):
+  - 'catalog.json' points at a file-locker or torrent host (mediafire.com): download providers for copyrighted games are refused
+[exit 1]
+$ PNR_PLUGIN_SEED_FILE=seed.txt pnr-launcher plugin sign good
+signed good
+public key (give this to people who should pin it): d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737
+$ pnr-launcher plugin add good   # key not pinned yet
+installed example.covers 1.0.0 (disabled)
+signature: untrusted: signed by a key you have not pinned
+$ pnr-launcher plugin trust add alice <pubkey>
+pinned key alice
+$ pnr-launcher plugin add good   # key pinned
+installed example.covers 1.0.0 (disabled)
+signature: valid, pinned key 'alice'
+$ pnr-launcher plugin add good   # a file changed after signing
+plugin not installed:
+  - signature check failed: signature does not match the files (changed, added or removed since signing)
 ```
 
 ### `pnr run ./ps_demo` - the PS-style showcase
