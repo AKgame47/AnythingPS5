@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2308/2308 unit tests, 19/19 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2217 unit checks without it; the
+Test state: **2334/2334 unit tests, 20/20 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2243 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -209,12 +209,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2308/2308 unit tests pass (2217 without `spirv-val`), 19/19 CTest suites pass** (unit, end-to-end native
+**2334/2334 unit tests pass (2243 without `spirv-val`), 20/20 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2308/2308
+not re-run for these counts). ASan+UBSan: 2334/2334
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
