@@ -17,6 +17,12 @@
 #include "loader/sony_symbols.hpp"
 
 namespace pnr::loader {
+extern "C" __attribute__((noreturn, optimize("no-stack-protector"))) void pnr_guest_exit() {
+  long r = 231;  // exit_group(0): no TLS needed, safe with the guest FS base
+  __asm__ volatile("syscall" : "+a"(r) : "D"(0) : "rcx", "r11", "memory");
+  for (;;) {}
+}
+
 namespace {
 
 using Bytes = std::vector<std::uint8_t>;
@@ -31,8 +37,12 @@ struct SlotTable {
 SlotTable& slots() { static SlotTable t; return t; }
 
 template <int I>
-std::int64_t thunk(std::int64_t a, std::int64_t b, std::int64_t c, std::int64_t d, std::int64_t e, std::int64_t f) {
-  return slots().fn[I](std::vector<std::int64_t>{a, b, c, d, e, f});
+__attribute__((optimize("no-stack-protector"))) std::int64_t thunk(std::int64_t a, std::int64_t b, std::int64_t c, std::int64_t d, std::int64_t e, std::int64_t f) {
+  // Guest code runs with its own FS base (TLS/TCB). Host code needs the host FS, so switch for the call.
+  const std::uint64_t g = pnr::loader::guest_to_host();
+  const std::int64_t r = slots().fn[I](std::vector<std::int64_t>{a, b, c, d, e, f});
+  pnr::loader::host_to_guest(g);
+  return r;
 }
 using ThunkPtr = std::int64_t (*)(std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t);
 template <int... I>
@@ -69,6 +79,8 @@ struct Dyn {
   std::uint64_t symtab = 0, strtab = 0, strsz = 0, rela = 0, relasz = 0, jmprel = 0, pltrelsz = 0;
   std::vector<std::string> needed_offsets_unused;
   std::vector<std::uint64_t> needed;  // DT_NEEDED string offsets
+  bool has_tls = false;
+  std::uint64_t tls_vaddr = 0, tls_filesz = 0, tls_memsz = 0, tls_align = 1;
 };
 
 // File offset of a virtual address range inside a PT_LOAD's file-backed bytes, or -1.
@@ -98,6 +110,10 @@ pnr::Status parse_dyn(const Bytes& b, Dyn* d) {
       if (!in(b, s.off, s.filesz)) return fail(26, "PT_LOAD file range out of bounds");
       if (s.filesz > s.memsz) return fail(27, "PT_LOAD filesz larger than memsz");
       d->loads.push_back(s);
+    } else if (s.type == 7) {
+      if (s.filesz > s.memsz || s.memsz > (1u << 24)) return fail(30, "PT_TLS sizes are unreasonable");
+      d->has_tls = true; d->tls_vaddr = s.vaddr; d->tls_filesz = s.filesz; d->tls_memsz = s.memsz;
+      d->tls_align = u64(b, o + 48);
     } else if (s.type == 2) {
       if (!in(b, s.off, s.filesz)) return fail(28, "PT_DYNAMIC out of bounds");
       d->has_dyn = true; d->dyn_off = s.off; d->dyn_size = s.filesz;
@@ -281,6 +297,10 @@ pnr::Status load_module(const std::string& path, const pnr::prx::PrxRegistry& re
   for (std::size_t i = 0; i < prot.size(); ++i)
     if (::mprotect(static_cast<std::uint8_t*>(m) + i * page, page, prot[i] ? prot[i] : PROT_NONE) != 0) return fail(52, "mprotect failed");
   img->entry_vaddr = d.entry - start;
+  if (d.has_tls) {
+    if (!in_img(d.tls_vaddr, d.tls_memsz)) return fail(53, "PT_TLS outside the image");
+    img->tls.init = at(d.tls_vaddr); img->tls.filesz = d.tls_filesz; img->tls.memsz = d.tls_memsz; img->tls.align = d.tls_align ? d.tls_align : 1;
+  }
   *out = std::move(img);
   return pnr::Status::Ok();
 }
@@ -295,9 +315,13 @@ pnr::Status run_module(const std::string& path, const pnr::prx::PrxRegistry& reg
   const pid_t pid = ::fork();
   if (pid < 0) return pnr::Status::Fail(60, "module", "fork failed");
   if (pid == 0) {
-    const int rc = reinterpret_cast<int (*)()>(img->entry())();
+    // PlayStation-style entry: entry(args_block, exit_handler). The result is the process status.
+    auto args = pnr::loader::build_entry_args({path});
+    using EntryFn = std::int64_t (*)(void*, void*);
+    const std::int64_t rc = pnr::loader::run_guest_main(img->tls, reinterpret_cast<EntryFn>(img->entry()), args.data(),
+                                                        reinterpret_cast<void*>(&pnr_guest_exit));
     std::fflush(stdout);
-    ::_exit(rc & 0xff);
+    ::_exit(static_cast<int>(rc) & 0xff);
   }
   result->started = true;
   int ws = 0;
