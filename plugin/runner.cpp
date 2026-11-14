@@ -131,8 +131,18 @@ RunResult run_plugin(const InstalledPlugin& p, const std::string& home, const Ru
           std::stringstream ss; ss << in.rdbuf();
           ++r.served; reply("{\"ok\":true,\"value\":" + jstr(ss.str().substr(0, 65536)) + "}\n");
         }
+      } else if (call == "library_list" || call == "store_add_source" || call == "download_request") {
+        const char* need = call == "library_list" ? "library_read" : call == "store_add_source" ? "store_add_source" : "download_request";
+        if (!granted(p, need)) { ++r.denied; reply(err_reply(std::string("permission ") + need + " was not granted")); continue; }
+        if (!opt.host) { ++r.denied; reply(err_reply("not available: no library or store is connected to this run")); continue; }
+        std::string e2, js;
+        bool ok = call == "library_list" ? opt.host->library_list(&js, &e2)
+                : call == "store_add_source" ? opt.host->store_add_source(sval("id"), sval("url"), sval("rights").substr(0, 500), &e2)
+                : opt.host->download_request(sval("source"), sval("pkg"), &e2);
+        if (!ok) { ++r.denied; reply(err_reply(e2.empty() ? "refused" : e2.substr(0, 300))); continue; }
+        ++r.served; reply(call == "library_list" ? "{\"ok\":true,\"value\":" + jstr(js.substr(0, 65536)) + "}\n" : "{\"ok\":true}\n");
       } else {
-        ++r.denied; reply(err_reply("unknown call or not available in this release: " + call.substr(0, 40)));
+        ++r.denied; reply(err_reply("unknown call: " + call.substr(0, 40)));
       }
     }
   }
