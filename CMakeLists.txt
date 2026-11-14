@@ -126,7 +126,7 @@ target_link_libraries(pnr_launcher PUBLIC pnr_library pnr_loader pnr_core pnr_pa
 # Desktop UI model (no GUI code; testable without a display)
 add_library(pnr_ui_model ui/ui_model.cpp)
 target_include_directories(pnr_ui_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(pnr_ui_model PUBLIC pnr_launcher pnr_store pnr_sandbox Threads::Threads)
+target_link_libraries(pnr_ui_model PUBLIC pnr_launcher pnr_store pnr_plugin pnr_sandbox Threads::Threads)
 
 add_executable(pnr-launcher apps/launcher/launcher_main.cpp)
 target_link_libraries(pnr-launcher PRIVATE pnr_launcher pnr_psn pnr_store pnr_sandbox pnr_plugin)
