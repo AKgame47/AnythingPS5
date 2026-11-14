@@ -3,6 +3,10 @@
 Native Linux window app (C++, SDL2 + Dear ImGui). Optional build: `-DPNR_BUILD_UI=ON`
 (needs `libsdl2-dev`; Dear ImGui v1.93.0, MIT, is fetched pinned by SHA256, not vendored).
 
+Destination: the desktop app is the front door for the project goal of running real PS5
+games on a PC by translation. Today it launches developer-built x86-64 packages only; that is
+the current state on the road, not a limit of the goal. No decryption, no DRM bypass.
+
 ## Status
 | Item | State |
 |---|---|
