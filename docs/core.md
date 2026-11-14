@@ -1,4 +1,4 @@
-# Translation core (slices C1-C3: module loading, NID binding, libkernel ABI, libc)
+# Translation core (slices C1-C4a: module loading, NID binding, libkernel ABI, libc, PM4 decode)
 
 Destination: running real PS5 games on a PC by translating the game's calls to the host, not by
 emulating a console. This page covers the first slice of that core. It is the current state on the
@@ -22,7 +22,8 @@ road, not the end of it.
 | C-style formatter: flags `-` and `0`, width, length h hh l ll z j t, conversions d i u x X o c s p | Implemented, Tested. Floating point formats are NOT supported and print literally |
 | libSceSysmodule `LoadModule`, `IsLoaded`, `UnloadModule` | Experimental stubs: ids are recorded, nothing is loaded, id values unverified |
 | Libc imports beyond this subset, floating point arguments, qsort and other callbacks into guest code | Planned |
-| GPU command translation for games | Planned (slice C4) |
+| PM4 command buffer decode and register-state tracking: packet types 0, 2, 3, SET_*_REG windows, draw and dispatch capture with the register state at each draw, indirect buffers through an address resolver, `pnr gnm-decode <file>` (`graphics/pm4`) | Implemented, Tested on SYNTHETIC buffers only. Opcode numbers, header layout and register windows verified against the public Linux kernel header soc15d.h. Draw packet body layouts are from public driver usage and NOT verified on a PlayStation |
+| Shader binding from registers, vertex and index fetch, Vulkan draw submission | Planned (slice C4b onward). No GPU work is done by PM4 decode |
 | Windows (the loader uses mmap and fork) | Blocked |
 
 ## What it proves
@@ -55,3 +56,10 @@ makes the load fail with a message naming it, and nothing runs.
 - `%d` without `l` now has C semantics (32-bit), so a negative int passed in a register prints correctly.
 - These functions trust the guest's pointers like a real libc. A bad pointer crashes the guest child, not the launcher.
 - `sprintf` is capped at 4096 bytes. `rand` is PNR's own generator, not Sony's.
+
+## Slice C4a notes (PM4 decode)
+- PM4 is the AMD packet format. This slice only decodes packets and tracks registers; it submits nothing to Vulkan.
+- Unknown opcodes are counted and printed as UNHANDLED. Register numbers are not given meaning unless verified
+  against a public source. A write that runs past its register window is stopped and reported.
+- Indirect buffers hold GPU addresses. Without a resolver they are counted and reported as not followed.
+- `pnr gnm-synth OUT` writes a SYNTHETIC test buffer. No real game command buffer has been decoded.
