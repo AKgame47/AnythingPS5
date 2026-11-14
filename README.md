@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2569/2569 unit tests, 22/22 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2478 unit checks without it; the
+Test state: **2583/2583 unit tests, 22/22 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2492 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -209,12 +209,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2569/2569 unit tests pass (2478 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
+**2583/2583 unit tests pass (2492 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2569/2569
+not re-run for these counts). ASan+UBSan: 2583/2583
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -489,6 +489,32 @@ $ pnr-launcher plugin add https://example.org/x/y
 plugin not installed:
   - only https://github.com/<owner>/<repo> URLs are accepted
 [exit 1]
+```
+
+### Plugin SDK, broker calls and the example plugin (slice P4)
+
+A running plugin can call the library, the store and the download queue only through the permission broker, and only with the
+grants you gave it: `library_list` needs `library_read`, `store_add_source` needs `store_add_source` (the rights text is stored as
+"declared by plugin ..., not verified"), `download_request` needs `download_request` and only QUEUES a package from an existing
+source (it never downloads or installs; unsupported kinds are refused). No grant, no call. SDK reference: `docs/plugin-sdk.md`.
+Example: `examples/plugins/hello-process`. Output captured from a real run against an empty library:
+
+```
+$ pnr-launcher plugin add examples/plugins/hello-process
+installed example.hello-process 1.0.0 (disabled)
+it asks for: library_read fs_write_plugin_data
+to enable: plugin enable example.hello-process --grant library_read,fs_write_plugin_data
+signature: unsigned
+$ pnr-launcher plugin enable example.hello-process --grant library_read,fs_write_plugin_data
+enabled example.hello-process
+$ pnr-launcher plugin run example.hello-process
+plugin log: hello-process starting
+result: library has 0 game(s)
+broker: 4 served, 0 denied (sandbox is PARTIAL isolation, not a guarantee)
+$ pnr-launcher plugin disable example.hello-process; enable with only library_read -> refused
+disabled example.hello-process
+not enabled: this plugin asks for permissions you did not grant: fs_write_plugin_data
+to grant them: plugin enable example.hello-process --grant library_read,fs_write_plugin_data
 ```
 
 ### `pnr run ./ps_demo` - the PS-style showcase
