@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "plugin/fetch.hpp"
+#include "plugin/host.hpp"
 #include "plugin/runner.hpp"
 
 namespace pnr::plugin {
@@ -110,7 +111,10 @@ int cmd_plugin(PluginManager& pm, const std::vector<std::string>& a, const std::
   if (c == "run" && a.size() == 2) {
     InstalledPlugin p;
     if (!pm.get(a[1], &p)) { *out = "no installed plugin '" + a[1] + "'\n"; return 1; }
-    RunResult rr = run_plugin(p, pm.root());
+    const char* dbe = std::getenv("PNR_LIBRARY_DB");
+    LiveBrokerHost host(dbe ? dbe : "./pnr_data/library.db", p.manifest.id);
+    RunOptions ro; ro.host = &host;
+    RunResult rr = run_plugin(p, pm.root(), ro);
     if (!rr.started) { *out = "not run: " + rr.error + "\n"; return 1; }
     for (auto& l : rr.logs) *out += "plugin log: " + l + "\n";
     *out += std::string(rr.completed ? "result: " + rr.result : "failed: " + rr.error) + "\nbroker: " + std::to_string(rr.served) + " served, " + std::to_string(rr.denied) + " denied (sandbox is PARTIAL isolation, not a guarantee)\n";
