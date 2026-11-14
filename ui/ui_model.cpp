@@ -9,6 +9,8 @@
 #include <cstdlib>
 
 #include "launcher/launch_guard.hpp"
+#include "scan/scan.hpp"
+#include "store/store_cli.hpp"
 
 namespace pnr::ui {
 namespace {
@@ -63,13 +65,14 @@ private:
 }  // namespace
 
 UiModel::UiModel(std::string db_path) : db_path_(std::move(db_path)) {}
-UiModel::~UiModel() { wait_idle(); core_.close(); }
+UiModel::~UiModel() { wait_idle(); if (sth_.joinable()) sth_.join(); core_.close(); }
 
 bool UiModel::open(std::string* error) {
   auto st = core_.open(db_path_);
   if (!st) { if (error) *error = st.error.message; return false; }
   opened_ = true;
   refresh();
+  store_reload();
   return true;
 }
 
@@ -177,6 +180,7 @@ void UiModel::poll() {
 }
 
 void UiModel::wait_idle() {
+  if (sth_.joinable()) sth_.join();
   if (th_.joinable()) th_.join();
 }
 
@@ -226,6 +230,139 @@ launcher::ImportOutcome UiModel::import_package(const std::string& path) {
   auto o = core_.import_package(path);
   if (o.ok) refresh();
   return o;
+}
+
+std::string UiModel::store_dir() const { return store::store_dir_for(db_path_); }
+
+void UiModel::store_reload() {
+  store::Registry reg(store_dir());
+  sources_.clear();
+  if (reg.load().ok) sources_ = reg.sources();
+}
+
+std::string UiModel::store_add_source(const std::string& id, const std::string& url, const std::string& rights, bool* ok) {
+  store::Registry reg(store_dir());
+  std::string out;
+  auto ls = reg.load();
+  if (!ls.ok) { if (ok) *ok = false; return "store error: " + ls.error.message; }
+  int rc = store::cmd_source_add(reg, id, url, rights, false, &out);
+  if (ok) *ok = rc == 0;
+  store_reload();
+  return out;
+}
+
+std::string UiModel::store_remove_source(const std::string& id, bool confirmed, bool* ok) {
+  store::Registry reg(store_dir());
+  std::string out;
+  auto ls = reg.load();
+  if (!ls.ok) { if (ok) *ok = false; return "store error: " + ls.error.message; }
+  int rc = store::cmd_source_remove(reg, id, confirmed, false, &out);
+  if (ok) *ok = rc == 0;
+  store_reload();
+  return out;
+}
+
+std::vector<StoreRow> UiModel::store_rows(const std::string& source, const std::string& query) {
+  std::vector<StoreRow> rows;
+  store::Registry reg(store_dir());
+  if (!reg.load().ok) return rows;
+  store::Queue q(reg, reg.dir());
+  std::vector<store::DlState> dl;
+  q.list(&dl);
+  const std::string qq = lower(query);
+  for (const auto& s : reg.sources()) {
+    if (!source.empty() && s.id != source) continue;
+    store::Index ix;
+    if (!reg.load_index(s.id, &ix).ok) continue;
+    for (const auto& p : ix.packages) {
+      if (!qq.empty() && lower(p.name).find(qq) == std::string::npos && lower(p.id).find(qq) == std::string::npos &&
+          lower(p.description).find(qq) == std::string::npos && lower(p.category).find(qq) == std::string::npos) continue;
+      StoreRow r;
+      r.source = s.id; r.id = p.id; r.name = p.name; r.version = p.version; r.description = p.description;
+      r.license = p.license; r.rights = p.rights.empty() ? ix.rights : p.rights; r.category = p.category; r.kind = p.kind;
+      r.label = store::label_for(p); r.size = p.size;
+      for (const auto& d : dl) if (d.source == s.id && d.pkg == p.id) { r.status = d.status; r.have = d.have; r.error = d.error; }
+      rows.push_back(r);
+    }
+  }
+  return rows;
+}
+
+StoreJob UiModel::store_job() const { std::lock_guard<std::mutex> l(smu_); return sjob_; }
+
+bool UiModel::store_start_refresh(const std::string& source, psn::HttpClient* http) {
+  { std::lock_guard<std::mutex> l(smu_); if (sjob_.running) return false; }
+  if (sth_.joinable()) sth_.join();
+  {
+    std::lock_guard<std::mutex> l(smu_);
+    sjob_ = StoreJob{}; sjob_.running = true; sjob_.what = "refresh " + (source.empty() ? std::string("all sources") : source);
+    sjob_.summary = "contacting the source...";
+    sworker_done_ = false;
+  }
+  const std::string dir = store_dir();
+  sth_ = std::thread([this, dir, source, http] {
+    store::Registry reg(dir);
+    std::string out; int rc = 1;
+    if (reg.load().ok) rc = store::cmd_refresh(reg, source, false, &out, http);
+    std::lock_guard<std::mutex> l(smu_);
+    sjob_.running = false; sjob_.finished = true; sjob_.ok = rc == 0; sjob_.summary = out; sworker_done_ = true;
+  });
+  return true;
+}
+
+bool UiModel::store_start_get(const std::string& source, const std::string& pkg, psn::HttpClient* http) {
+  { std::lock_guard<std::mutex> l(smu_); if (sjob_.running) return false; }
+  if (sth_.joinable()) sth_.join();
+  {
+    std::lock_guard<std::mutex> l(smu_);
+    sjob_ = StoreJob{}; sjob_.running = true; sjob_.what = "download " + source + "/" + pkg;
+    sjob_.summary = "downloading...";
+    sworker_done_ = false;
+  }
+  const std::string dir = store_dir();
+  sth_ = std::thread([this, dir, source, pkg, http] {
+    store::Registry reg(dir);
+    std::string out; int rc = 1;
+    if (reg.load().ok) {
+      store::Queue q(reg, reg.dir());
+      std::string o1;
+      rc = store::cmd_get(q, source, pkg, false, &o1);
+      out = o1;
+      if (rc == 0) { std::string o2; rc = store::cmd_queue_run(q, source, pkg, false, &o2, http); out += o2; }
+    }
+    std::lock_guard<std::mutex> l(smu_);
+    sjob_.running = false; sjob_.finished = true; sjob_.ok = rc == 0; sjob_.summary = out; sworker_done_ = true;
+  });
+  return true;
+}
+
+void UiModel::store_poll() {
+  bool done;
+  { std::lock_guard<std::mutex> l(smu_); done = sworker_done_; sworker_done_ = false; }
+  if (done) { if (sth_.joinable()) sth_.join(); store_reload(); }
+}
+
+std::string UiModel::store_install(const std::string& source, const std::string& pkg, bool* ok, std::string* scan_text) {
+  if (ok) *ok = false;
+  if (!opened_ || launching()) return "a launch is running; try again when it finishes";
+  store::Registry reg(store_dir());
+  auto ls = reg.load();
+  if (!ls.ok) return "store error: " + ls.error.message;
+  store::Queue q(reg, reg.dir());
+  std::string path, sha;
+  auto ps = q.prepare_install(source, pkg, &path, &sha);
+  if (!ps.ok) return "store error: " + ps.error.message;
+  store::Package spk;
+  { store::Index sx; if (reg.load_index(source, &sx).ok) for (auto& k : sx.packages) if (k.id == pkg) spk = k; }
+  auto rep = scan::scan_package(path, sha, spk.size, scan::config_from_env());
+  if (scan_text) *scan_text = rep.text();
+  if (rep.flagged()) return "Install refused: a scan stage flagged this package. A clean scan never proves safety either.";
+  auto o = core_.import_package(path);
+  if (!o.ok) return "Import failed: " + o.error;
+  q.mark_installed(source, pkg, o.game_id);
+  refresh();
+  if (ok) *ok = true;
+  return "Installed " + o.title + " " + o.version + " from source '" + source + "' (sha256 checked against the source's index; the importer then ran its own checks). New games start as Untested.";
 }
 
 }  // namespace pnr::ui
