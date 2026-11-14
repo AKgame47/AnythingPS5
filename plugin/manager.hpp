@@ -33,6 +33,7 @@ class PluginManager {
  public:
   // root holds <root>/plugins/<id>/ and <root>/plugins/state.json.
   explicit PluginManager(std::string root);
+  const std::string& root() const { return root_; }
 
   InstallResult install_from_dir(const std::string& src_dir);
   // grant must contain every permission in the manifest (names exactly as declared).
