@@ -37,6 +37,7 @@ enum : int {
   kErrSonyErrors = 222,     // response carried a GraphQL errors array and no data
   kErrBadInput = 223,       // file unreadable, too large
   kErrLibrary = 224,        // the local library database could not be written
+  kErrConsent = 225,        // live sync not confirmed (F1 warning gate); nothing was sent
 };
 
 // Short stable name for a code, e.g. "token-rejected".
