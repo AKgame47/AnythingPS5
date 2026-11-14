@@ -1,4 +1,4 @@
-# Translation core (slice C1: Sony-style module loading and NID binding)
+# Translation core (slices C1-C2: Sony-style module loading, NID binding, libkernel ABI)
 
 Destination: running real PS5 games on a PC by translating the game's calls to the host, not by
 emulating a console. This page covers the first slice of that core. It is the current state on the
@@ -13,7 +13,12 @@ road, not the end of it.
 | Run a loaded module's entry in a forked child (`pnr module-run <elf>`) | Implemented, Tested on synthetic modules only |
 | Refuse a SELF container with a clear message | Implemented, Tested |
 | Real PlayStation executables | Untested: no real file has been loaded |
-| TLS setup, init/fini arrays, dependent modules, libkernel ABI details | Planned (slices C2 and C3) |
+| TLS and TCB: PT_TLS image copied per thread, x86-64 variant II layout, FS base set for guest code and switched back to the host base around every host call (`loader/guest_runtime`) | Implemented, Tested on synthetic modules only |
+| Entry parameters: `entry(args, exit_handler)`, args block with argc, argv, no envp | Implemented, Tested (PNR's own convention for the args block, not verified against a console) |
+| Sony protection and mmap flag translation, `mmap` (anonymous only), clock id translation and `sceKernelClockGettime` | Implemented, Tested. Only SHARED, PRIVATE, FIXED and ANON are FreeBSD-standard values. NO_OVERWRITE, NOCORE, NO_COALESCE, GPU bits and clock ids come from public homebrew knowledge, not verified on a console. Unknown bits are refused |
+| Guest threads and mutexes: `scePthreadCreate`, `scePthreadJoin`, `scePthreadSelf`, `scePthreadMutex{Init,Lock,Unlock,Destroy}` | Implemented, Tested (32 threads at once; no condition variables, rwlocks, TLS keys or thread attributes yet) |
+| Init/fini arrays, dependent modules | Planned |
+| libc and system-module imports beyond the small subset | Planned (slice C3) |
 | GPU command translation for games | Planned (slice C4) |
 | Windows (the loader uses mmap and fork) | Blocked |
 
@@ -30,3 +35,13 @@ makes the load fail with a message naming it, and nothing runs.
   No floating point arguments and no varargs beyond the six registers.
 - Imports are only mapped in the launcher process. Execution happens in a forked child.
 - The set of implemented system functions is small. `pnr imports` shows exactly what a given ELF still needs.
+
+## Slice C2 notes
+- The synthetic kernel module (`pnr_make_ps_elf OUT.elf --kernel`) is hand-assembled machine code. It checks
+  argc, the TCB self pointer, initialised and zeroed TLS data, a TLS write, `mmap` with Sony flags, a clock
+  read, a mutex cycle, and a thread that runs with its own TCB. It exits 0 only if all 14 checks pass.
+  `--kernel-no-tls` drops PT_TLS and must exit 3.
+- Host calls need the host FS base (glibc keeps its own state there). Each import thunk switches FS to the host
+  base, calls, and switches back. The guest TCB copies the host stack-protector canary so both sides agree.
+- `sceKernelMmap`-style 7-argument calls and floating point arguments are not supported by the thunks.
+- Linux only. Windows stays Blocked.
