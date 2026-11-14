@@ -2,9 +2,11 @@
 #include "plugin/plugin_cli.hpp"
 
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
+#include "plugin/fetch.hpp"
 #include "plugin/runner.hpp"
 
 namespace pnr::plugin {
@@ -31,10 +33,20 @@ std::string kinds_of(const Manifest& m) { std::vector<std::string> k; for (auto 
 
 int cmd_plugin(PluginManager& pm, const std::vector<std::string>& a, const std::string& grant, bool yes, bool json, std::string* out) {
   (void)yes;
-  if (a.empty()) { *out = "usage: plugin add <dir> | list | info <id> | enable <id> --grant <perms> | disable <id> | remove <id> | run <id> | trust add <name> <pubkey-hex> | trust list | trust remove <name> | sign <dir>\n"; return 2; }
+  if (a.empty()) { *out = "usage: plugin add <dir|package.tar.gz|github-url> | list | info <id> | enable <id> --grant <perms> | disable <id> | remove <id> | run <id> | trust add <name> <pubkey-hex> | trust list | trust remove <name> | sign <dir>\n"; return 2; }
   const std::string& c = a[0];
   if (c == "add" && a.size() == 2) {
-    auto r = pm.install_from_dir(a[1]);
+    InstallResult r;
+    std::error_code fec;
+    if (a[1].rfind("https://", 0) == 0) {
+      GithubRef g; std::string why;
+      if (!parse_github_url(a[1], &g, &why)) { *out = "plugin not installed:\n  - " + why + "\n"; return 1; }
+      if (!pm.allow_network) { *out = "this would download " + github_archive_url(g) + " (EXPERIMENTAL, never run live in tests).\nre-run with --live-ok to allow the network fetch. The plugin is analysed like any other and installs disabled.\n"; return 1; }
+      Status cs; auto http = psn::make_curl_client(psn::CurlOptions{}, &cs);
+      if (!http) { *out = "plugin not installed:\n  - no HTTPS client available: " + cs.error.message + "\n"; return 1; }
+      r = install_from_github(pm, *http, a[1]);
+    } else if (std::filesystem::is_regular_file(a[1], fec)) r = install_from_archive_file(pm, a[1]);
+    else r = pm.install_from_dir(a[1]);
     if (!r.ok) {
       *out = "plugin not installed:\n";
       for (auto& e : r.errors) *out += "  - " + e + "\n";
@@ -106,7 +118,7 @@ int cmd_plugin(PluginManager& pm, const std::vector<std::string>& a, const std::
   }
   if (c == "disable" && a.size() == 2) { auto s = pm.disable(a[1]); *out = s.ok ? "disabled " + a[1] + "\n" : "not disabled: " + s.error.message + "\n"; return s.ok ? 0 : 1; }
   if (c == "remove" && a.size() == 2) { auto s = pm.remove(a[1]); *out = s.ok ? "removed " + a[1] + "\n" : "not removed: " + s.error.message + "\n"; return s.ok ? 0 : 1; }
-  *out = "usage: plugin add <dir> | list | info <id> | enable <id> --grant <perms> | disable <id> | remove <id> | run <id> | trust add <name> <pubkey-hex> | trust list | trust remove <name> | sign <dir>\n";
+  *out = "usage: plugin add <dir|package.tar.gz|github-url> | list | info <id> | enable <id> --grant <perms> | disable <id> | remove <id> | run <id> | trust add <name> <pubkey-hex> | trust list | trust remove <name> | sign <dir>\n";
   return 2;
 }
 
