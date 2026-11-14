@@ -3,7 +3,9 @@
 #include <cstring>
 #include <fstream>
 
+#include "loader/module_loader.hpp"
 #include "loader/nid.hpp"
+#include "loader/sony_symbols.hpp"
 
 namespace pnr::loader {
 namespace {
@@ -57,6 +59,37 @@ const char* import_class_name(ImportClass c) {
   return "?";
 }
 
+void add_import(ImportResolution* out, const std::string& name, const pnr::prx::PrxRegistry& reg) {
+  ImportEntry e;
+  e.name = name;
+  SonySymbol ss;
+  const pnr::prx::PrxSymbol* sym = nullptr;
+  if (parse_sony_symbol(name, &ss)) {
+    e.sony_form = true;
+    e.nid = ss.nid;
+    sym = reg.find(ss.nid);
+    e.klass = ImportClass::Unknown;  // a NID outside the taxonomy is reported, not hidden
+  } else {
+    sym = reg.find_name(name);
+  }
+  if (sym != nullptr) {
+    e.resolved_name = sym->name;
+    e.klass = sym->implemented ? ImportClass::PrxImplemented : ImportClass::PrxDeclared;
+  } else if (!e.sony_form && name.rfind("pnr", 0) == 0) {
+    e.klass = ImportClass::PnrExtension;
+  } else if (!e.sony_form && name.rfind("sce", 0) == 0) {
+    e.klass = ImportClass::Unknown;  // PS-style but outside taxonomy
+  }
+  switch (e.klass) {
+    case ImportClass::Host: ++out->host; break;
+    case ImportClass::PrxImplemented: ++out->prx_implemented; break;
+    case ImportClass::PrxDeclared: ++out->prx_declared; break;
+    case ImportClass::Unknown: ++out->unknown; break;
+    case ImportClass::PnrExtension: ++out->pnr_extension; break;
+  }
+  out->imports.push_back(std::move(e));
+}
+
 pnr::Status resolve_imports(const std::string& path,
                             const pnr::prx::PrxRegistry& reg,
                             ImportResolution* out) {
@@ -73,7 +106,7 @@ pnr::Status resolve_imports(const std::string& path,
   const std::uint64_t shoff = u64(b, 0x28);
   const std::uint16_t shentsize = u16(b, 0x3A);
   const std::uint16_t shnum = u16(b, 0x3C);
-  if (shoff == 0 || shnum == 0) return pnr::Status::Ok();  // no sections
+  if (shoff == 0 || shnum == 0) return resolve_imports_from_program_headers(b, reg, out);  // no sections: walk PT_DYNAMIC
   if (shentsize < 64 || !in(b, shoff, static_cast<std::size_t>(shentsize) * shnum))
     return pnr::Status::Fail(5, "loader", "section headers out of bounds: " + path);
 
@@ -116,24 +149,7 @@ pnr::Status resolve_imports(const std::string& path,
       const std::uint64_t so = strs.off + noff;
       if (so >= strs.off + strs.size)
         return pnr::Status::Fail(10, "loader", "symbol name out of bounds");
-      ImportEntry e{cstr(b, so, strs.off + strs.size), ImportClass::Host};
-      const pnr::prx::PrxSymbol* sym = reg.find_name(e.name);
-      if (sym != nullptr) {
-        e.klass = sym->implemented ? ImportClass::PrxImplemented
-                                   : ImportClass::PrxDeclared;
-      } else if (e.name.rfind("pnr", 0) == 0) {
-        e.klass = ImportClass::PnrExtension;
-      } else if (e.name.rfind("sce", 0) == 0) {
-        e.klass = ImportClass::Unknown;  // PS-style but outside taxonomy
-      }
-      switch (e.klass) {
-        case ImportClass::Host: ++out->host; break;
-        case ImportClass::PrxImplemented: ++out->prx_implemented; break;
-        case ImportClass::PrxDeclared: ++out->prx_declared; break;
-        case ImportClass::Unknown: ++out->unknown; break;
-        case ImportClass::PnrExtension: ++out->pnr_extension; break;
-      }
-      out->imports.push_back(std::move(e));
+      add_import(out, cstr(b, so, strs.off + strs.size), reg);
     }
   }
   return pnr::Status::Ok();
