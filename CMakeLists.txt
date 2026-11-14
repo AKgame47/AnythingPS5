@@ -21,7 +21,7 @@ target_include_directories(pnr_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # MODULE 02 - native executable loader (POSIX today; Windows backend planned)
 add_library(pnr_loader loader/elf_parser.cpp loader/native_loader.cpp loader/nid.cpp loader/sony_symbols.cpp)
 
-add_library(pnr_prx prx/prx.cpp prx/prx_file.cpp loader/import_resolver.cpp loader/module_loader.cpp loader/guest_runtime.cpp prx/libc_abi.cpp)
+add_library(pnr_prx prx/prx.cpp prx/prx_file.cpp loader/import_resolver.cpp loader/module_loader.cpp loader/guest_runtime.cpp prx/libc_abi.cpp prx/hw_abi.cpp)
 add_library(pnr_synth tools/synth_elf.cpp)
 target_link_libraries(pnr_synth PUBLIC pnr_loader)
 add_executable(pnr_make_ps_elf tools/make_ps_elf.cpp)
@@ -57,7 +57,7 @@ add_library(pnr_laptop laptop/laptop.cpp)
 target_link_libraries(pnr_laptop PUBLIC pnr_ape)
 
 # MODULE 08 - game services: virtual fs, audio, input
-add_library(pnr_services services/virtual_fs.cpp services/audio.cpp services/input.cpp)
+add_library(pnr_services services/virtual_fs.cpp services/audio.cpp services/input.cpp services/save_data.cpp)
 target_link_libraries(pnr_services PUBLIC pnr_core pnr_compat)
 
 # MODULE 07 - host OS abstraction (Linux + Windows backends)
@@ -157,7 +157,7 @@ set_target_properties(ps_cube_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
-add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp tests/psn_sync_tests.cpp tests/store_tests.cpp tests/download_tests.cpp tests/signature_tests.cpp tests/sandbox_tests.cpp tests/scan_tests.cpp tests/research_tests.cpp tests/ask_tests.cpp tests/suggest_tests.cpp tests/ui_model_tests.cpp tests/module_tests.cpp tests/kernel_tests.cpp tests/libc_tests.cpp tests/pm4_tests.cpp tests/gfx_state_tests.cpp tests/gpu_va_tests.cpp tests/gfx_draw_tests.cpp)
+add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp tests/psn_sync_tests.cpp tests/store_tests.cpp tests/download_tests.cpp tests/signature_tests.cpp tests/sandbox_tests.cpp tests/scan_tests.cpp tests/research_tests.cpp tests/ask_tests.cpp tests/suggest_tests.cpp tests/ui_model_tests.cpp tests/module_tests.cpp tests/kernel_tests.cpp tests/libc_tests.cpp tests/pm4_tests.cpp tests/gfx_state_tests.cpp tests/gpu_va_tests.cpp tests/gfx_draw_tests.cpp tests/hw_tests.cpp)
 
 # Let the tests launch the real PS-style demo binary.
 target_compile_definitions(pnr_tests PRIVATE
