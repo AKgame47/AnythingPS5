@@ -15,7 +15,7 @@ the current state on the road, not a limit of the goal. No decryption, no DRM by
 | Add games: read-only folder scan, then Import | Implemented, tested |
 | Game page: Overview, Compatibility (set by a person), History, Manage (verify, back up saves, two-step remove) | Implemented, backend calls tested; window checked under Xvfb |
 | Store screen: user-added sources, refresh, package list, Get (download) and Install (scan, then import) | Implemented, backend tested with a fake network; live download only checked against an unreachable host (fails honestly) |
-| Settings | Planned (UI-4) |
+| Settings: Plugins (install, enable with explicit grants, run, disable, remove), Trust (pinned keys, require-signed), General (paths, sandbox default, state of the road) | Implemented, backend tested; window checked under Xvfb |
 | Hardware, Diagnostics, Reports screens | Planned |
 | Controller navigation | Planned |
 | Real display / GPU hardware | Untested (software renderer under Xvfb only) |
@@ -26,7 +26,7 @@ the current state on the road, not a limit of the goal. No decryption, no DRM by
     cd build && ./pnr-ui --db /path/to/pnr_data/library.db
 
 Test hooks: `--frames N`, `--shot N:file.bmp`, `--select ID`, `--auto-launch ID`,
-`--auto-sandbox`, `--scan-dir DIR`, `--size WxH`, `--page ID`, `--tab N`, `--store` (0 Overview, 1 Compatibility, 2 History, 3 Manage).
+`--auto-sandbox`, `--scan-dir DIR`, `--size WxH`, `--page ID`, `--tab N`, `--store`, `--settings TAB` (0 Plugins, 1 Trust, 2 General); game `--tab` is 0 Overview, 1 Compatibility, 2 History, 3 Manage.
 
 ## Game page (UI-2)
 Open it with the Details button, a double-click on a card, or Game page in the left rail.
@@ -53,3 +53,15 @@ and the UI has no override. Removing a source asks for a second click, and insta
 Limits: no download progress bar yet (the job line shows the CLI result when it ends); one job at a time;
 a pinned-key source shows "(key pinned)" but pinning is still CLI-only (`store source pin`);
 a real download over the network was not exercised against a live host here.
+
+## Settings and Plugins (UI-4)
+The Plugins tab is the real `PluginManager`, same folder as `pnr-launcher plugin` (`PNR_PLUGIN_HOME`, else
+the library folder). Install from a folder shows the signature state and static-analysis warnings.
+Installing never enables or grants anything. Enable needs every permission the plugin declares to be
+ticked (the manager refuses a partial grant); granted permissions are listed afterwards. Run (process
+plugins only) goes through the same partial-sandbox runner and live broker as `plugin run`, and blocks the
+window until the plugin ends or times out (10 s). Remove is two clicks. The Trust tab pins and unpins Ed25519
+keys and has a require-signed switch for this session. A valid signature proves who made a plugin, not that it
+is safe. General shows paths and the state of the road. Settings in General and Trust last for this session only.
+Limits: install from a folder only (archive and GitHub install are CLI-only); no per-permission partial grant;
+a long-running plugin freezes the window until it times out.
