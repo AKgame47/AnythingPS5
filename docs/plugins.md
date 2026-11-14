@@ -1,7 +1,7 @@
 # Plugin system (slice P1: manifests, versions, manager core)
 
-State: **plugin manager core is Implemented and Tested on synthetic plugins. Plugins cannot run yet.**
-Isolated execution, signing, GitHub analysis, and the hooks into the library and store are later slices.
+State: **plugin manager core and sandboxed execution with a permission broker are Implemented and Tested on synthetic plugins (Linux).**
+Signing, GitHub analysis, and the hooks into the library and store are later slices.
 Windows: plugin execution is Blocked, same as running games (the core builds, nothing runs there).
 
 ## What a plugin is
@@ -43,7 +43,13 @@ Nothing in it grants anything.
 - State is kept in `<home>/plugins/state.json` (home is `./pnr_data`, or `PNR_PLUGIN_HOME`).
 
 ## Limits, stated plainly
-- Nothing runs. A `process` entry is recorded and shown as "NOT run yet".
+- A `process` entry runs only through `plugin run <id>`, only when enabled, only inside the PNR sandbox (user, net, pid, ipc and uts namespaces,
+  seccomp denylist, pivot_root filesystem). That isolation is PARTIAL: a kernel bug or an allowed syscall misused is not covered, and there are
+  no CPU or memory limits yet. If the sandbox is unusable the plugin is not started (no silent fallback).
+- Broker (JSON lines on stdout/stdin): `log` always; `data_put` and `data_get` need the granted `fs_write_plugin_data` (own data dir only, names
+  `[A-Za-z0-9._-]`, 64 KiB values); `result` ends the session. Anything else is refused and counted. Limits: wall-clock timeout, 1 MiB output, 500 requests.
+- Library, store and download calls through the broker are Planned (slice P4). The plugin has no network (empty network namespace).
+- Windows: plugin execution is Blocked.
 - No signatures yet (the store's Ed25519 verification will be reused). Unsigned plugins are the only kind that exist today.
 - Install from a GitHub URL, local package files, automatic updates and repository analysis are Planned.
 - No code from any repository is used. The ps5-library repository is a jailbreak and piracy ecosystem payload and is
