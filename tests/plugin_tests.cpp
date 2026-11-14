@@ -11,7 +11,10 @@
 #include "plugin/manager.hpp"
 #include "plugin/analyze.hpp"
 #include "plugin/archive.hpp"
+#include "library/game_db.hpp"
 #include "plugin/fetch.hpp"
+#include "plugin/host.hpp"
+#include "store/store.hpp"
 #include "plugin/manifest.hpp"
 #include "plugin/runner.hpp"
 #include "sandbox/sandbox.hpp"
@@ -178,7 +181,7 @@ void pnr_plugin_tests(int& pass, int& fail) {
       auto r1 = run_plugin(np, root + "/rhome");
       check(r1.started && r1.completed && r1.logs.size() == 1 && r1.logs[0] == "hello from the sandbox", "run: an enabled process plugin runs in the sandbox and its log reaches the host");
       check(r1.denied == 2 && r1.result.find("permission fs_write_plugin_data was not granted") != std::string::npos, "broker: data_put without the grant is refused");
-      check(r1.result.find("unknown call") != std::string::npos, "broker: a call that does not exist is refused");
+      check(r1.result.find("library_read was not granted") != std::string::npos, "broker: a library call without the grant is refused");
       check(!fs::exists(root + "/rhome/plugins/data/run.nop/k"), "broker: a refused write left no file");
       (void)mk("run.gr", "[\"fs_write_plugin_data\"]", script);
       rm.enable("run.gr", {"fs_write_plugin_data"});
@@ -352,5 +355,69 @@ void pnr_plugin_tests(int& pass, int& fail) {
     int before = fake.calls;
     auto rbad = install_from_github(hm2, fake, "https://evil.example/acme/covers");
     check(!rbad.ok && fake.calls == before, "github: a non-GitHub URL never reaches the network");
+  }
+
+  // ---- P4: broker calls for library, store and download (fake host for gating; live host on temp files) ----
+  {
+    struct FakeHost : BrokerHost {
+      int lib = 0, src = 0, dl = 0; bool fail = false;
+      bool library_list(std::string* j, std::string*) override { ++lib; *j = "[{\"id\":\"g1\",\"title\":\"Game One\"}]"; return true; }
+      bool store_add_source(const std::string&, const std::string&, const std::string&, std::string* e) override { ++src; if (fail) { *e = "nope"; return false; } return true; }
+      bool download_request(const std::string&, const std::string&, std::string* e) override { ++dl; if (fail) { *e = "nope"; return false; } return true; }
+    } fh;
+    pnr::sandbox::Probe sp4 = pnr::sandbox::probe();
+    if (!sp4.usable()) std::printf("SKIP P4 broker run tests: %s\n", sp4.notes.c_str());
+    else {
+      PluginManager bm(root + "/bhome");
+      auto mkb = [&](const std::string& id, const std::string& perms, const std::string& script) {
+        fs::path d = fs::path(root) / "bsrc" / id;
+        write(d / kManifestFile, manifest_json(id, "1.0.0", "", perms, "{}", "{\"type\":\"process\",\"path\":\"bin/run.sh\"}"));
+        write(d / "bin" / "run.sh", script); fs::permissions(d / "bin" / "run.sh", fs::perms::owner_all);
+        bm.install_from_dir(d.string());
+        InstalledPlugin q; return q;
+      };
+      const char* sc =
+        "#!/bin/sh\n"
+        "echo '{\"call\":\"library_list\"}'; read a\n"
+        "echo '{\"call\":\"store_add_source\",\"id\":\"s1\",\"url\":\"https://example.org/i.json\",\"rights\":\"mine\"}'; read b\n"
+        "echo '{\"call\":\"download_request\",\"source\":\"s1\",\"pkg\":\"p1\"}'; read c\n"
+        "a=$(echo \"$a\" | tr -d '\"{}\\\\'); b=$(echo \"$b\" | tr -d '\"{}'); c=$(echo \"$c\" | tr -d '\"{}')\n"
+        "echo '{\"call\":\"result\",\"value\":\"A='\"$a\"' B='\"$b\"' C='\"$c\"'\"}'\n";
+      (void)mkb("b.none", "[]", sc); bm.enable("b.none", {});
+      InstalledPlugin pn; bm.get("b.none", &pn);
+      RunOptions ro; ro.host = &fh;
+      auto n1 = run_plugin(pn, root + "/bhome", ro);
+      check(n1.completed && n1.denied == 3 && fh.lib == 0 && fh.src == 0 && fh.dl == 0, "broker: with no grants none of the library, store or download calls reach the host");
+      check(n1.result.find("library_read was not granted") != std::string::npos && n1.result.find("store_add_source was not granted") != std::string::npos && n1.result.find("download_request was not granted") != std::string::npos, "broker: each refusal names the permission that was missing");
+      (void)mkb("b.lib", "[\"library_read\"]", sc); bm.enable("b.lib", {"library_read"});
+      InstalledPlugin pl; bm.get("b.lib", &pl);
+      auto n2 = run_plugin(pl, root + "/bhome", ro);
+      check(n2.completed && n2.served == 2 && fh.lib == 1 && fh.src == 0 && fh.dl == 0 && n2.result.find("Game One") != std::string::npos, "broker: library_read alone allows only library_list, which returns the games");
+      (void)mkb("b.all", "[\"library_read\",\"store_add_source\",\"download_request\"]", sc); bm.enable("b.all", {"library_read", "store_add_source", "download_request"});
+      InstalledPlugin pa; bm.get("b.all", &pa);
+      auto n3 = run_plugin(pa, root + "/bhome", ro);
+      check(n3.completed && n3.denied == 0 && fh.lib == 2 && fh.src == 1 && fh.dl == 1, "broker: with all three grants each call reaches the host once");
+      fh.fail = true;
+      auto n4 = run_plugin(pa, root + "/bhome", ro);
+      check(n4.completed && n4.denied == 2 && n4.result.find("nope") != std::string::npos, "broker: a host refusal is passed back as an error and counted as denied");
+      auto n5 = run_plugin(pa, root + "/bhome");
+      check(n5.completed && n5.denied == 3 && n5.result.find("not available") != std::string::npos, "broker: with no host connected the calls are refused as not available");
+    }
+    // live host on temp files
+    std::string db = root + "/live/library.db";
+    fs::create_directories(root + "/live");
+    LiveBrokerHost lh(db, "demo.plugin");
+    std::string js, er;
+    check(lh.library_list(&js, &er) && js == "[]" && !fs::exists(db), "live host: an empty or missing library lists nothing and is never created for a plugin");
+    { pnr::library::GameDb gdb; gdb.open(db); pnr::library::GameRecord g; g.game_id = "g1"; g.title = "Game \"One\""; g.version = "1"; gdb.add_game(g); gdb.close(); }
+    check(lh.library_list(&js, &er) && js.find("\"id\":\"g1\"") != std::string::npos && js.find("Game \\\"One\\\"") != std::string::npos, "live host: games come back with their title, quotes escaped");
+    check(!lh.store_add_source("s1", "https://example.org/i.json", "", &er), "live host: a source needs a rights statement");
+    check(!lh.store_add_source("s1", "http://example.org/i.json", "mine", &er) && !lh.store_add_source("BAD ID", "https://example.org/i.json", "mine", &er), "live host: a non-https URL or a bad source id is refused");
+    check(lh.store_add_source("s1", "https://example.org/i.json", "my own files", &er), "live host: a valid source is added");
+    pnr::store::Registry lreg(pnr::store::store_dir_for(db)); lreg.load();
+    const pnr::store::Source* ls = lreg.find("s1");
+    check(ls && ls->rights.find("declared by plugin demo.plugin") != std::string::npos && ls->rights.find("my own files") != std::string::npos && ls->pubkey.empty(), "live host: the rights text is marked as declared by the plugin, not by the user");
+    check(!lh.store_add_source("s1", "https://example.org/i.json", "again", &er), "live host: a duplicate source id is refused");
+    check(!lh.download_request("s1", "nothing", &er) && !lh.download_request("zzz", "p", &er), "live host: queuing a package that is not in a refreshed index, or from an unknown source, is refused");
   }
   fs::remove_all(root); }
