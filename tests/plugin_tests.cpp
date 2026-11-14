@@ -8,6 +8,8 @@
 
 #include "plugin/manager.hpp"
 #include "plugin/manifest.hpp"
+#include "plugin/runner.hpp"
+#include "sandbox/sandbox.hpp"
 #include "plugin/semver.hpp"
 
 namespace fs = std::filesystem;
@@ -132,4 +134,75 @@ void pnr_plugin_tests(int& pass, int& fail) {
   PluginManager again(root + "/home");
   pm.enable("demo.base", {"fs_write_plugin_data", "library_read"});
   check(again.get("demo.base", &ip) && ip.enabled && again.enabled_of_kind(Kind::Catalog).size() == 1 && again.enabled_of_kind(Kind::Installer).empty(), "manager: state persists and enabled_of_kind filters");
+
+  // ---- P2: isolated execution + broker (needs a usable sandbox; says so when it is not) ----
+  {
+    PluginManager rm(root + "/rhome");
+    auto mk = [&](const std::string& id, const std::string& perms, const std::string& script) {
+      fs::path d = fs::path(root) / "rsrc" / id;
+      write(d / kManifestFile, manifest_json(id, "1.0.0", "", perms, "{}", "{\"type\":\"process\",\"path\":\"bin/run.sh\"}"));
+      write(d / "bin" / "run.sh", script);
+      fs::permissions(d / "bin" / "run.sh", fs::perms::owner_all);
+      return rm.install_from_dir(d.string());
+    };
+    InstalledPlugin dp;
+    check(mk("run.data", "[]", "#!/bin/sh\n").ok && !run_plugin([&] { InstalledPlugin q; rm.get("run.data", &q); return q; }(), root + "/rhome").started, "run: a plugin that is not enabled is not started");
+    pnr::sandbox::Probe sp = pnr::sandbox::probe();
+    if (!sp.usable()) {
+      std::printf("SKIP plugin sandbox run tests: %s\n", sp.notes.c_str());
+      rm.enable("run.data", {});
+      rm.get("run.data", &dp);
+      auto rr = run_plugin(dp, root + "/rhome");
+      check(!rr.started && !rr.error.empty(), "run: with no usable sandbox the plugin is NOT started and the reason is given");
+    } else {
+      const char* script =
+        "#!/bin/sh\n"
+        "echo '{\"call\":\"log\",\"msg\":\"hello from the sandbox\"}'; read a\n"
+        "echo '{\"call\":\"data_put\",\"name\":\"k\",\"value\":\"v1\"}'; read b\n"
+        "echo '{\"call\":\"library_list\"}'; read c\n"
+        "b=$(echo \"$b\" | tr -d '\"{}'); c=$(echo \"$c\" | tr -d '\"{}')\n"
+        "echo '{\"call\":\"result\",\"value\":\"b='\"$b\"' c='\"$c\"'\"}'\n";
+      (void)mk("run.nop", "[]", script);
+      rm.enable("run.nop", {});
+      InstalledPlugin np; rm.get("run.nop", &np);
+      auto r1 = run_plugin(np, root + "/rhome");
+      check(r1.started && r1.completed && r1.logs.size() == 1 && r1.logs[0] == "hello from the sandbox", "run: an enabled process plugin runs in the sandbox and its log reaches the host");
+      check(r1.denied == 2 && r1.result.find("permission fs_write_plugin_data was not granted") != std::string::npos, "broker: data_put without the grant is refused");
+      check(r1.result.find("unknown call") != std::string::npos, "broker: a call that does not exist is refused");
+      check(!fs::exists(root + "/rhome/plugins/data/run.nop/k"), "broker: a refused write left no file");
+      (void)mk("run.gr", "[\"fs_write_plugin_data\"]", script);
+      rm.enable("run.gr", {"fs_write_plugin_data"});
+      InstalledPlugin gp; rm.get("run.gr", &gp);
+      auto r2 = run_plugin(gp, root + "/rhome");
+      std::string got; { std::ifstream in(root + "/rhome/plugins/data/run.gr/k"); std::getline(in, got); }
+      check(r2.completed && r2.denied == 1 && got == "v1", "broker: with the grant data_put is served and the file lands in the plugin data dir");
+      // escape attempts: reading the host, writing outside, the network
+      const char* esc =
+        "#!/bin/sh\n"
+        "r=''\n"
+        "[ -r /etc/passwd ] && r=\"$r etc-visible\" || r=\"$r etc-hidden\"\n"
+        "[ -d /home ] && r=\"$r home-visible\" || r=\"$r home-hidden\"\n"
+        "( echo x > \"$0.pwn\" ) 2>/dev/null && r=\"$r wrote-own-dir\" || r=\"$r own-dir-readonly\"\n"
+        "echo '{\"call\":\"result\",\"value\":\"'\"$r\"'\"}'\n";
+      (void)mk("run.esc", "[]", esc);
+      rm.enable("run.esc", {});
+      InstalledPlugin ep; rm.get("run.esc", &ep);
+      auto r3 = run_plugin(ep, root + "/rhome");
+      check(r3.completed && r3.result.find("etc-hidden") != std::string::npos && r3.result.find("home-hidden") != std::string::npos && r3.result.find("own-dir-readonly") != std::string::npos, "sandbox: the plugin cannot see the host /etc or /home and cannot write its own code dir");
+      (void)mk("run.hang", "[]", "#!/bin/sh\nsleep 30\n");
+      rm.enable("run.hang", {});
+      InstalledPlugin hp; rm.get("run.hang", &hp);
+      RunOptions fast; fast.timeout_ms = 600;
+      auto r4 = run_plugin(hp, root + "/rhome", fast);
+      check(r4.started && !r4.completed && r4.timed_out, "limits: a plugin that hangs is killed at the timeout");
+      (void)mk("run.spam", "[]", "#!/bin/sh\nwhile true; do echo '{\"call\":\"log\",\"msg\":\"x\"}'; read a; done\n");
+      rm.enable("run.spam", {});
+      InstalledPlugin xp; rm.get("run.spam", &xp);
+      RunOptions few; few.max_requests = 20; few.timeout_ms = 5000;
+      auto r5 = run_plugin(xp, root + "/rhome", few);
+      check(!r5.completed && r5.error.find("request limit") != std::string::npos, "limits: a plugin that floods requests is stopped");
+    }
+    InstalledPlugin dd;  // data-only plugin
+    check(rm.get("run.data", &dd) && !run_plugin(dd, root + "/rhome").started, "run: a data-only or disabled plugin never starts a process");
+  }
   fs::remove_all(root); }
