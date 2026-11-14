@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2466/2466 unit tests, 22/22 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2375 unit checks without it; the
+Test state: **2511/2511 unit tests, 22/22 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2420 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -209,12 +209,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2466/2466 unit tests pass (2375 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
+**2511/2511 unit tests pass (2420 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2466/2466
+not re-run for these counts). ASan+UBSan: 2511/2511
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -375,6 +375,46 @@ draw ok: 256x256, 3 vertices, 20808 of 65536 pixels covered, copied to target me
 note: pixel shader not translated: fixed pass-through colour used; vertex shader is a PNR PVS1 test blob
 wrote /tmp/tri.png (262488 bytes)
 ```
+
+### `pnr-launcher plugin` - plugin manager core (slice P1)
+
+Plugins are untrusted. Nothing runs yet. Output captured from a real run on the example plugin
+(`examples/plugins/hello-catalog`, data only):
+
+```
+$ pnr-launcher plugin add <repo>/examples/plugins/hello-catalog
+installed example.hello-catalog 1.0.0 (disabled)
+it asks for: fs_write_plugin_data
+to enable: plugin enable example.hello-catalog --grant fs_write_plugin_data
+plugins are untrusted. Nothing runs in this slice: isolated execution is not built yet.
+[exit 0]
+$ pnr-launcher plugin list
+example.hello-catalog 1.0.0 disabled catalog
+[exit 0]
+$ pnr-launcher plugin enable example.hello-catalog
+not enabled: this plugin asks for permissions you did not grant: fs_write_plugin_data
+to grant them: plugin enable example.hello-catalog --grant fs_write_plugin_data
+[exit 1]
+$ pnr-launcher plugin enable example.hello-catalog --grant fs_write_plugin_data
+enabled example.hello-catalog
+[exit 0]
+$ pnr-launcher plugin info example.hello-catalog
+Hello Catalog (example) (example.hello-catalog 1.0.0)
+  author: PNR examples
+  license: GPL-2.0
+  kinds: catalog
+  state: enabled
+  permissions asked: fs_write_plugin_data
+  permissions granted: fs_write_plugin_data
+  depends on: nothing
+  runs code: no (data only)
+[exit 0]
+$ pnr-launcher plugin remove example.hello-catalog
+removed example.hello-catalog
+[exit 0]
+```
+
+See docs/plugins.md.
 
 ### `pnr run ./ps_demo` - the PS-style showcase
 
@@ -1137,7 +1177,8 @@ package/     .pnrgame format: ustar, SHA-256, importer
 launcher/    MODULE 10 core - headless launcher core (list, details, launch, history, human compatibility, read-only scan, import/remove/verify, doctor, clean --orphans, saves export/restore)
 psn/         unofficial PSN connector (token store, parser, owned-entitlement commands, live sync over runtime-loaded libcurl)
 library/     MODULE 09 - SQLite game/installation/compatibility/launch store
-services/    MODULE 08 - virtual filesystem, input, audio backends
+services/    MODULE 08 - virtual filesystem, input, audio backends, save data model
+plugin/      plugin system core: manifests, versions, manager (nothing runs yet, docs/plugins.md)
 tools/       pnr_make_package - dev package builder
 examples/    pnr_test_app - developer-controlled native demo "game"
 tests/       unit tests (no framework) + end-to-end CTest + package workflow
