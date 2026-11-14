@@ -25,6 +25,9 @@ enum class ImportClass {
 struct ImportEntry {
   std::string name;
   ImportClass klass = ImportClass::Host;
+  bool sony_form = false;     // name is NID#lib#mod
+  std::string nid;            // set when sony_form
+  std::string resolved_name;  // taxonomy name when known
 };
 
 struct ImportResolution {
@@ -40,6 +43,9 @@ struct ImportResolution {
 pnr::Status resolve_imports(const std::string& path,
                             const pnr::prx::PrxRegistry& reg,
                             ImportResolution* out);
+
+// Classifies one imported symbol name (plain or NID#lib#mod) and adds it to `out`.
+void add_import(ImportResolution* out, const std::string& name, const pnr::prx::PrxRegistry& reg);
 
 const char* import_class_name(ImportClass c);
 
