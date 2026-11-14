@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2544/2544 unit tests, 22/22 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2453 unit checks without it; the
+Test state: **2569/2569 unit tests, 22/22 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2478 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -209,12 +209,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2544/2544 unit tests pass (2453 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
+**2569/2569 unit tests pass (2478 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2544/2544
+not re-run for these counts). ASan+UBSan: 2569/2569
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -463,6 +463,32 @@ signature: valid, pinned key 'alice'
 $ pnr-launcher plugin add good   # a file changed after signing
 plugin not installed:
   - signature check failed: signature does not match the files (changed, added or removed since signing)
+```
+
+### `pnr-launcher plugin add` from a package or a GitHub URL (slice P3b)
+
+`plugin add` also takes a `.tar` / `.tar.gz` package and a `https://github.com/<owner>/<repo>[/tree/<ref>]` URL. Both end in the same
+analysis, signature check and disabled-by-default install as a local folder. The archive is read in memory with hard limits
+(2000 files, 64 MiB unpacked) by PNR's own inflate and tar reader; symlinks, hard links, `..` and absolute paths are refused, a
+top-level folder is stripped, and `.git*` files are dropped. The GitHub fetch is **EXPERIMENTAL**: the URL mapping, size cap and
+error handling are tested with a fake HTTP client only. No test contacts GitHub, the live fetch has not been run, and it needs
+`--live-ok`. Output captured from a real run:
+
+```
+$ pnr-launcher plugin add covers.tar.gz   # GitHub-style source archive
+installed gh.covers 1.2.0 (disabled)
+to enable: plugin enable gh.covers
+signature: unsigned
+plugins are untrusted. Nothing runs until you enable it and run it; it then runs only in the partial sandbox.
+[exit 0]
+$ pnr-launcher plugin add https://github.com/acme/covers   # no --live-ok
+this would download https://codeload.github.com/acme/covers/tar.gz/HEAD (EXPERIMENTAL, never run live in tests).
+re-run with --live-ok to allow the network fetch. The plugin is analysed like any other and installs disabled.
+[exit 1]
+$ pnr-launcher plugin add https://example.org/x/y
+plugin not installed:
+  - only https://github.com/<owner>/<repo> URLs are accepted
+[exit 1]
 ```
 
 ### `pnr run ./ps_demo` - the PS-style showcase
