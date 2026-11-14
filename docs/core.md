@@ -103,3 +103,15 @@ makes the load fail with a message naming it, and nothing runs.
   Wiring a live evdev device to it is Planned.
 - Save data: names are 1..32 characters of letters, digits, dot, underscore and dash, not starting with a dot.
   A write that would pass the directory quota is refused and leaves nothing behind.
+
+## Slice S1 notes (condition variables and semaphores)
+- New libkernel symbols: `scePthreadCondInit/Wait/Timedwait/Signal/Broadcast/Destroy` and
+  `sceKernelCreateSema/WaitSema/SignalSema/DeleteSema`. Status: Implemented, Tested.
+- Handles are registry ids, never raw pointers: a forged, stale or destroyed handle returns an error and the host never
+  dereferences guest memory for it. (The older mutex handle is still a host pointer; moving it onto the registry is Planned.)
+- Semaphores: signalling past the maximum is refused and leaves the count unchanged; waiting for more than the maximum
+  is an argument error; destroying wakes blocked waiters with an error. Timeouts are microseconds on the monotonic clock.
+- Tests drive the same entry points the PRX symbols call from real host threads (4 threads woken by broadcast, a blocked
+  semaphore waiter, destroy-while-waiting) and check all 10 symbols are registered. They are NOT yet exercised from guest
+  machine code through the NID path, and argument layouts follow public pthread/semaphore conventions, unverified against a console.
+- Not done: event queues, rwlocks, thread-local keys, thread priorities and affinity, cancellation.
