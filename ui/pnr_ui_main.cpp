@@ -11,6 +11,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
 #include "launcher/launcher_core.hpp"
+#include "plugin/manifest.hpp"
 #include "ui/ui_model.hpp"
 
 namespace {
@@ -32,6 +34,7 @@ struct Opts {
   bool auto_sandbox = false;
   bool open_add = false;
   bool open_store = false;
+  int settings_tab = -1;
   std::string page_id;   // open the game page for this id at start (test hook)
   int tab = 0;           // initial tab on the game page (test hook)
 };
@@ -97,7 +100,7 @@ struct App {
   std::string renderer_name, video_driver;
   bool show_scan = true;
   // ---- game page (UI-2)
-  enum Screen { kLibrary = 0, kGame = 1, kStore = 2 };
+  enum Screen { kLibrary = 0, kGame = 1, kStore = 2, kSettings = 3 };
   int screen = kLibrary;
   int want_tab = -1;
   std::string loaded_for;            // game id the page state below belongs to
@@ -179,7 +182,7 @@ struct App {
     text_at(dl, ImVec2(o.x + 70, o.y + 26), 22, ImVec4(0.93f, 0.95f, 1, 1), "PNR");
     text_at(dl, ImVec2(o.x + 70, o.y + 50), 12, kMuted, "Native Runtime");
     struct Item { const char* name; const char* tag; bool on; };
-    Item items[] = {{"Library", "", screen == kLibrary}, {"Game page", sel_game() ? "" : "pick a game", screen == kGame}, {"Store", "", screen == kStore}, {"Settings", "UI-4", false},
+    Item items[] = {{"Library", "", screen == kLibrary}, {"Game page", sel_game() ? "" : "pick a game", screen == kGame}, {"Store", "", screen == kStore}, {"Settings", "", screen == kSettings},
                     {"Hardware", "planned", false}, {"Diagnostics", "planned", false}, {"Reports", "planned", false}};
     float y = 96;
     int idx = 0;
@@ -189,6 +192,7 @@ struct App {
       if (clicked && idx == 0) screen = kLibrary;
       if (clicked && idx == 1 && sel_game()) open_page(selected);
       if (clicked && idx == 2) { screen = kStore; store_dirty(); }
+      if (clicked && idx == 3) { screen = kSettings; plist_dirty = true; }
       ++idx;
       bool hov = ImGui::IsItemHovered();
       ImVec2 a(o.x, o.y + y), b(o.x + 228, o.y + y + 40);
@@ -667,6 +671,192 @@ struct App {
     ImGui::PopStyleVar(2);
   }
 
+
+  // ---- settings screen (UI-4): Plugins, Trust, General
+  std::vector<pnr::plugin::InstalledPlugin> plist;
+  bool plist_dirty = true;
+  std::map<std::string, std::vector<char>> grant_sel;   // per plugin id, one flag per declared permission
+  char plug_dir[400] = "";
+  std::string plug_msg; bool plug_ok = false;
+  std::vector<std::string> plug_notes;
+  std::string plug_out;                  // last run output
+  std::string pending_plugin_remove;
+  char key_name[64] = "", key_hex[100] = "";
+  std::string key_msg; bool key_ok = false;
+  int set_tab_want = -1;
+
+  static std::string ver_str(const pnr::plugin::Version& v) { return std::to_string(v.major) + "." + std::to_string(v.minor) + "." + std::to_string(v.patch); }
+  void plugins_tab() {
+    if (plist_dirty) { plist = model.plugin_list(); plist_dirty = false; }
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::TextColored(kMuted, "Plugins are untrusted code. Installing grants nothing: you tick each permission when you enable one.");
+    ImGui::SetNextItemWidth(560);
+    ImGui::InputTextWithHint("##pdir", "Folder with pnr-plugin.json, for example /home/you/plugins/hello-catalog", plug_dir, sizeof plug_dir);
+    ImGui::SameLine();
+    if (primary_button("Install", ImVec2(130, 36), false)) {
+      auto r = model.plugin_install(plug_dir);
+      plug_ok = r.ok; plug_notes.clear();
+      if (r.ok) {
+        plug_msg = std::string(r.updated ? "Updated " : "Installed ") + r.manifest.name + " " + ver_str(r.manifest.version) + ". Signature: " + r.signature + (r.disabled_by_update ? ". Disabled: the update asks for permissions you have not granted." : ". Not enabled yet.");
+        for (auto& w : r.warnings) plug_notes.push_back("analysis: " + w);
+      } else {
+        plug_msg = "Not installed:";
+        for (auto& e : r.errors) plug_notes.push_back(e);
+      }
+      plist_dirty = true;
+    }
+    note_line(plug_msg, plug_ok);
+    for (auto& n : plug_notes) ImGui::TextColored(kMuted, "  %s", n.c_str());
+    ImGui::Dummy(ImVec2(0, 8));
+    if (plist.empty()) { ImGui::TextColored(kMuted, "No plugins installed."); return; }
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.125f, 0.138f, 0.175f, 1));
+    for (const auto& p : plist) {
+      const auto& m = p.manifest;
+      ImGui::PushID(m.id.c_str());
+      ImGui::BeginChild("pc", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+      ImGui::PushFont(nullptr, 21.0f); ImGui::TextUnformatted(m.name.c_str()); ImGui::PopFont();
+      ImGui::SameLine(0, 12);
+      ImGui::TextColored(kMuted, "v%s   %s", ver_str(m.version).c_str(), m.id.c_str());
+      ImGui::SameLine(0, 16);
+      ImGui::TextColored(p.enabled ? ImVec4(0.35f, 0.85f, 0.5f, 1) : ImVec4(0.65f, 0.67f, 0.72f, 1), "%s", p.enabled ? "ENABLED" : "disabled");
+      ImGui::PushTextWrapPos(0);
+      ImGui::TextColored(ImVec4(0.75f, 0.78f, 0.86f, 1), "%s", m.description.c_str());
+      std::string kinds;
+      for (auto k : m.kinds) kinds += std::string(kinds.empty() ? "" : ", ") + pnr::plugin::kind_name(k);
+      ImGui::TextColored(kMuted, "kinds: %s     entry: %s     author: %s     license: %s", kinds.c_str(), m.entry_type.c_str(), m.author.c_str(), m.license.c_str());
+      ImGui::PopTextWrapPos();
+      auto& sel = grant_sel[m.id];
+      if (sel.size() != m.permissions.size()) sel.assign(m.permissions.size(), 0);
+      if (m.permissions.empty()) ImGui::TextColored(kMuted, "Asks for no permissions.");
+      else {
+        ImGui::TextColored(kMuted, p.enabled ? "Granted permissions" : "Grant on enable");
+        for (size_t i = 0; i < m.permissions.size(); ++i) {
+          bool granted = std::find(p.granted.begin(), p.granted.end(), m.permissions[i]) != p.granted.end();
+          if (p.enabled) { ImGui::TextColored(granted ? ImVec4(0.35f, 0.85f, 0.5f, 1) : kMuted, "  %s  %s", granted ? "granted:" : "not granted:", m.permissions[i].c_str()); }
+          else { bool v = sel[i] != 0; if (ImGui::Checkbox(m.permissions[i].c_str(), &v)) sel[i] = v ? 1 : 0; }
+        }
+      }
+      ImGui::Dummy(ImVec2(0, 4));
+      if (!p.enabled) {
+        if (primary_button("Enable", ImVec2(130, 38), false)) {
+          std::vector<std::string> g;
+          for (size_t i = 0; i < m.permissions.size(); ++i) if (sel[i]) g.push_back(m.permissions[i]);
+          bool ok = false; plug_msg = model.plugin_enable(m.id, g, &ok); plug_ok = ok; plug_notes.clear(); plist_dirty = true;
+        }
+      } else {
+        if (ImGui::Button("Disable", ImVec2(110, 38))) { bool ok = false; plug_msg = model.plugin_disable(m.id, &ok); plug_ok = ok; plug_notes.clear(); plist_dirty = true; }
+        if (m.entry_type == "process") {
+          ImGui::SameLine(0, 10);
+          if (primary_button("Run", ImVec2(100, 38), false)) {
+            std::string why;
+            auto rr = model.plugin_run(m.id, &why);
+            plug_out.clear();
+            if (!rr.started) plug_out = "Not run: " + why;
+            else {
+              for (auto& l : rr.logs) plug_out += "plugin log: " + l + "\n";
+              plug_out += rr.completed ? "result: " + rr.result : "failed: " + rr.error;
+              plug_out += "\nbroker: " + std::to_string(rr.served) + " served, " + std::to_string(rr.denied) + " denied (partial sandbox, not a security boundary)";
+            }
+          }
+        }
+      }
+      ImGui::SameLine(0, 10);
+      if (pending_plugin_remove == m.id) {
+        if (ImGui::Button("Confirm remove", ImVec2(150, 38))) { bool ok = false; plug_msg = model.plugin_remove(m.id, &ok); plug_ok = ok; plug_notes.clear(); pending_plugin_remove.clear(); plist_dirty = true; }
+        ImGui::SameLine(0, 8);
+        if (ImGui::Button("Keep", ImVec2(80, 38))) pending_plugin_remove.clear();
+      } else if (ImGui::Button("Remove", ImVec2(110, 38))) pending_plugin_remove = m.id;
+      ImGui::EndChild();
+      ImGui::PopID();
+      ImGui::Dummy(ImVec2(0, 8));
+    }
+    ImGui::PopStyleColor();
+    if (!plug_out.empty()) {
+      ImGui::PushFont(mono, 15.0f); ImGui::PushTextWrapPos(0);
+      ImGui::TextColored(ImVec4(0.72f, 0.76f, 0.84f, 1), "%s", plug_out.c_str());
+      ImGui::PopTextWrapPos(); ImGui::PopFont();
+    }
+  }
+
+  void trust_tab() {
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::Checkbox("Require a valid signature to install a plugin (this session)", &model.plugin_require_signed);
+    ImGui::TextColored(kMuted, "A signature from a pinned key proves who made a plugin, not that it is safe. Unsigned plugins stay untrusted either way.");
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::PushFont(nullptr, 20.0f); ImGui::TextUnformatted("Pinned keys"); ImGui::PopFont();
+    auto keys = model.plugin_keys();
+    if (keys.empty()) ImGui::TextColored(kMuted, "None pinned.");
+    for (const auto& k : keys) {
+      ImGui::PushID(k.name.c_str());
+      ImGui::Text("%s", k.name.c_str());
+      ImGui::SameLine(0, 14);
+      ImGui::PushFont(mono, 14.0f); ImGui::TextColored(kMuted, "%s", k.pubkey_hex.c_str()); ImGui::PopFont();
+      ImGui::SameLine(0, 14);
+      if (ImGui::SmallButton("Unpin")) { bool ok = false; key_msg = model.plugin_unpin(k.name, &ok); key_ok = ok; }
+      ImGui::PopID();
+    }
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::SetNextItemWidth(180); ImGui::InputTextWithHint("##kn", "Name", key_name, sizeof key_name);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(560); ImGui::InputTextWithHint("##kh", "Ed25519 public key, 64 hex characters", key_hex, sizeof key_hex);
+    ImGui::SameLine();
+    if (ImGui::Button("Pin key", ImVec2(110, 0))) { bool ok = false; key_msg = model.plugin_pin(key_name, key_hex, &ok); key_ok = ok; if (ok) { key_name[0] = key_hex[0] = 0; } }
+    note_line(key_msg, key_ok);
+  }
+
+  void general_tab() {
+    ImGui::Dummy(ImVec2(0, 6));
+    if (ImGui::BeginTable("gen", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX)) {
+      ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 230);
+      ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
+      kv_row("Library database", model.db_path(), true, mono);
+      kv_row("Store folder", pnr::store::store_dir_for(model.db_path()), true, mono);
+      kv_row("Plugin folder", model.plugin_home(), true, mono);
+      kv_row("Games in library", std::to_string(model.games().size()));
+      kv_row("Store sources", std::to_string(model.store_sources().size()));
+      kv_row("Display", video_driver + ", renderer " + renderer_name);
+      ImGui::EndTable();
+    }
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::Checkbox("Launch games in the sandbox by default (this session)", &sandbox);
+    ImGui::TextColored(kMuted, "Sandbox: Linux namespaces + seccomp denylist + private root. PARTIAL isolation, no CPU or memory limits.");
+    ImGui::Dummy(ImVec2(0, 10));
+    ImGui::PushFont(nullptr, 20.0f); ImGui::TextUnformatted("State of the road"); ImGui::PopFont();
+    if (ImGui::BeginTable("road", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX)) {
+      ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 330);
+      ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
+      kv_row("Native x86-64 ELF/package launch", "Implemented, tested (Linux)");
+      kv_row("PS5 titles via translation", "Planned: the destination, not working today");
+      kv_row("Plugins and store", "Implemented, tested; sources and plugins are untrusted");
+      kv_row("Real GPU / display", "Untested (software renderer under Xvfb)");
+      kv_row("Windows", "Blocked");
+      ImGui::EndTable();
+    }
+    ImGui::TextColored(kMuted, "Settings here last for this session. Nothing is written to disk by this tab.");
+  }
+
+  void settings_page(float mw, float body_h, float rail_w) {
+    ImGui::Dummy(ImVec2(mw, 22));
+    ImGui::SetCursorPosX(rail_w + 36);
+    ImGui::PushFont(nullptr, 30.0f); ImGui::TextUnformatted("Settings"); ImGui::PopFont();
+    ImGui::SetCursorPos(ImVec2(rail_w + 36, 72));
+    const float foot_h = 46;
+    ImGui::BeginChild("stabs", ImVec2(mw - 72, body_h - 72 - foot_h), false);
+    if (ImGui::BeginTabBar("st")) {
+      auto fl = [&](int i) { return set_tab_want == i ? ImGuiTabItemFlags_SetSelected : 0; };
+      if (ImGui::BeginTabItem("Plugins", nullptr, fl(0))) { plugins_tab(); ImGui::EndTabItem(); }
+      if (ImGui::BeginTabItem("Trust", nullptr, fl(1))) { trust_tab(); ImGui::EndTabItem(); }
+      if (ImGui::BeginTabItem("General", nullptr, fl(2))) { general_tab(); ImGui::EndTabItem(); }
+      ImGui::EndTabBar();
+    }
+    set_tab_want = -1;
+    ImGui::EndChild();
+    ImGui::SetCursorPos(ImVec2(rail_w + 36, body_h - foot_h + 8));
+    ImGui::PushTextWrapPos(rail_w + mw - 36);
+    ImGui::TextColored(kMuted, "Plugins run only in the partial sandbox and are never trusted by default. Run blocks this window until the plugin finishes or times out (10 s).");
+    ImGui::PopTextWrapPos();
+  }
+
   void tab_overview(const pnr::launcher::GameEntry& g) {
     ImGui::Dummy(ImVec2(0, 6));
     if (ImGui::BeginTable("kv", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX)) {
@@ -801,6 +991,14 @@ struct App {
     ImGui::SameLine(0, 0);
     ImGui::BeginGroup();
     const float mw = W - rail_w;
+    if (screen == kSettings) {
+      settings_page(mw, body_h, rail_w);
+      ImGui::EndGroup();
+      status_bar(W, H);
+      add_popup();
+      ImGui::End();
+      return;
+    }
     if (screen == kStore) {
       store_page(mw, body_h, rail_w);
       ImGui::EndGroup();
@@ -895,11 +1093,12 @@ int main(int argc, char** argv) {
     else if (a == "--open-add") o.open_add = true;
     else if (a == "--page") o.page_id = next();
     else if (a == "--store") o.open_store = true;
+    else if (a == "--settings") o.settings_tab = std::atoi(next().c_str());
     else if (a == "--tab") o.tab = std::atoi(next().c_str());
     else if (a == "--scan-dir") o.scan_dir = next();
     else if (a == "--help" || a == "-h") {
       std::puts("pnr-ui [--db LIBRARY.db] [--size WxH]\n"
-                "test hooks (same code paths as the mouse): --frames N --shot N:file.bmp --select ID --auto-launch ID [--auto-sandbox] --scan-dir DIR --open-add --page ID --tab N --store");
+                "test hooks (same code paths as the mouse): --frames N --shot N:file.bmp --select ID --auto-launch ID [--auto-sandbox] --scan-dir DIR --open-add --page ID --tab N --store --settings TAB");
       return 0;
     } else { std::fprintf(stderr, "pnr-ui: unknown option %s\n", a.c_str()); return 64; }
   }
@@ -952,6 +1151,7 @@ int main(int argc, char** argv) {
     }
     model.poll();
     model.store_poll();
+    if (frame == 3 && o.settings_tab >= 0) { app.screen = App::kSettings; app.set_tab_want = o.settings_tab; app.plist_dirty = true; }
     if (frame == 3 && o.open_store) { app.screen = App::kStore; app.store_dirty(); }
     if (frame == 5 && !o.scan_dir.empty()) app.do_scan();
     if (frame == 3 && !o.page_id.empty()) { app.open_page(o.page_id); app.want_tab = o.tab; }
