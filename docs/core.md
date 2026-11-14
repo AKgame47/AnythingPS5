@@ -87,3 +87,5 @@ makes the load fail with a message naming it, and nothing runs.
 - The test builds a PM4 buffer, runs it through the decoder, address map, translator and Vulkan, and checks real pixels:
   red-pixel count within 4% of the triangle area, clear colour in all four corners, and the target memory byte-equal to the image.
 - Source of every register meaning is still public AMD headers, unverified on PlayStation.
+- `pnr gnm-triangle <out.png>` runs that test scene end to end and writes a 256x256 PNG (stored deflate, uncompressed).
+  The image is the Vulkan draw read back from the colour target memory. Needs a Vulkan device; exits 3 with SKIP without one.
