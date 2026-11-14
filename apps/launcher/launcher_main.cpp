@@ -231,6 +231,7 @@ int main(int argc, char** argv) {
   } else if (a[0] == "plugin") {
     pnr::plugin::PluginManager pm(std::string(std::getenv("PNR_PLUGIN_HOME") ? std::getenv("PNR_PLUGIN_HOME") : "./pnr_data"));
     pm.require_signed = require_signed;
+    pm.allow_network = live_ok;
     std::string out;
     rc = pnr::plugin::cmd_plugin(pm, std::vector<std::string>(pos.begin(), pos.end()), grant, yes, json, &out);
     std::fputs(out.c_str(), stdout);
