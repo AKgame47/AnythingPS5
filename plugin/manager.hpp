@@ -43,6 +43,8 @@ class PluginManager {
   Status unpin_key(const std::string& name);
   // When true, only plugins with a valid signature from a pinned key install. Default false (unsigned plugins allowed, shown as such).
   bool require_signed = false;
+  // Network installs (GitHub URLs) only run when this is true; the launcher sets it from --live-ok.
+  bool allow_network = false;
 
   InstallResult install_from_dir(const std::string& src_dir);
   // grant must contain every permission in the manifest (names exactly as declared).
