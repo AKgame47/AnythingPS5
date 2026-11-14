@@ -54,9 +54,10 @@ void pnr_pm4_tests(int& pass, int& fail);
 void pnr_gfx_state_tests(int& pass, int& fail);
 void pnr_gpu_va_tests(int& pass, int& fail);
 void pnr_gfx_draw_tests(int& pass, int& fail);
+void pnr_hw_tests(int& pass, int& fail);
 void pnr_store_tests(int& pass, int& fail);     // store_tests.cpp, also run from here (test_main.cpp is too large for the browser editor)
 void pnr_psn_tests(int& pass, int& fail) {
-  struct RunSync { int& p; int& f; ~RunSync() { pnr_psn_sync_tests(p, f); pnr_store_tests(p, f); pnr_download_tests(p, f); pnr_signature_tests(p, f); pnr_sandbox_tests(p, f); pnr_scan_tests(p, f); pnr_research_tests(p, f); pnr_ask_tests(p, f); pnr_suggest_tests(p, f); pnr_ui_model_tests(p, f); pnr_module_tests(p, f); pnr_kernel_tests(p, f); pnr_libc_tests(p, f); pnr_pm4_tests(p, f); pnr_gfx_state_tests(p, f); pnr_gpu_va_tests(p, f); pnr_gfx_draw_tests(p, f); } } run_sync{pass, fail};
+  struct RunSync { int& p; int& f; ~RunSync() { pnr_psn_sync_tests(p, f); pnr_store_tests(p, f); pnr_download_tests(p, f); pnr_signature_tests(p, f); pnr_sandbox_tests(p, f); pnr_scan_tests(p, f); pnr_research_tests(p, f); pnr_ask_tests(p, f); pnr_suggest_tests(p, f); pnr_ui_model_tests(p, f); pnr_module_tests(p, f); pnr_kernel_tests(p, f); pnr_libc_tests(p, f); pnr_pm4_tests(p, f); pnr_gfx_state_tests(p, f); pnr_gpu_va_tests(p, f); pnr_gfx_draw_tests(p, f); pnr_hw_tests(p, f); } } run_sync{pass, fail};
   auto check = [&](bool ok, const std::string& label) { if (ok) ++pass; else ++fail; std::printf("%s %s\n", ok ? "PASS" : "FAIL", label.c_str()); };
   const std::string dir = "/tmp/pnr_psn_" + std::to_string(::getpid());
   fs::remove_all(dir); fs::create_directories(dir);
