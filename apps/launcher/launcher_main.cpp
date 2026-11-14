@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
   bool json = false;
   std::vector<std::string> pos, gameargs;
   bool after = false, complete = false, forget = false, have_note = false, yes = false, keep = false, overwrite = false, orphans = false;
-  bool live_ok = false, no_model_sandbox = false, sandbox_on = false, allow_flagged = false, force = false, log_it = false;
+  bool require_signed = false, live_ok = false, no_model_sandbox = false, sandbox_on = false, allow_flagged = false, force = false, log_it = false;
   std::string out_file, sha256_arg, threshold_s = "0.8";
   std::string note, limit_s = "20", file, platform, rights, source, grant;
   for (size_t i = 1; i < a.size(); ++i) {
@@ -75,6 +75,7 @@ int main(int argc, char** argv) {
     else if (a[i] == "--") after = true;
     else if (a[i] == "--json") json = true;
     else if (a[i] == "--yes") yes = true;
+    else if (a[i] == "--require-signed") require_signed = true;
     else if (a[i] == "--live-ok") live_ok = true;
     else if (a[i] == "--sandbox") sandbox_on = true;
     else if (a[i] == "--no-model-sandbox") no_model_sandbox = true;
@@ -229,6 +230,7 @@ int main(int argc, char** argv) {
     std::fputs(out.c_str(), rc == 0 ? stdout : (rc == 64 ? stdout : stderr));
   } else if (a[0] == "plugin") {
     pnr::plugin::PluginManager pm(std::string(std::getenv("PNR_PLUGIN_HOME") ? std::getenv("PNR_PLUGIN_HOME") : "./pnr_data"));
+    pm.require_signed = require_signed;
     std::string out;
     rc = pnr::plugin::cmd_plugin(pm, std::vector<std::string>(pos.begin(), pos.end()), grant, yes, json, &out);
     std::fputs(out.c_str(), stdout);
