@@ -13,7 +13,7 @@ the current state on the road, not a limit of the goal. No decryption, no DRM by
 | Library screen: real SQLite game list, search, status badges | Implemented, tested under Xvfb |
 | Launch button: same provenance re-check as `pnr-launcher launch`, optional partial sandbox | Implemented, tested (backend tests + real window) |
 | Add games: read-only folder scan, then Import | Implemented, tested |
-| Game details page | Planned (UI-2) |
+| Game page: Overview, Compatibility (set by a person), History, Manage (verify, back up saves, two-step remove) | Implemented, backend calls tested; window checked under Xvfb |
 | Store screen | Planned (UI-3) |
 | Settings | Planned (UI-4) |
 | Hardware, Diagnostics, Reports screens | Planned |
@@ -26,7 +26,16 @@ the current state on the road, not a limit of the goal. No decryption, no DRM by
     cd build && ./pnr-ui --db /path/to/pnr_data/library.db
 
 Test hooks: `--frames N`, `--shot N:file.bmp`, `--select ID`, `--auto-launch ID`,
-`--auto-sandbox`, `--scan-dir DIR`, `--size WxH`.
+`--auto-sandbox`, `--scan-dir DIR`, `--size WxH`, `--page ID`, `--tab N` (0 Overview, 1 Compatibility, 2 History, 3 Manage).
+
+## Game page (UI-2)
+Open it with the Details button, a double-click on a card, or Game page in the left rail.
+Every action is the same `LauncherCore` call the `pnr-launcher` CLI makes: `compat set`, `history`,
+`verify`, `export`, `remove`. Remove is two steps: step 1 is a dry run that lists the install and
+saves folders, step 2 deletes only after you confirm. A status you set is marked human-set and no
+launch or re-import overwrites it. Mutating actions are refused while a launch is running.
+Limits: verify checks file presence and the ELF header only; save export refuses to overwrite;
+the page is untested on a real display or GPU.
 
 ## Known limits
 - Import and scan run on the UI thread, so a very large package can freeze the window.
