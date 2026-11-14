@@ -128,7 +128,7 @@ target_link_libraries(pnr_ui_model PUBLIC pnr_launcher pnr_store pnr_sandbox Thr
 add_executable(pnr-launcher apps/launcher/launcher_main.cpp)
 target_link_libraries(pnr-launcher PRIVATE pnr_launcher pnr_psn pnr_store pnr_sandbox)
 add_executable(pnr apps/pnr_cli.cpp)
-target_link_libraries(pnr PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics)
+target_link_libraries(pnr PRIVATE pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics pnr_shader)
 
 # Dev tooling: build .pnrgame packages
 add_executable(pnr_make_package tools/make_package.cpp)
