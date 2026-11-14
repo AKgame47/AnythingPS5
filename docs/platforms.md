@@ -13,6 +13,7 @@ Blocked.
 | Windows x86-64, build | The core cross-compiles with llvm-mingw (reported in an earlier slice; not re-run in this audit). CI (Linux only) does not build it. Never run on real Windows hardware. |
 | Windows x86-64, hardware info (`pnr hwinfo`) | Implemented through Win32, untested on real Windows. |
 | Windows x86-64, running a game (`pnr run`, `pnr-launcher launch`) | **Blocked.** PNR loads ELF files, Windows cannot execute them. The Windows backend refuses and says so. |
+| Desktop UI (`pnr-ui`, docs/ui.md) | Linux only: Implemented for the Library screen (UI-1), Tested under Xvfb, untested on a real display/GPU. Windows: Blocked. |
 | Windows sandbox | Planned, notes only (docs/sandbox.md). Nothing built. |
 | Windows PSN token file hardening | Not implemented (docs/psn.md). |
 | Windows live PSN sync, store downloads, `ask`, `manifest suggest` | Not built or tested. These are Linux only. |
