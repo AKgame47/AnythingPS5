@@ -121,10 +121,34 @@ int cmd_import_json(library::GameDb& db, const std::string& file, bool complete,
   return 0;
 }
 
-int cmd_sync(library::GameDb& db, const std::string& tp, bool complete, bool json, std::string* out, HttpClient* client) {
+const char* live_warning() {
+  return "WARNING: live PSN sync\n"
+         "  - This uses an UNOFFICIAL route derived from community projects (psn-api, psn-mcp), not an approved Sony integration.\n"
+         "  - It has NEVER been tested against real Sony servers. It may fail, and it may be against Sony's terms.\n"
+         "  - Your token is as sensitive as a password. It is sent only to Sony's official hosts, and never printed or logged.\n"
+         "  - Use at your own risk. Offline alternative: 'psn import-json <saved response>' needs no network and no confirmation.\n";
+}
+
+int cmd_sync(library::GameDb& db, const std::string& tp, bool complete, bool json, const LiveConsent& consent, std::string* out, HttpClient* client) {
   std::string tok;
   Status s = token_load(tp, &tok);
   if (!s) { *out = fail_out(s, json); return 1; }
+  // F1 gate: nothing is sent before consent. The token was only read locally.
+  bool gate_flag = false;
+  if (consent.flag) {
+    gate_flag = true;
+  } else if (consent.interactive && consent.confirm) {
+    if (!consent.confirm(live_warning())) {
+      tok.assign(tok.size(), '\0');
+      *out = fail_out(Status::Fail(kErrConsent, "psn", "live sync not confirmed; nothing was sent"), json);
+      return 1;
+    }
+  } else {
+    tok.assign(tok.size(), '\0');
+    *out = fail_out(Status::Fail(kErrConsent, "psn", "live sync refused: it contacts Sony with your token and needs explicit consent. Run it on a terminal and confirm, or pass --live-ok to accept the risk (see 'psn sync' warning in docs/psn.md). Nothing was sent"), json);
+    if (!json) *out += live_warning();
+    return 1;
+  }
   std::unique_ptr<HttpClient> own;
   if (!client) {
     Status cs;
@@ -149,7 +173,8 @@ int cmd_sync(library::GameDb& db, const std::string& tp, bool complete, bool jso
            ",\"unchanged\":" + std::to_string(c.unchanged) + ",\"restored\":" + std::to_string(c.restored) + ",\"marked_missing\":" + std::to_string(c.marked_missing) + "}\n";
     return 0;
   }
-  *out = "PSN SYNC OK (live request to Sony's official hosts; token kept in memory only)\n";
+  *out = gate_flag ? std::string(live_warning()) + "\n" : std::string();
+  *out += "PSN SYNC OK (live request to Sony's official hosts; token kept in memory only)\n";
   *out += "  pages " + std::to_string(rep.pages) + ", entries accepted " + std::to_string(rep.parse.accepted) + ", skipped invalid " + std::to_string(rep.parse.skipped_invalid) +
           ", token refreshes " + std::to_string(rep.refreshes) + "\n";
   *out += "  added " + std::to_string(c.added) + ", updated " + std::to_string(c.updated) + ", unchanged " + std::to_string(c.unchanged) +
