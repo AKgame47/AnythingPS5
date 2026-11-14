@@ -7,10 +7,12 @@
 #include <string>
 
 #include "plugin/manager.hpp"
+#include "plugin/analyze.hpp"
 #include "plugin/manifest.hpp"
 #include "plugin/runner.hpp"
 #include "sandbox/sandbox.hpp"
 #include "plugin/semver.hpp"
+#include "plugin/signing.hpp"
 
 namespace fs = std::filesystem;
 using namespace pnr::plugin;
@@ -204,5 +206,61 @@ void pnr_plugin_tests(int& pass, int& fail) {
     }
     InstalledPlugin dd;  // data-only plugin
     check(rm.get("run.data", &dd) && !run_plugin(dd, root + "/rhome").started, "run: a data-only or disabled plugin never starts a process");
+  }
+
+  // ---- P3: static analysis + signatures (offline, nothing is executed) ----
+  {
+    std::string w;
+    check(is_console_binary_magic(std::string("\x4f\x15\x3d\x1d\0\0\0\0", 8), &w) && w.find("SELF") != std::string::npos, "analyze: a Sony SELF container is recognised and refused");
+    check(is_console_binary_magic(std::string("\x7f" "ELF\x02\x01\x01\x09", 8), &w), "analyze: a FreeBSD-ABI ELF (console payload style) is refused");
+    check(!is_console_binary_magic(std::string("\x7f" "ELF\x02\x01\x01\x00", 8), &w) && !is_console_binary_magic("hello", &w), "analyze: an ordinary Linux ELF or text is not called a console binary");
+    check(!piracy_findings("a.json", "{\"url\":\"https://mega.nz/file/abc\"}").empty() && !piracy_findings("a.txt", "magnet:?xt=urn:btih:abc").empty(), "analyze: file-locker hosts and magnet links are findings");
+    check(!piracy_findings("list.json", "fpkg dump list http://x.example/a.pkg").empty() && !piracy_findings("n.md", "installs kstuff after the jailbreak").empty(), "analyze: dump catalogs with links and exploit payload loaders are findings");
+    check(piracy_findings("notes.md", "Metadata for the user's own games. Reads a local JSON file and shows covers.").empty(), "analyze: ordinary plugin text has no findings");
+    check(is_refused_host("mega.nz") && is_refused_host("www.mediafire.com") && !is_refused_host("notmega.nz") && !is_refused_host("example.org"), "analyze: refused hosts match the domain and subdomains, not look-alikes");
+
+    PluginManager am(root + "/ahome");
+    auto mkd = [&](const std::string& id, const std::string& perms) {
+      fs::path d = fs::path(root) / "asrc" / id;
+      write(d / kManifestFile, manifest_json(id, "1.0.0", "", perms));
+      return d;
+    };
+    fs::path d1 = mkd("an.piracy", "[]"); write(d1 / "catalog.json", "{\"games\":[{\"download\":\"https://www.mediafire.com/file/x\"}]}");
+    auto r1 = am.install_from_dir(d1.string());
+    check(!r1.ok && r1.errors.size() >= 2 && !fs::exists(root + "/ahome/plugins/an.piracy"), "install: a download-provider payload for copyrighted games is refused and nothing is placed");
+    fs::path d2 = mkd("an.self", "[]"); write(d2 / "bin" / "game.bin", std::string("\x4f\x15\x3d\x1d", 4) + std::string(60, 'x'));
+    check(!am.install_from_dir(d2.string()).ok, "install: a plugin carrying a SELF container is refused");
+    check(!am.install_from_dir(mkd("an.net", "[\"net:mega.nz\"]").string()).ok, "install: a permission for a file-locker host is refused");
+    fs::path d3 = mkd("an.clean", "[]"); write(d3 / "notes.txt", "Shows covers for the user's own library.");
+    auto r3 = am.install_from_dir(d3.string());
+    check(r3.ok && r3.signature == "unsigned", "install: a clean plugin installs and is shown as unsigned");
+
+    // signatures
+    const std::string seed(64, '1');  // 32 bytes of 0x11 as hex
+    fs::path s1 = mkd("sg.one", "[]"); write(s1 / "data.txt", "hello");
+    std::string pub, err;
+    check(sign_dir(s1.string(), seed, &pub, &err) && pub.size() == 64 && !sign_dir(s1.string(), "zz", &pub, &err), "sign: a seed is needed and must be 64 hex characters");
+    auto u = am.install_from_dir(s1.string());
+    check(u.ok && u.signature.find("untrusted") != std::string::npos, "signature: a valid signature from an unpinned key proves nothing and says so");
+    fs::path s2 = mkd("sg.two", "[]"); write(s2 / "data.txt", "hello"); sign_dir(s2.string(), seed, &pub, &err);
+    check(!am.pin_key("bad name!", pub).ok && !am.pin_key("alice", "abcd").ok && am.pin_key("alice", pub).ok && !am.pin_key("alice", pub).ok, "pin: bad names, short keys and duplicate names are refused");
+    check(am.pinned_keys().size() == 1 && am.pinned_keys()[0].name == "alice", "pin: the pinned key persists");
+    auto v = am.install_from_dir(s2.string());
+    check(v.ok && v.signature.find("pinned key 'alice'") != std::string::npos, "signature: a valid signature from a pinned key is reported with the key name");
+    fs::path s3 = mkd("sg.three", "[]"); write(s3 / "data.txt", "hello"); sign_dir(s3.string(), seed, &pub, &err);
+    write(s3 / "data.txt", "hello, changed");
+    check(!am.install_from_dir(s3.string()).ok && !fs::exists(root + "/ahome/plugins/sg.three"), "signature: a changed file after signing is refused");
+    fs::path s4 = mkd("sg.four", "[]"); write(s4 / "data.txt", "hello"); sign_dir(s4.string(), seed, &pub, &err);
+    write(s4 / "extra.txt", "added later");
+    check(!am.install_from_dir(s4.string()).ok, "signature: a file added after signing is refused");
+    fs::path s5 = mkd("sg.five", "[]"); write(s5 / "data.txt", "hello"); write(s5 / kSigFile, "{\"key\":\"00\",\"signature\":\"00\"}");
+    check(!am.install_from_dir(s5.string()).ok, "signature: a malformed signature file is refused");
+    am.require_signed = true;
+    check(!am.install_from_dir(mkd("sg.six", "[]").string()).ok, "require-signed: an unsigned plugin is refused");
+    fs::path s7 = mkd("sg.seven", "[]"); write(s7 / "data.txt", "hello"); sign_dir(s7.string(), std::string(64, '2'), &pub, &err);
+    check(!am.install_from_dir(s7.string()).ok, "require-signed: a valid signature from an unpinned key is refused");
+    fs::path s8 = mkd("sg.eight", "[]"); write(s8 / "data.txt", "hello"); sign_dir(s8.string(), seed, &pub, &err);
+    check(am.install_from_dir(s8.string()).ok, "require-signed: a valid signature from a pinned key installs");
+    check(am.unpin_key("alice").ok && !am.unpin_key("alice").ok && am.pinned_keys().empty(), "pin: unpin removes the key, and an unknown name is an error");
   }
   fs::remove_all(root); }
