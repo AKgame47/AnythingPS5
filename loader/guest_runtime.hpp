@@ -72,4 +72,18 @@ std::int64_t guest_thread_join(std::int64_t handle, std::int64_t* ret);
 std::int64_t guest_mutex_op(int op, std::int64_t* handle);  // 0 init 1 lock 2 unlock 3 destroy
 std::int64_t guest_thread_self();
 
+// Kernel sync objects (slice S1). Handles are registry ids, never raw pointers, so a guest passing a
+// stale or forged handle gets an error instead of the host dereferencing guest-controlled memory.
+// Return 0 on success, a negative error otherwise (-2 bad handle/argument, -3 failed, -4 timed out).
+enum : int { kCondInit = 0, kCondWait = 1, kCondSignal = 2, kCondBroadcast = 3, kCondDestroy = 4 };
+std::int64_t guest_cond_init(std::int64_t* handle);
+// Waits on cond with the guest mutex (the existing guest_mutex_op handle). timeout_us < 0 waits forever.
+std::int64_t guest_cond_wait(std::int64_t cond, std::int64_t* mutex_handle, std::int64_t timeout_us);
+std::int64_t guest_cond_wake(std::int64_t cond, bool all);
+std::int64_t guest_cond_destroy(std::int64_t* handle);
+std::int64_t guest_sema_create(std::int64_t* handle, std::int64_t initial, std::int64_t max);
+std::int64_t guest_sema_wait(std::int64_t sema, std::int64_t need, std::int64_t timeout_us);  // <0 forever
+std::int64_t guest_sema_signal(std::int64_t sema, std::int64_t count);
+std::int64_t guest_sema_destroy(std::int64_t* handle);
+
 }  // namespace pnr::loader
