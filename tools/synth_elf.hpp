@@ -16,6 +16,15 @@ struct SynthSpec {
 // through NID-named imports, and returns the length (30) as its exit code.
 std::vector<std::uint8_t> build_synthetic_ps_elf(const SynthSpec& spec);
 
+// Slice C2: a module that exercises the libkernel ABI from machine code. It returns 0 when every
+// check passes, otherwise the number of the first failing check (1..14):
+//  1 argc==1   2 TCB self pointer   3 .tdata initial value   4 .tbss zeroed   5 TLS write/read
+//  6 mmap with Sony flags   7 mapped memory usable   8 clock_gettime   9-12 mutex init/lock/unlock/destroy
+//  13 thread create   14 thread ran with its own TCB and joined
+// `break_tls` drops PT_TLS so check 3 must fail (negative test).
+struct KernelSpec { bool break_tls = false; };
+std::vector<std::uint8_t> build_synthetic_kernel_elf(const KernelSpec& spec);
+
 extern const char* const kSynthMessage;
 constexpr int kSynthExitCode = 30;
 
