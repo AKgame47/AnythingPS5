@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2836/2836 unit tests, 22/22 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2741 unit checks without it; the
+Test state: **2855/2855 unit tests, 22/22 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2760 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -208,6 +208,7 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Vertex buffer fetch - V# descriptors (slice S15): "PVS5" blob adds 6 fetch kernels (pos xyz + colour rgb) ahead of the batched clip kernels; each gathers one float component per dispatch from raw V#-described records (base 44-bit, stride, num_records; layout from public shadPS4 resource.h/pixel_format.h, values only); like GNM fetch shaders the code is built per layout and the blob header carries it - the bound V# is validated against it (stride, format, records, identity swizzle) | Experimental, Tested on lavapipe: strided/interleaved, packed and Format32_32_32_32 (w ignored) vertex data all render byte-identical to the raw-pointer reference; 66-vertex batched draw crosses two fetch dispatches; add_tid, swizzled, unorm/integer, packed 8-bit, non-identity dst_sel, short-buffer and layout-mismatch bindings refused with plain reasons; 32-bit float formats only (unorm/snorm/integer conversion Planned - needs lshr + cvt_f32_u32 in the translator), hardware GPU untested |
 | 8_8_8_8 unorm vertex colours (slice S16): the fetch kernels convert packed byte colours in translated RDNA - v_and byte mask, cvt to float, fmul by 1/(255*256^c) (bytes 0..2 stay below 2^24 so the signed cvt is exact; the error is ~2 ulp, far under the 0.5/255 UNORM8 quantization step); 8_8_8_8 positions and snorm/integer byte data refused | Experimental, Tested on lavapipe: constant-colour quad through a packed record (xyz floats + colour dword, stride 16) renders byte-identical to the float reference with colours byte/255, centre byte-exact (255,128,64); 2_10_10_10 and 8_8_8_8-with-float-numerics bindings refused with plain reasons; alpha byte not fetched (needs unsigned cvt), hardware GPU untested |
 | Texture sampling - T#/S# descriptors (slice S17): "PPS2" pixel blob binds the T# (image resource, 8 dwords: base 38-bit <<8, format, size, swizzle, tiling index; layout from public shadPS4 resource.h/tiling.h, values only) and S# (sampler, 4 dwords: clamp modes, filters) addressed by pixel user data 0..3; the guest texture pixels are staged into the frame and sampled by the host rasterizer's fragment stage with the S#'s filters and addressing (wrap/mirror/clamp/mirror-once); the vertex uv arrives as a second varying | Experimental, Tested on lavapipe: 4x4 checker nearest draw byte-exact in 16-pixel blocks, wrap addressing repeats the pattern every 32 pixels, bilinear midpoint is the four-texel average and texel centres stay exact, missing pointers / tiled / border-clamp / PVS4-combination refused with plain reasons; sampling is not translated RDNA yet, Color2D 8_8_8_8 unorm linear only, no mips/arrays/3D, 256x256 staging cap, hardware GPU untested |
+| Face culling + front face (slice S18): PA_SU_SC_MODE_CNTL cull-front / cull-back / front-face bits (layout from public shadPS4 regs_primitive.h, values only) drive the host rasterizer's cull mode; GNM window-space facing matches the host pipeline because the guest viewport y-flip cancels Vulkan's negated area convention; strips and fans keep one consistent winding after host expansion, so cull-back preserves them | Experimental, Tested on lavapipe: both windings kept with the register absent or zero, cull-back / cull-front / CW front / front+back all select the right triangles, indexed and textured draws honour the state, culling composes with depth testing, line/point polygon modes / polygon offset / window offset / perspective-correct disable / multi-primitive index buffers refused with plain reasons; provoking-vertex bit ignored (no flat varyings), hardware GPU untested |
 | Full64 runtime pointers: scalar add/addc/sub/subb pair arithmetic, carry-aware FLAT offsets, lexicographic bounds/alignment guards | Experimental, Tested (cross-low-word bindings, overflow/borrow/OOB, spirv-val + lavapipe); single invocation, existing bounded SSBO only |
 | Strict counted loop: scalar constant or runtime uniform count 1..64, one uint32 vector accumulator add, decrement/compare/backedge; real SPIR-V LoopMerge/Phi | Experimental, Tested (1/2/8/64 invocations, 1/2/16/64 counts, spirv-val + lavapipe); invalid runtime count rejected before dispatch plus GPU no-op guard; no body memory, nesting or general CFG |
 | Proof-checked copy loop: guarded dword load/store, two affine pointer increments, constant/runtime uniform count; exact lane x iteration collision/alias proof | Experimental, Tested (spirv-val + lavapipe, tiled/transposed maps, offsets, invalid-count no-op); no in-place updates, full64 loop pointers or broader body/control flow |
@@ -222,12 +223,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2836/2836 unit tests pass (2741 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
+**2855/2855 unit tests pass (2760 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2741/2741
+not re-run for these counts). ASan+UBSan: 2760/2760
 unit tests pass (the sanitizer build has no `spirv-val`), leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
