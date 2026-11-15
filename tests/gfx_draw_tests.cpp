@@ -404,6 +404,18 @@ struct TexScene {
     return std::uint16_t(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
   }
   void bc_solid(std::uint8_t* blk, std::uint32_t df, std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a) {
+    if (df == 41) {  // BC7: mode-6 solid; raw 7-bit = v>>1, shared P-bit = v&1 (needs equal parity)
+      for (int i = 0; i < 16; ++i) blk[i] = 0;
+      const int raw[4] = {r >> 1, g >> 1, b >> 1, a >> 1};
+      const std::uint32_t pb = (r & 1) && (g & 1) && (b & 1) && (a & 1) ? 1 : 0;
+      int pos = 0;
+      auto put = [&](std::uint64_t v, int n) { for (int i = 0; i < n; ++i, ++pos) blk[pos / 8] |= std::uint8_t(((v >> i) & 1) << (pos % 8)); };
+      put(0x40, 7);
+      for (int c = 0; c < 4; ++c) { put(raw[c], 7); put(raw[c], 7); }
+      put(pb, 1); put(pb, 1);
+      for (int i = 0; i < 16; ++i) put(0, i == 0 ? 3 : 4);
+      return;
+    }
     if (df == 38) { blk[0] = r; blk[1] = r; for (int i = 2; i < 8; ++i) blk[i] = 0; return; }  // BC4: red only
     if (df == 39) {  // BC5: one value block per channel
       blk[0] = r; blk[1] = r; for (int i = 2; i < 8; ++i) blk[i] = 0;
@@ -1540,6 +1552,19 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       auto r = s.run(vk);
       check(r.ok && px(r, 32, 32)[0] == 10 && px(r, 32, 32)[1] == 0 && px(r, 32, 32)[3] == 255,
             "bc: BC1 sRGB solid converts through the host sampler byte-exact"); }
+    // BC7 sRGB solid: the same mode-6 block; sRGB(201,101,51) -> (149,33,4).
+    { TexScene s; std::vector<std::uint8_t> b(16);
+      int pos = 0;
+      auto put = [&](std::uint64_t v, int n) { for (int i = 0; i < n; ++i, ++pos) b[pos / 8] |= std::uint8_t(((v >> i) & 1) << (pos % 8)); };
+      put(0x40, 7);
+      const int raw[4] = {100, 50, 25, 127};
+      for (int c = 0; c < 4; ++c) { put(raw[c], 7); put(raw[c], 7); }
+      put(1, 1); put(1, 1);
+      for (int i = 0; i < 16; ++i) put(0, i == 0 ? 3 : 4);
+      s.build_plain(41, 9, 4, b);
+      auto r = s.run(vk);
+      check(r.ok && px(r, 32, 32)[0] == 149 && px(r, 32, 32)[1] == 33 && px(r, 32, 32)[2] == 8,
+            "bc: BC7 sRGB solid converts through the host sampler byte-exact"); }
     // Tiled R16G16 unorm checker (SW_64KB_S, mode 9).
     { TexScene s; s.build_tiled(9, 5, 4, 0, 1.0f, 0);
       auto r = s.run(vk);
@@ -1671,6 +1696,26 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       const std::uint8_t* p = r.ok ? &r.rgba[(32 * 64 + 32) * 4] : nullptr;
       check(r.ok && p[0] == 80 && p[1] == 160 && p[2] == 0 && p[3] == 255,
             "bc: BC5 decodes into red and green channels"); }
+    // Slice S24: BC7 end to end. Hand-built mode-6 solid block: raw 7-bit
+    // endpoints (100, 50, 25, 127) + P-bit 1 decode to (201, 101, 51, 255).
+    { TexScene s; s.build_bc(41, 1.0f, 4, 0, 0, 0, 0, 0);   // BC7 solid, point
+      std::uint8_t blk[16] = {}; int pos = 0;
+      auto put = [&](std::uint64_t v, int n) { for (int i = 0; i < n; ++i, ++pos) blk[pos / 8] |= std::uint8_t(((v >> i) & 1) << (pos % 8)); };
+      put(0x40, 7);                        // mode 6
+      const int raw[4] = {100, 50, 25, 127};
+      for (int c = 0; c < 4; ++c) { put(raw[c], 7); put(raw[c], 7); }  // both endpoints, channel-major
+      put(1, 1); put(1, 1);                // P-bits
+      for (int i = 0; i < 16; ++i) put(0, i == 0 ? 3 : 4);  // weights 0 (anchor 3 bits)
+      for (int i = 0; i < 16; ++i) s.texels[i] = blk[i];
+      auto r = s.run(vk);
+      const std::uint8_t* p = r.ok ? centre(r) : nullptr;
+      check(r.ok && p[0] == 201 && p[1] == 101 && p[2] == 51 && p[3] == 255,
+            "bc: BC7 mode 6 solid draw decodes byte-exact"); }
+    { TexScene s; s.build_bc(41, 16.0f, 8, 2, 1);  // BC7 chain, point, footprint 2 -> lod 1
+      auto r = s.run(vk);
+      const std::uint8_t* p = r.ok ? centre(r) : nullptr;
+      check(r.ok && p[0] == 0 && p[1] == 254 && p[2] == 0,
+            "bc: BC7 mip chain selects level 1"); }  // 255 quantizes to 254 in mode 6 (P-bit 0)
   }
 
   // ---- slice S18: face culling + front face (PA_SU_SC_MODE_CNTL) ----
