@@ -22,10 +22,13 @@ struct VSharp {
   bool swizzle_enable = false, add_tid = false, type_valid = true;
 };
 
-// Float component count of a supported vertex data format (0 = unsupported).
+// Component count of a supported vertex data format (0 = unsupported).
+// Format 10 (8_8_8_8) is fetchable when unorm (slice S16): bytes 0..2
+// convert exactly with the signed cvt + scale path in the fetch kernel.
 inline unsigned vsharp_components(std::uint32_t data_format) {
   switch (data_format) {
     case 4: return 1;    // Format32
+    case 10: return 4;   // Format8_8_8_8 (unorm fetch only)
     case 11: return 2;   // Format32_32
     case 13: return 3;   // Format32_32_32
     case 14: return 4;   // Format32_32_32_32
@@ -52,17 +55,25 @@ inline bool decode_vsharp(const std::uint32_t w[4], VSharp* v) {
   return v->num_records != 0;
 }
 
-// Fetch-stage rules for this slice: plain float vertex data, identity
-// swizzle, no linear/tiled extras. need = components the stage consumes.
+// Fetch-stage rules for this slice: float vertex data, plus 8_8_8_8 unorm
+// where allow_unorm8888 (colour attributes; slice S16). Identity swizzle, no
+// linear/tiled extras. need = components the stage consumes.
 inline bool validate_vsharp_fetch(const VSharp& v, unsigned need, std::uint32_t vertices,
-                                  std::uint32_t expect_stride_words, std::string* why) {
+                                  std::uint32_t expect_stride_words, std::string* why,
+                                  bool allow_unorm8888 = false) {
   auto no = [&](const char* m) { *why = m; return false; };
   if (!v.type_valid) return no("V# type field is nonzero (a buffer descriptor must be type 0)");
   if (v.swizzle_enable) return no("V# swizzled buffers are not supported");
   if (v.add_tid) return no("V# add_tid_enable buffers are not supported");
-  if (v.num_format != 7) return no("V# number format is not float (unorm/snorm/integer vertex data is not implemented)");
+  const bool unorm8888 = v.data_format == 10;
+  if (unorm8888 && !allow_unorm8888)
+    return no("V# 8_8_8_8 positions are not supported (packed byte positions need more than the float path)");
+  if (unorm8888 && v.num_format != 0)
+    return no("V# 8_8_8_8 is only fetchable with unorm numerics (snorm/integer 8-bit is not implemented)");
+  if (!unorm8888 && v.num_format != 7)
+    return no("V# number format is not float (snorm/integer 32-bit vertex data is not implemented)");
   const unsigned comps = vsharp_components(v.data_format);
-  if (comps == 0) return no("V# data format is not a supported 32-bit float format (8/16-bit and packed formats are not implemented)");
+  if (comps == 0) return no("V# data format is not supported (8/16-bit and packed formats other than 8_8_8_8 unorm are not implemented)");
   if (comps < need) return no("V# data format has fewer components than the stage needs");
   const std::uint32_t stride_words = v.stride ? v.stride / 4 : comps;
   if (v.stride && (v.stride % 4)) return no("V# stride is not a whole number of dwords");
