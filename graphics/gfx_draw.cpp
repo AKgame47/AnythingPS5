@@ -7,8 +7,10 @@
 
 #include "graphics/demo/clip_shaders.hpp"
 #include "graphics/demo/cliptex_shaders.hpp"
+#include "graphics/demo/cliptex3_shaders.hpp"
 #include "graphics/demo/spin_shaders.hpp"
 #include "graphics/demo/tex_shaders.hpp"
+#include "graphics/demo/texarr_shaders.hpp"
 #include "graphics/gfx_tsharp.hpp"
 #include "graphics/gfx_bc.hpp"
 #include "graphics/gfx_swizzle.hpp"
@@ -331,11 +333,13 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   // the vertex colour varying. Sampling is not translated RDNA in this
   // slice, stated in the notes.
   bool pps2 = false;
+  bool want_array = false;  // PPS2 blob v1: Color2DArray T# (slice S27)
   TexInput tex;
   std::vector<std::uint8_t> texels;
   {
     std::uint32_t p2[2];
-    if (!pps1 && mem.read(b.ps.address, p2, sizeof p2) && p2[0] == kPnrPs2Magic && p2[1] == 0) {
+    if (!pps1 && mem.read(b.ps.address, p2, sizeof p2) && p2[0] == kPnrPs2Magic && p2[1] <= 1) {
+      want_array = p2[1] == 1;  // v0 = 2D, v1 = 2D array; the T# type must agree below
       std::uint64_t t_va = 0, s_va = 0;
       if (!read_u64(b.ps, 0, &t_va) || !read_u64(b.ps, 2, &s_va))
         return fail(r, "PPS2 blob needs pixel user data 0..3 (T# and S# descriptor addresses)");
@@ -345,6 +349,9 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
       if (!decode_tsharp(tw, &ts)) return fail(r, "T# descriptor is not a valid image (the type valid bit is clear)");
       std::string why;
       if (!validate_tsharp_sample(ts, 1ull << 48, &why)) return fail(r, "T#: " + why);
+      if (want_array != (ts.type == 13))
+        return fail(r, "PPS2 blob version does not match the T# image type (v1 = Color2DArray)");
+      const std::uint32_t nslices = ts.type == 13 ? ts.last_array + 1 : 1;
       if (ts.width > 256 || ts.height > 256)
         return fail(r, "T# extent is over 256x256 (this slice's rasterizer staging cap)");
       if (!mem.read(s_va, sw, sizeof sw)) return fail(r, "S# descriptor is not mapped: " + mem.last_error());
@@ -366,11 +373,13 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
         return fail(r, "T# plain format is not in the sampled subset");
       const std::uint32_t eb = bc ? bb : pf.element_bytes;
       const std::uint32_t levels = ts.last_level + 1;
+      // Slice S27: an array surface holds nslices slices per mip level in
+      // the guest, level-major (the layout the validator bounds).
       std::uint64_t chain_bytes = 0;
       for (std::uint32_t l = 0; l < levels; ++l) {
         const std::uint32_t lw = ts.width >> l ? ts.width >> l : 1;
         const std::uint32_t lh = ts.height >> l ? ts.height >> l : 1;
-        chain_bytes += std::uint64_t(lw) * lh * 4;
+        chain_bytes += std::uint64_t(lw) * lh * 4 * nslices;
       }
       texels.resize(chain_bytes);
       // Tiled (thin swizzle) surfaces: normalize the base for pipe/bank XOR
@@ -438,23 +447,31 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
         }
         if (!bc) {
           raw.resize(rows * row_bytes);
-          for (std::uint32_t row = 0; row < rows; ++row)
-            if (!mem.read(src + std::uint64_t(row) * src_row, raw.data() + std::size_t(row) * row_bytes, row_bytes))
-              return fail(r, "T# pixels are not mapped: " + mem.last_error());
-          for (std::uint32_t row = 0; row < rows; ++row)
-            convert_plain_row(ts.data_format, ts.num_format, raw.data() + std::size_t(row) * row_bytes,
-                              texels.data() + off + std::size_t(row) * std::uint64_t(lw) * 4, lw);
+          for (std::uint32_t s = 0; s < nslices; ++s) {
+            const std::uint64_t slice_base = src + std::uint64_t(s) * src_row * rows;
+            for (std::uint32_t row = 0; row < rows; ++row)
+              if (!mem.read(slice_base + std::uint64_t(row) * src_row, raw.data() + std::size_t(row) * row_bytes, row_bytes))
+                return fail(r, "T# pixels are not mapped: " + mem.last_error());
+            for (std::uint32_t row = 0; row < rows; ++row)
+              convert_plain_row(ts.data_format, ts.num_format, raw.data() + std::size_t(row) * row_bytes,
+                                texels.data() + off + std::size_t(s) * std::uint64_t(lw) * lh * 4 + std::size_t(row) * std::uint64_t(lw) * 4, lw);
+          }
         } else {
           raw.resize(rows * row_bytes);
-          for (std::uint32_t row = 0; row < rows; ++row)
-            if (!mem.read(src + std::uint64_t(row) * src_row, raw.data() + std::size_t(row) * row_bytes, row_bytes))
-              return fail(r, "T# blocks are not mapped: " + mem.last_error());
-          decode_bc_level(ts.data_format, raw.data(), row_bytes, lw, lh, texels.data() + off, ts.num_format == 5);
+          for (std::uint32_t s = 0; s < nslices; ++s) {
+            const std::uint64_t slice_base = src + std::uint64_t(s) * src_row * rows;
+            for (std::uint32_t row = 0; row < rows; ++row)
+              if (!mem.read(slice_base + std::uint64_t(row) * src_row, raw.data() + std::size_t(row) * row_bytes, row_bytes))
+                return fail(r, "T# blocks are not mapped: " + mem.last_error());
+            decode_bc_level(ts.data_format, raw.data(), row_bytes, lw, lh,
+                            texels.data() + off + std::size_t(s) * std::uint64_t(lw) * lh * 4, ts.num_format == 5);
+          }
         }
-        src += src_row * rows;
-        off += std::uint64_t(lw) * lh * 4;
+        src += src_row * rows * nslices;
+        off += std::uint64_t(lw) * lh * 4 * nslices;
       }
       tex.rgba = texels.data(); tex.w = ts.width; tex.h = ts.height;
+      tex.layers = nslices;
       tex.srgb = format_uses_srgb_image(ts.data_format, ts.num_format);  // S23: host-side sRGB
       tex.mag_filter = ss.mag_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
       tex.min_filter = ss.min_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
@@ -515,7 +532,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   std::uint64_t mat_va = 0;
   if (!read_u64(*vs, 0, &mat_va)) return fail(r, "vertex user data 0..1 (matrix address) not set");
   std::vector<std::uint32_t> mat(16);
-  const std::uint32_t stride = pvs4 ? 9 : (pps2 ? 8 : 6);  // PVS4: normals (S11); PPS2: uv (S17)
+  const std::uint32_t stride = pvs4 ? 9 : (pps2 ? (want_array ? 9 : 8) : 6);  // PVS4: normals (S11); PPS2: uv (S17), uv+layer (S27)
   std::vector<float> vb;
   if (!mem.read(mat_va, mat.data(), 64)) return fail(r, "matrix address is not mapped: " + mem.last_error());
   if (pvs5) {
@@ -647,7 +664,9 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   for (std::uint32_t i = 0; i < n; ++i) {
     for (int c = 0; c < 4; ++c) verts.push_back(clip[i * 4 + c]);
     for (int c = 0; c < 3; ++c) verts.push_back(pps1 ? ps_colour[c] : pvs4 ? shade[i * 3 + c] : vb[i * stride + 3 + c]);
-    if (pps2) { verts.push_back(vb[i * stride + 6]); verts.push_back(vb[i * stride + 7]); }
+    if (pps2) { verts.push_back(vb[i * stride + 6]); verts.push_back(vb[i * stride + 7]);
+      if (want_array) verts.push_back(vb[i * stride + 8]);  // slice index
+    }
     idx.push_back(i);
   }
   if (!indices.empty()) idx = indices;
@@ -665,7 +684,12 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   (void)frame_changed;  // the renderer restarts the frame on size change; binding change is below
   if (frame.surface.color_image != 0 && frame_changed) vk.destroy_frame(frame.surface);
   Status st;
-  if (pps2) {
+  if (pps2 && want_array) {
+    std::vector<std::uint32_t> tvsp(std::begin(cliptex3_vert), std::end(cliptex3_vert)), tfsp(std::begin(texarr_frag), std::end(texarr_frag));
+    st = vk.render_textured_array_clip_mesh_rgba(w, h, tvsp, tfsp, verts, idx, use_depth, tex, clear, &r.rgba,
+                                                 &frame.surface, depth_write, blend.enable ? &blend : nullptr,
+                                                 cull_mode, front_face, depth_compare);
+  } else if (pps2) {
     std::vector<std::uint32_t> tvsp(std::begin(cliptex_vert), std::end(cliptex_vert)), tfsp(std::begin(tex_frag), std::end(tex_frag));
     st = vk.render_textured_clip_mesh_rgba(w, h, tvsp, tfsp, verts, idx, use_depth, tex, clear, &r.rgba,
                                            &frame.surface, depth_write, blend.enable ? &blend : nullptr,
@@ -682,7 +706,8 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
                  : pvs2 ? "PVS2 blob: clip and perspective divide are translated RDNA, w = 1 fed to the rasterizer"
                         : "vertex shader is a PNR PVS1 test blob";
   r.notes += pps1 ? "; pixel shader is a translated PPS1 blob (constant colour, no varyings)"
-                  : pps2 ? "; pixel stage is a PPS2 blob: texture built from the guest T# (linear 8_8_8_8 unorm), sampler state from the guest S#, sampled by the host rasterizer's fragment stage (sampling is not translated RDNA yet)"
+                  : pps2 ? (want_array ? "; pixel stage is a PPS2 v1 blob: 2D texture array built from the guest T# (level-major slices), sampler state from the guest S#, slice index from the vertex record, sampled by the host rasterizer's fragment stage (sampling is not translated RDNA yet)"
+                                       : "; pixel stage is a PPS2 blob: texture built from the guest T# (linear 8_8_8_8 unorm), sampler state from the guest S#, sampled by the host rasterizer's fragment stage (sampling is not translated RDNA yet)")
                          : "; pixel shader not translated: fixed pass-through colour used";
   if (draw.kind == pm4::DrawKind::Indexed) r.notes += "; indexed draw: index buffer fetched from guest memory";
   if (tristrip) r.notes += "; triangle strip expanded to a list on the host (winding corrected)";
