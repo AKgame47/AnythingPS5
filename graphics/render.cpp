@@ -50,7 +50,7 @@ Status VulkanBackend::render_clip_mesh_rgba(
     const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
     const std::vector<uint32_t>& indices, bool depth, const float clear[4],
     std::vector<uint8_t>* image, FrameSurface* shared_frame, bool depth_write,
-    const BlendState* blend) {
+    const BlendState* blend, int32_t cull_mode, int32_t front_face) {
   if (!image) return Status::Fail(100, "vulkan", "clip mesh render needs an output image");
   if (vertices.empty() || vertices.size() % 7 || vertices.size() / 7 > 65536)
     return Status::Fail(100, "vulkan", "clip mesh vertices must be float4 clip position + float3 colour (multiple of 7 floats, max 65536 vertices)");
@@ -62,6 +62,7 @@ Status VulkanBackend::render_clip_mesh_rgba(
   MeshInput m;
   m.vertices = &vertices; m.pos_floats = 4; m.indices = &indices; m.depth = depth;
   m.shared_frame = shared_frame; m.depth_write = depth_write; m.blend = blend;
+  m.cull_mode = cull_mode; m.front_face = front_face;
   std::vector<std::vector<uint8_t>> frames;
   auto st = render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, nullptr, clear, &frames);
   if (!st) return st;
@@ -98,7 +99,7 @@ Status VulkanBackend::render_textured_clip_mesh_rgba(
     const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
     const std::vector<uint32_t>& indices, bool depth, const TexInput& tex,
     const float clear[4], std::vector<uint8_t>* image, FrameSurface* shared_frame,
-    bool depth_write, const BlendState* blend) {
+    bool depth_write, const BlendState* blend, int32_t cull_mode, int32_t front_face) {
   if (!image) return Status::Fail(100, "vulkan", "textured clip mesh render needs an output image");
   if (vertices.empty() || vertices.size() % 9 || vertices.size() / 9 > 65536)
     return Status::Fail(100, "vulkan", "textured clip mesh vertices must be float4 clip position + float3 colour + float2 uv (multiple of 9 floats, max 65536 vertices)");
@@ -110,6 +111,7 @@ Status VulkanBackend::render_textured_clip_mesh_rgba(
   MeshInput m;
   m.vertices = &vertices; m.pos_floats = 4; m.extra_floats = 2; m.indices = &indices; m.depth = depth;
   m.tex = &tex; m.shared_frame = shared_frame; m.depth_write = depth_write; m.blend = blend;
+  m.cull_mode = cull_mode; m.front_face = front_face;
   std::vector<std::vector<uint8_t>> frames;
   auto st = render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, nullptr, clear, &frames);
   if (!st) return st;
@@ -737,8 +739,10 @@ Status VulkanBackend::render_core(
   vps.viewportCount = 1; vps.pViewports = &vp; vps.scissorCount = 1; vps.pScissors = &sc;
   VkPipelineRasterizationStateCreateInfo rs{};
   rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-  rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
-  rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+  rs.polygonMode = VK_POLYGON_MODE_FILL;
+  rs.cullMode = mesh ? mesh->cull_mode : (int32_t)VK_CULL_MODE_NONE;
+  rs.frontFace = mesh ? mesh->front_face : (int32_t)VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  rs.lineWidth = 1.0f;
   VkPipelineMultisampleStateCreateInfo ms{};
   ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
   ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
