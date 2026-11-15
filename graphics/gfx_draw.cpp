@@ -107,18 +107,21 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (!b.ps.present) return fail(r, "no pixel-stage shader address set");
   if (!b.color0.present || !b.has_scissor) return fail(r, "colour target 0 or screen scissor not set");
   // Slice S12: depth testing. DB_DEPTH_CONTROL bit 1 switches on the host
-  // depth attachment; only the LESS compare (bits 4..6 = 1) is supported,
-  // stencil (bit 0) is refused. The depth surface is per-draw: it is created
-  // and destroyed with this draw, so there is no cross-draw depth and no
-  // depth readback, and DB_DEPTH_CLEAR/compare selection beyond LESS are not
-  // tracked yet (the host clears to 1.0).
+  // depth attachment; stencil (bit 0) is refused. Slice S26: all eight
+  // compare functions (bits 4..6) are supported - the AMD CompareFunc
+  // encoding 0..7 (never/less/equal/lequal/greater/notequal/gequal/always)
+  // matches the VkCompareOp values exactly, so the field passes through raw.
+  // The depth surface is per-draw: it is created and destroyed with this
+  // draw, so there is no cross-draw depth and no depth readback, and
+  // DB_DEPTH_CLEAR is not tracked yet (the host clears to 1.0).
   bool use_depth = false;
   bool depth_write = true;
   std::uint64_t z_base = 0;
+  int32_t depth_compare = VK_COMPARE_OP_LESS;
   if (b.depth_control_set) {
     if (b.depth_control & 1) return fail(r, "stencil testing is not supported");
     if (b.depth_control & 2) {
-      if (((b.depth_control >> 4) & 7) != 1) return fail(r, "only the LESS depth compare function is supported");
+      depth_compare = (int32_t)((b.depth_control >> 4) & 7);
       use_depth = true;
       depth_write = (b.depth_control & 4) != 0;
     }
@@ -666,11 +669,11 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     std::vector<std::uint32_t> tvsp(std::begin(cliptex_vert), std::end(cliptex_vert)), tfsp(std::begin(tex_frag), std::end(tex_frag));
     st = vk.render_textured_clip_mesh_rgba(w, h, tvsp, tfsp, verts, idx, use_depth, tex, clear, &r.rgba,
                                            &frame.surface, depth_write, blend.enable ? &blend : nullptr,
-                                           cull_mode, front_face);
+                                           cull_mode, front_face, depth_compare);
   } else {
     st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, use_depth, clear, &r.rgba,
                                   &frame.surface, depth_write, blend.enable ? &blend : nullptr,
-                                  cull_mode, front_face);
+                                  cull_mode, front_face, depth_compare);
   }
   if (!st) return fail(r, "Vulkan draw failed: " + st.error.message);
   r.notes = pvs4 ? "PVS4 blob: clip and Gouraud shade varyings are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices); the rasterizer interpolates the shade"
@@ -684,10 +687,13 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (draw.kind == pm4::DrawKind::Indexed) r.notes += "; indexed draw: index buffer fetched from guest memory";
   if (tristrip) r.notes += "; triangle strip expanded to a list on the host (winding corrected)";
   if (trifan) r.notes += "; triangle fan expanded to a list on the host";
-  if (use_depth && z_base)
-    r.notes += "; depth testing on (LESS, frame-persistent depth surface, no readback)";
-  else if (use_depth)
-    r.notes += "; depth testing on (LESS, per-draw depth surface, no cross-draw depth or readback)";
+  if (use_depth) {
+    static const char* const kCmpNames[8] = {"NEVER", "LESS", "EQUAL", "LEQUAL",
+                                             "GREATER", "NOTEQUAL", "GEQUAL", "ALWAYS"};
+    r.notes += std::string("; depth testing on (") + kCmpNames[depth_compare & 7];
+    r.notes += z_base ? ", frame-persistent depth surface, no readback)"
+                      : ", per-draw depth surface, no cross-draw depth or readback)";
+  }
   if (frame.surface.color_image != 0)
     r.notes += "; shared frame targets (draws accumulate into the bound colour target)";
   if (blend.enable)
