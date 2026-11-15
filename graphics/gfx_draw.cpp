@@ -191,6 +191,37 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     if (!func(cf, &blend.color_op) || !func(sep ? af : cf, &blend.alpha_op))
       return fail(r, "blend function not supported");
   }
+  // Slice S18: PA_SU_SC_MODE_CNTL culling and front face. Bit layout from
+  // public shadPS4 regs_primitive.h (PolygonControl - values only, no code):
+  // bit 0 cull_front, bit 1 cull_back, bit 2 front_face (0=CCW, 1=CW). GNM
+  // determines facing in its window coordinates (guest viewport applied);
+  // this path hands the rasterizer NDC and lets the host's fixed-function
+  // viewport map it, which differs from the guest window space by the
+  // y-flip the guest viewport would have done - but Vulkan's facing
+  // convention negates the framebuffer-area formula, so the two sign flips
+  // cancel and the GNM cull/face bits map straight onto the host pipeline
+  // (validated against both windings in the tests). Non-fill polygon modes,
+  // polygon offset, window offset, perspective-correct-disable and
+  // multi-primitive index buffers are refused with named reasons; the
+  // provoking-vertex bit has no meaning in this subset (no flat varyings)
+  // and is ignored, stated in the notes.
+  int32_t cull_mode = VK_CULL_MODE_NONE;
+  int32_t front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  if (b.mode_cntl_set) {
+    const std::uint32_t mc = b.mode_cntl;
+    if ((mc >> 3) & 3) {
+      const std::uint32_t pf = (mc >> 5) & 7, pb = (mc >> 8) & 7;
+      if (pf != 2 || pb != 2)
+        return fail(r, "polygon mode is not fill (point/line modes are not supported)");
+    }
+    if (mc & (7u << 11)) return fail(r, "polygon offset is not supported");
+    if (mc & (1u << 16)) return fail(r, "window offset is not supported");
+    if (mc & (1u << 20)) return fail(r, "disabling perspective-correct interpolation is not supported");
+    if (mc & (1u << 21)) return fail(r, "multi-primitive index buffers are not supported");
+    if (mc & 1) cull_mode |= VK_CULL_MODE_FRONT_BIT;
+    if (mc & 2) cull_mode |= VK_CULL_MODE_BACK_BIT;
+    if (mc & 4) front_face = VK_FRONT_FACE_CLOCKWISE;
+  }
   // Slice S7: indexed draws fetch the index buffer from guest memory. The
   // vertex transform runs over the referenced vertices (max index + 1);
   // indices pass through unchanged. Slice S9: PVS1/PVS2 blobs run one
@@ -522,10 +553,12 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (pps2) {
     std::vector<std::uint32_t> tvsp(std::begin(cliptex_vert), std::end(cliptex_vert)), tfsp(std::begin(tex_frag), std::end(tex_frag));
     st = vk.render_textured_clip_mesh_rgba(w, h, tvsp, tfsp, verts, idx, use_depth, tex, clear, &r.rgba,
-                                           &frame.surface, depth_write, blend.enable ? &blend : nullptr);
+                                           &frame.surface, depth_write, blend.enable ? &blend : nullptr,
+                                           cull_mode, front_face);
   } else {
     st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, use_depth, clear, &r.rgba,
-                                  &frame.surface, depth_write, blend.enable ? &blend : nullptr);
+                                  &frame.surface, depth_write, blend.enable ? &blend : nullptr,
+                                  cull_mode, front_face);
   }
   if (!st) return fail(r, "Vulkan draw failed: " + st.error.message);
   r.notes = pvs4 ? "PVS4 blob: clip and Gouraud shade varyings are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices); the rasterizer interpolates the shade"
@@ -547,6 +580,11 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     r.notes += "; shared frame targets (draws accumulate into the bound colour target)";
   if (blend.enable)
     r.notes += "; target-0 blending on (CB_BLEND0_CONTROL; fragment alpha is 1.0 on this pipeline)";
+  if (cull_mode != VK_CULL_MODE_NONE || front_face != VK_FRONT_FACE_COUNTER_CLOCKWISE) {
+    r.notes += "; PA_SU_SC_MODE_CNTL: cull ";
+    r.notes += cull_mode == VK_CULL_MODE_FRONT_AND_BACK ? "front+back" : (cull_mode & VK_CULL_MODE_BACK_BIT) ? "back" : (cull_mode & VK_CULL_MODE_FRONT_BIT) ? "front" : "none";
+    r.notes += front_face == VK_FRONT_FACE_CLOCKWISE ? ", CW front" : ", CCW front";
+  }
   if (pvs5) {
     r.notes += "; vertex fetch via V# descriptors (PVS5; 32-bit float formats, position w ignored";
     if (hdr[3] == 10) r.notes += "; colour converted from 8_8_8_8 unorm in translated RDNA";
