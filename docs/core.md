@@ -468,6 +468,34 @@ makes the load fail with a message naming it, and nothing runs.
 - Limits: thin (2D, single-slice) modes only - no thick/3D modes, arrays or depth
   sampling; sampling is still not translated RDNA; hardware GPU untested.
 
+## Slice S27 notes (2D texture arrays)
+- Color2DArray T# images (type 13, value from public shadPS4 resource.h
+  ImageType) are accepted: linear tiling only, base_array 0, up to 256
+  slices; tiled arrays, a non-zero base slice and arrays on a Color2D
+  descriptor are refused with named reasons. The bounds check covers every
+  slice of every level.
+- Guest layout is level-major (each mip level holds all slices contiguously,
+  levels follow in order; level 0 rows at the T# pitch, deeper levels tight),
+  matching shadPS4 ComputeImageSize (values only). The repack decodes slice
+  by slice into a tightly packed RGBA8 staging image with the same layout.
+- A PPS2 blob version word of 1 ({magic, 1}) marks an array draw: the T#
+  must be type 13 and the vertex record carries a slice index after the uv
+  pair (9 floats: xyz rgb uv layer). Blob/T# type mismatches are refused.
+- Host side: TexInput.layers, a 2D_ARRAY image view (arrayLayers = slices,
+  one upload region per level covering all layers), and a new entry
+  render_textured_array_clip_mesh_rgba with 10-float records and a vec3
+  uv+layer attribute; new demo shaders cliptex3.vert + texarr.frag
+  (sampler2DArray). Sampling itself is still host-rasterizer, not translated
+  RDNA; the draw notes say so.
+- Tests (gfx_tsharp_tests + gfx_draw_tests): decode/validation (array accept,
+  tiled/base_array/>256-slice/Color2D-with-slices refusals, bounds across
+  slices); end to end byte-exact draws - plain and BC1 two-slice arrays pick
+  slice 0/1 exactly, mip level 1 of a 2-slice array exact, v0-blob+array and
+  v1-blob+2D mismatches refused, tiled array refused.
+- Limits: linear tiling only (tiled arrays refused), no cube/3D/MSAA, slice
+  index is per-vertex (no layer clamp/emulation beyond the host sampler),
+  hardware GPU untested.
+
 ## Slice S26 notes (depth compare functions)
 - All eight DB_DEPTH_CONTROL compare functions (bits 4..6) supported: never/less/equal/
   lequal/greater/notequal/gequal/always. The AMD CompareFunc encoding 0..7 is identical to
