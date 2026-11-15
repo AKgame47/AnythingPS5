@@ -51,6 +51,8 @@ struct TexInput {
   // The rgba buffer holds the levels major-first, each level's slices
   // tightly packed - the layout the upload regions assume.
   uint32_t layers = 1;
+  // Slice S28: the image is a cubemap (layers must be 6: +X -X +Y -Y +Z -Z).
+  bool cube = false;
 };
 
 // Colour blend state for one target (slice S14), decoded from GNM
