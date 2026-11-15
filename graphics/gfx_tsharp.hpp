@@ -3,15 +3,24 @@
 // size, swizzle, tiling index, levels/arrays) and the 128-bit S# layout
 // (clamp modes, filters, lod) follow public shadPS4
 // src/video_core/amdgpu/resource.h (Image/Sampler), pixel_format.h
-// (DataFormat/NumberFormat) and tiling.h (TileMode) - values only, no code.
-// This slice (S19) accepts a narrow honest subset: Color2D, 8_8_8_8 unorm,
-// linear tiling (DisplayLinearAligned / DisplayLinearGeneral), no arrays,
-// and a mip chain from level 0 packed as level 0 (T# pitch) followed by
-// tightly pitched smaller levels. Everything else is refused with a named
-// reason.
+// (DataFormat/NumberFormat) - values only, no code. Slice S22 corrected the
+// tiling field's value semantics: it is the PS5-native hardware SW_MODE
+// (0 = linear, 1/2 = 256B S/D, 5/6 = 4KB S/D, 9/10 = 64KB S/D, 17/18 = 64KB
+// S/D "T", 21/22 = 4KB S/D XOR, 24-27 = 64KB Z/S/D/R XOR), mapped in AnyPS5's
+// GuestTextureResource.cpp resolveTileMode (reused under the project owner's
+// grant with attribution; geometry in gfx_swizzle.hpp). The GCN tiling-index
+// encodings PNR accepted before S22 (8/31 for linear) are PS4 values and are
+// refused here.
+// This slice accepts a narrow honest subset: Color2D, 8_8_8_8/BC1-BC5 unorm,
+// linear tiling or a thin swizzle mode, no arrays, mip chains from level 0
+// (linear: level 0 at the T# pitch then tightly pitched levels; tiled: the
+// hardware block layout with tail packing). Everything else is refused with
+// a named reason.
 #pragma once
 #include <cstdint>
 #include <string>
+
+#include "graphics/gfx_swizzle.hpp"
 
 namespace pnr::graphics {
 
@@ -24,7 +33,7 @@ struct TSharp {
   std::uint32_t height = 0;
   std::uint32_t dst_sel[4] = {0, 1, 2, 3};
   std::uint32_t base_level = 0, last_level = 0;
-  std::uint32_t tiling_index = 0;  // 8 = DisplayLinearAligned, 31 = DisplayLinearGeneral
+  std::uint32_t tiling_index = 0;  // PS5 SW_MODE: 0 = linear; tiled values in gfx_swizzle.hpp
   std::uint32_t type = 0;          // 9 = Color2D; bit3 set = valid image
   std::uint32_t pitch = 0;         // pixels per row (field + 1)
   std::uint32_t base_array = 0, last_array = 0;
@@ -80,8 +89,10 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
   const bool bc = bc1 || bc2 || bc3 || bc4 || bc5;
   if (!(t.data_format == 10 || bc) || t.num_format != 0)
     return no("T# format is not 8_8_8_8/BC1-BC5 unorm (other texture formats are not implemented)");
-  if (t.tiling_index != 8 && t.tiling_index != 31)
-    return no("T# tiling is not linear (tiled/swizzled textures are not implemented)");
+  if (t.tiling_index == 8 || t.tiling_index == 31)
+    return no("T# tiling uses a GCN (PS4) index encoding, not a PS5-native SW_MODE value");
+  if (!swizzle_mode_known(t.tiling_index))
+    return no("T# tiling SW_MODE is unknown (thick/PRT/MSAA tiling is not implemented)");
   if (t.base_level != 0)
     return no("T# base_level is not 0 (mip chains starting above level 0 are not implemented)");
   if (t.last_array != 0 || t.base_array != 0)
@@ -89,27 +100,39 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
   if (t.pow2pad) return no("T# pow2pad images are not supported");
   if (t.width < 1 || t.width > 4096 || t.height < 1 || t.height > 4096)
     return no("T# extent is outside 1..4096");
-  if (t.pitch < t.width) return no("T# pitch is smaller than the width");
+  if (t.tiling_index == kSwLinear && t.pitch < t.width) return no("T# pitch is smaller than the width");
   if (t.last_level >= 9 || (t.width >> t.last_level) == 0 || (t.height >> t.last_level) == 0)
     return no("T# last_level exceeds the number of levels the extent supports");
-  if (bc && t.pitch != t.width)
-    return no("T# compressed textures must be tightly pitched (pitch must equal the width)");
+  if (bc && t.tiling_index == kSwLinear && t.pitch != t.width)
+    return no("T# compressed linear textures must be tightly pitched (pitch must equal the width)");
   if (bc && ((t.width & 3) != 0 || (t.height & 3) != 0))
     return no("T# compressed extents must be multiples of 4");
   if (t.dst_sel[0] != 0 || t.dst_sel[1] != 1 || t.dst_sel[2] != 2 || t.dst_sel[3] != 3)
     return no("T# component swizzle is not the identity (dst_sel remapping is not implemented)");
-  // Guest layout: level 0 at base with the T# pitch, then each smaller
-  // level tightly pitched (pitch = level width) one after another. For
-  // compressed formats rows are 4x4 blocks: blocks per row = pitch/4,
-  // 8 bytes (BC1) or 16 bytes (BC3) per block.
+  // Guest layout, linear: level 0 at base with the T# pitch, then each
+  // smaller level tightly pitched one after another. Tiled: the hardware
+  // thin block layout with tail packing (gfx_swizzle.hpp), which owns the
+  // surface geometry; the T# pitch field does not apply. For compressed
+  // formats rows are 4x4 blocks: 8 bytes (BC1/BC4) or 16 bytes per block.
   const std::uint64_t bb = bc1 || bc4 ? 8 : bc ? 16 : 4;
-  std::uint64_t bytes = bc ? std::uint64_t(t.pitch / 4) * (t.height / 4) * bb
-                           : std::uint64_t(t.pitch) * t.height * bb;
-  for (std::uint32_t l = 1; l <= t.last_level; ++l) {
-    const std::uint32_t lw = t.width >> l ? t.width >> l : 1;
-    const std::uint32_t lh = t.height >> l ? t.height >> l : 1;
-    bytes += bc ? std::uint64_t((lw + 3) / 4) * ((lh + 3) / 4) * bb
-                : std::uint64_t(lw) * lh * bb;
+  std::uint64_t bytes = 0;
+  if (t.tiling_index == kSwLinear) {
+    bytes = bc ? std::uint64_t(t.pitch / 4) * (t.height / 4) * bb
+               : std::uint64_t(t.pitch) * t.height * bb;
+    for (std::uint32_t l = 1; l <= t.last_level; ++l) {
+      const std::uint32_t lw = t.width >> l ? t.width >> l : 1;
+      const std::uint32_t lh = t.height >> l ? t.height >> l : 1;
+      bytes += bc ? std::uint64_t((lw + 3) / 4) * ((lh + 3) / 4) * bb
+                  : std::uint64_t(lw) * lh * bb;
+    }
+  } else {
+    TiledMip layout[kMaxTiledMips];
+    if (!thin_mip_layout(t.tiling_index, std::uint32_t(bb), bc ? 4 : 1, bc ? 4 : 1,
+                         t.width, t.height, t.last_level + 1, layout, kMaxTiledMips, bytes))
+      return no("T# tiled mip layout is not representable");
+    // pipe/bank rotation drops the low base bits into the block XOR.
+    bytes += t.tiling_index == kSwS4KBX || t.tiling_index == kSwD4KBX
+                 ? (t.base & 0xFFFu) : swizzle_mode_xor(t.tiling_index) ? (t.base & 0xFFFFu) : 0;
   }
   if (t.base + bytes > guest_bytes) return no("T# pixels lie outside the guest address space");
   return true;
