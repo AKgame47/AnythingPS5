@@ -291,6 +291,36 @@ add_executable(pnr_shader_checks tests/shader_fixtures.cpp)
 target_link_libraries(pnr_shader_checks PRIVATE pnr_shader)
 add_test(NAME pnr_shader_fixtures COMMAND pnr_shader_checks)
 
+# ---- Window presentation (slice S3): SDL2 window + real Vulkan swapchain.
+# Optional, OFF by default (needs SDL2 dev files); headless CI does not build
+# it, exactly like pnr-ui. The swapchain entry points are resolved optionally
+# in the backend, so the default build keeps working on headless hosts.
+option(PNR_BUILD_WINDOW "Build the SDL2 + Vulkan swapchain window demo (pnr-window-demo)" OFF)
+if(PNR_BUILD_WINDOW)
+  if(WIN32)
+    message(FATAL_ERROR "The window demo is Linux only (Windows execution is Blocked).")
+  endif()
+  find_path(SDL2_INCLUDE_DIR NAMES SDL.h PATH_SUFFIXES SDL2)
+  find_library(SDL2_LIBRARY NAMES SDL2 SDL2-2.0 libSDL2-2.0.so.0)
+  if(NOT SDL2_INCLUDE_DIR OR NOT SDL2_LIBRARY)
+    message(FATAL_ERROR "PNR_BUILD_WINDOW needs SDL2 dev files (apt install libsdl2-dev), or pass -DSDL2_INCLUDE_DIR=... -DSDL2_LIBRARY=...")
+  endif()
+  add_library(pnr_window graphics/window.cpp)
+  target_include_directories(pnr_window PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${SDL2_INCLUDE_DIR})
+  target_link_libraries(pnr_window PUBLIC pnr_graphics ${SDL2_LIBRARY} ${CMAKE_DL_LIBS})
+  add_executable(pnr-window-demo examples/ps_window_demo.cpp)
+  target_link_libraries(pnr-window-demo PRIVATE pnr_window pnr_shader)
+  find_program(PNR_XVFB_RUN xvfb-run)
+  if(PNR_XVFB_RUN)
+    # Smoke: a real window on a virtual display presents real swapchain frames.
+    add_test(NAME pnr_window_smoke COMMAND ${PNR_XVFB_RUN} -a -s "-screen 0 800x600x24"
+             $<TARGET_FILE:pnr-window-demo> --frames 12 --shot 10:${CMAKE_BINARY_DIR}/window_smoke.ppm)
+    set_tests_properties(pnr_window_smoke PROPERTIES PASS_REGULAR_EXPRESSION "presented 12 frames" WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  else()
+    message(STATUS "xvfb-run not found: pnr_window_smoke test not registered")
+  endif()
+endif()
+
 # ---- Desktop UI (slice UI-1): SDL2 window + Dear ImGui (MIT). Optional, OFF by default.
 # Needs the SDL2 development files (Debian/Ubuntu: libsdl2-dev). Dear ImGui is
 # downloaded at configure time from a pinned release (SHA-256 checked), or pass
