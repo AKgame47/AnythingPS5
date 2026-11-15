@@ -26,6 +26,12 @@ namespace pnr::graphics {
 
 inline constexpr std::uint32_t kPnrVsMagic = 0x31535650u;   // "PVS1"
 inline constexpr std::uint32_t kPnrVs2Magic = 0x32535650u;  // "PVS2"
+inline constexpr std::uint32_t kPnrVs3Magic = 0x33535650u;  // "PVS3"
+
+// Slice S9 sanity caps for one draw (PNR TEST ABI limits, not hardware):
+// at most 64k transformed vertices and 4M indices per draw call.
+inline constexpr std::uint32_t kDrawMaxVertices = 65536;
+inline constexpr std::uint32_t kDrawMaxIndices = 4u * 1024u * 1024u;
 
 // Builds the PVS1 blob for n vertices (1..kRdnaVertexMax).
 std::vector<std::uint32_t> make_pnr_vs_blob(std::uint32_t n);
@@ -37,6 +43,15 @@ std::vector<std::uint32_t> make_pnr_vs_blob(std::uint32_t n);
 // verification; viewport scale/offset on screen stays host fixed-function.
 std::vector<std::uint32_t> make_pnr_vs2_blob(std::uint32_t n);
 
+// PVS3 (slice S9): batched draws past the 64-lane single-dispatch limit.
+// Same layout as PVS1/PVS2 (magic, kernel count 4 or 7, lengths, kernels),
+// but the kernels are built ONCE for the fixed 64-lane workgroup and carry
+// no vertex count: the draw path runs ceil(n/64) dispatches, zero-padding
+// the tail lanes of the last batch (their stores land in scratch and are
+// discarded). Kernel count 4 = clip only; 7 = clip + post-transform (the
+// PVS2 divide semantics). Covers any vertex count up to kDrawMaxVertices.
+std::vector<std::uint32_t> make_pnr_vs3_blob(bool with_post);
+
 struct DrawResult {
   bool ok = false;
   std::string error;           // plain words, empty on success
@@ -47,7 +62,8 @@ struct DrawResult {
 };
 
 // One triangle-list draw: DRAW_INDEX_AUTO, or DRAW_INDEX_INDX with a 16/32-bit index buffer in
-// guest memory (slice S7; the transform still covers at most 24 referenced vertices). Other
+// guest memory (slice S7). PVS1/PVS2 blobs are built for one specific vertex count (at most 64,
+// one dispatch); a PVS3 blob batches any count up to kDrawMaxVertices (slice S9). Other
 // primitives, instancing beyond 1 and 8-bit indices are refused.
 DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::DrawCall& draw);
 
