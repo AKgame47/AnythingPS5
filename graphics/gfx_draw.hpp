@@ -46,7 +46,9 @@ struct DrawResult {
   std::vector<std::uint8_t> rgba;  // width*height*4, top row first
 };
 
-// One non-indexed triangle-list draw (DRAW_INDEX_AUTO). Indexed and other primitives are refused.
+// One triangle-list draw: DRAW_INDEX_AUTO, or DRAW_INDEX_INDX with a 16/32-bit index buffer in
+// guest memory (slice S7; the transform still covers at most 24 referenced vertices). Other
+// primitives, instancing beyond 1 and 8-bit indices are refused.
 DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::DrawCall& draw);
 
 }  // namespace pnr::graphics
