@@ -584,6 +584,8 @@ Status VulkanBackend::render_core(
     if (levels > 9) return Status::Fail(100, "vulkan", "texture mip levels exceed 9");
     layers = tex->layers ? tex->layers : 1;
     if (layers > 256) return Status::Fail(100, "vulkan", "texture array slices exceed 256");
+    if (tex->cube && (layers != 6 || tex->w != tex->h))
+      return Status::Fail(100, "vulkan", "a cubemap texture needs exactly 6 faces and a square extent");
     for (uint32_t l = 0; l < levels; ++l) {
       lw[l] = (tex->w >> l) ? (tex->w >> l) : 1;
       lh[l] = (tex->h >> l) ? (tex->h >> l) : 1;
@@ -605,6 +607,7 @@ Status VulkanBackend::render_core(
     tci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     tci.imageType = VK_IMAGE_TYPE_2D; tci.format = tex_vk_format;
     tci.extent = {tex->w, tex->h, 1}; tci.mipLevels = levels; tci.arrayLayers = layers;
+    if (tex->cube) tci.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     tci.samples = VK_SAMPLE_COUNT_1_BIT; tci.tiling = VK_IMAGE_TILING_OPTIMAL;
     tci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     tci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; tci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -627,7 +630,9 @@ Status VulkanBackend::render_core(
     if (r != VK_SUCCESS) return vkfail("vkBindImageMemory (texture)", r);
     VkImageViewCreateInfo tvci{};
     tvci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    tvci.image = timg; tvci.viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D; tvci.format = tex_vk_format;
+    tvci.image = timg;
+    tvci.viewType = tex->cube ? VK_IMAGE_VIEW_TYPE_CUBE : layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    tvci.format = tex_vk_format;
     tvci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, layers};
     VkImageView tview = 0;
     r = fn<VkResult (*)(VkDevice, const VkImageViewCreateInfo*, void*, VkImageView*)>(vkCreateImageView)(device_, &tvci, nullptr, &tview);
