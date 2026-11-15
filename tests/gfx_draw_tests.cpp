@@ -402,7 +402,13 @@ struct TexScene {
     return std::uint16_t(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
   }
   void bc_solid(std::uint8_t* blk, std::uint32_t df, std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a) {
-    if (df == 37) { blk[0] = a; blk[1] = a; for (int i = 2; i < 8; ++i) blk[i] = 0; blk += 8; }
+    if (df == 38) { blk[0] = r; blk[1] = r; for (int i = 2; i < 8; ++i) blk[i] = 0; return; }  // BC4: red only
+    if (df == 39) {  // BC5: one value block per channel
+      blk[0] = r; blk[1] = r; for (int i = 2; i < 8; ++i) blk[i] = 0;
+      blk[8] = g; blk[9] = g; for (int i = 10; i < 16; ++i) blk[i] = 0;
+      return;
+    }
+    if (df == 36 || df == 37) { blk[0] = a; blk[1] = a; for (int i = 2; i < 8; ++i) blk[i] = 0; blk += 8; }
     const std::uint16_t c = rgb565(r, g, b);
     blk[0] = std::uint8_t(c); blk[1] = std::uint8_t(c >> 8);
     blk[2] = std::uint8_t(c); blk[3] = std::uint8_t(c >> 8);
@@ -422,7 +428,7 @@ struct TexScene {
       vb.push_back(pu[v][0] * uv_scale); vb.push_back(pu[v][1] * uv_scale);
     }
     const std::uint8_t cols[3][3] = {{255,0,0},{0,255,0},{0,0,255}};
-    const std::uint32_t bb = df == 35 ? 8 : 16;
+    const std::uint32_t bb = df == 35 || df == 38 ? 8 : 16;
     for (std::uint32_t l = 0; l <= last_level; ++l) {
       const std::uint32_t lw = side >> l ? side >> l : 1;
       const std::uint32_t nb = (lw + 3) / 4;
@@ -1415,6 +1421,30 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       auto r = s.run(vk);
       check(!r.ok && r.error.find("multiples of 4") != std::string::npos,
             "bc: compressed extents not divisible by 4 are refused"); }
+    // Slice S21: BC2/BC4/BC5 end to end.
+    { TexScene s; s.build_bc(36, 1.0f, 4, 0, 0, 0, 0, 0);   // BC2: white + nibble alpha ramp, point
+      for (int i = 0; i < 8; ++i) s.texels[i] = std::uint8_t((2 * i) | ((2 * i + 1) << 4));
+      s.texels[8] = 0xFF; s.texels[9] = 0xFF; s.texels[10] = 0xFF; s.texels[11] = 0xFF;  // white c0 = c1
+      auto r = s.run(vk);
+      auto al = [&](int x, int y) { return r.rgba[(y * 64 + x) * 4 + 3]; };
+      const bool direct = r.ok && al(8, 8) == 0;
+      const int y0 = direct ? 8 : 55, y1 = direct ? 40 : 23;  // texel rows 0 and 2 either way
+      // texel (0,0) alpha 0, (1,0) 17, (2,0) 34; row 2 -> texels 8..11: 136, 153, ...
+      check(r.ok && al(8, y0) == 0 && al(24, y0) == 17 && al(40, y0) == 34 &&
+            al(8, y1) == 136 && al(24, y1) == 153,
+            "bc: BC2 explicit alphas reach the target byte-exact"); }
+    { TexScene s; s.build_bc(38, 1.0f, 4, 0, 0, 0, 0, 0);   // BC4 solid red 218, point
+      s.texels[0] = 218; s.texels[1] = 218;
+      auto r = s.run(vk);
+      const std::uint8_t* p = r.ok ? &r.rgba[(32 * 64 + 32) * 4] : nullptr;
+      check(r.ok && p[0] == 218 && p[1] == 0 && p[2] == 0 && p[3] == 255,
+            "bc: BC4 decodes into the red channel only"); }
+    { TexScene s; s.build_bc(39, 1.0f, 4, 0, 0, 0, 0, 0);   // BC5 solid (80, 160), point
+      s.texels[0] = 80; s.texels[1] = 80; s.texels[8] = 160; s.texels[9] = 160;
+      auto r = s.run(vk);
+      const std::uint8_t* p = r.ok ? &r.rgba[(32 * 64 + 32) * 4] : nullptr;
+      check(r.ok && p[0] == 80 && p[1] == 160 && p[2] == 0 && p[3] == 255,
+            "bc: BC5 decodes into red and green channels"); }
   }
 
   // ---- slice S18: face culling + front face (PA_SU_SC_MODE_CNTL) ----
