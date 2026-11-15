@@ -75,8 +75,9 @@ inline bool decode_tsharp(const std::uint32_t w[8], TSharp* t) {
 inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, std::string* why) {
   auto no = [&](const char* m) { *why = m; return false; };
   if (t.type != 9) return no("T# image type is not Color2D (1D/3D/cube/array/MSAA images are not implemented)");
-  if (t.data_format != 10 || t.num_format != 0)
-    return no("T# format is not 8_8_8_8 unorm (other texture formats are not implemented)");
+  const bool bc1 = t.data_format == 35, bc3 = t.data_format == 37;  // shadPS4 DataFormat values
+  if (!(t.data_format == 10 || bc1 || bc3) || t.num_format != 0)
+    return no("T# format is not 8_8_8_8/BC1/BC3 unorm (other texture formats are not implemented)");
   if (t.tiling_index != 8 && t.tiling_index != 31)
     return no("T# tiling is not linear (tiled/swizzled textures are not implemented)");
   if (t.base_level != 0)
@@ -89,15 +90,24 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
   if (t.pitch < t.width) return no("T# pitch is smaller than the width");
   if (t.last_level >= 9 || (t.width >> t.last_level) == 0 || (t.height >> t.last_level) == 0)
     return no("T# last_level exceeds the number of levels the extent supports");
+  if ((bc1 || bc3) && t.pitch != t.width)
+    return no("T# compressed textures must be tightly pitched (pitch must equal the width)");
+  if ((bc1 || bc3) && ((t.width & 3) != 0 || (t.height & 3) != 0))
+    return no("T# compressed extents must be multiples of 4");
   if (t.dst_sel[0] != 0 || t.dst_sel[1] != 1 || t.dst_sel[2] != 2 || t.dst_sel[3] != 3)
     return no("T# component swizzle is not the identity (dst_sel remapping is not implemented)");
   // Guest layout: level 0 at base with the T# pitch, then each smaller
-  // level tightly pitched (pitch = level width) one after another.
-  std::uint64_t bytes = std::uint64_t(t.pitch) * t.height * 4;
+  // level tightly pitched (pitch = level width) one after another. For
+  // compressed formats rows are 4x4 blocks: blocks per row = pitch/4,
+  // 8 bytes (BC1) or 16 bytes (BC3) per block.
+  const std::uint64_t bb = bc1 ? 8 : bc3 ? 16 : 4;
+  std::uint64_t bytes = bc1 || bc3 ? std::uint64_t(t.pitch / 4) * (t.height / 4) * bb
+                                   : std::uint64_t(t.pitch) * t.height * bb;
   for (std::uint32_t l = 1; l <= t.last_level; ++l) {
     const std::uint32_t lw = t.width >> l ? t.width >> l : 1;
     const std::uint32_t lh = t.height >> l ? t.height >> l : 1;
-    bytes += std::uint64_t(lw) * lh * 4;
+    bytes += bc1 || bc3 ? std::uint64_t((lw + 3) / 4) * ((lh + 3) / 4) * bb
+                        : std::uint64_t(lw) * lh * bb;
   }
   if (t.base + bytes > guest_bytes) return no("T# pixels lie outside the guest address space");
   return true;
