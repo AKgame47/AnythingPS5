@@ -188,4 +188,36 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   decode_ssharp(sw, &s);
   check(!validate_ssharp_sample(s, &why) && why.find("anisotropic") != std::string::npos,
         "ssharp: anisotropic filtering is refused");
+
+  // ---- slice S27: Color2DArray (type 13), linear tiling only ----
+  // type = q1 bits 60-63 (w[3] bits 28-31); base_array = q2 bits 32-44 and
+  // last_array = q2 bits 45-57 (w[5] bits 0-12 / 13-25).
+  auto make_array = [&](std::uint32_t tiling, std::uint32_t base_arr, std::uint32_t last_arr) {
+    make_tsharp(w, 0x100000, 64, 32, 64, tiling);
+    w[3] = (w[3] & 0x0FFFFFFFu) | (13u << 28);
+    w[5] = (w[5] & ~0x1FFFu) | base_arr;
+    w[5] = (w[5] & ~(0x1FFFu << 13)) | (last_arr << 13);
+    decode_tsharp(w, &t);
+  };
+  make_array(0, 0, 1);
+  check(t.type == 13 && t.base_array == 0 && t.last_array == 1,
+        "tsharp: array type and slice fields decode (S27)");
+  check(validate_tsharp_sample(t, 0x100000 + 64ull * 32 * 4 * 2, &why),
+        "tsharp: linear 2-slice Color2DArray validates (S27)");
+  check(!validate_tsharp_sample(t, 0x100000 + 64ull * 32 * 4 * 2 - 1, &why) && why.find("outside") != std::string::npos,
+        "tsharp: array bounds cover every slice (S27)");
+  make_array(9, 0, 1);  // SW_64KB_S: a known thin swizzle mode
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("array") != std::string::npos,
+        "tsharp: tiled texture arrays are refused (S27)");
+  make_array(0, 1, 2);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("base_array") != std::string::npos,
+        "tsharp: non-zero base_array is refused (S27)");
+  make_array(0, 0, 256);
+  check(!validate_tsharp_sample(t, 1ull << 48, &why) && why.find("256") != std::string::npos,
+        "tsharp: more than 256 slices is refused (S27)");
+  make_tsharp(w, 0x100000, 64, 32, 64, 0);  // type 9 with slices
+  w[5] = (w[5] & ~(0x1FFFu << 13)) | (1u << 13);
+  decode_tsharp(w, &t);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("type") != std::string::npos,
+        "tsharp: a Color2D descriptor with slices is refused (S27)");
 }
