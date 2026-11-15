@@ -7,6 +7,7 @@
 
 #include "graphics/demo/clip_shaders.hpp"
 #include "graphics/demo/spin_shaders.hpp"
+#include "graphics/rdna_pixel.hpp"
 #include "graphics/rdna_vertex.hpp"
 #include "shader/translate.hpp"
 
@@ -85,6 +86,38 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (!b.viewport.present || std::fabs(std::fabs(b.viewport.xscale) - w / 2.0f) > 0.5f || std::fabs(std::fabs(b.viewport.yscale) - h / 2.0f) > 0.5f)
     return fail(r, "viewport scale does not match the target size (non-default viewports are not applied in this slice)");
   if (!mem.resolve(b.ps.address, 4)) return fail(r, "pixel shader address is not mapped: " + mem.last_error());
+  // Slice S8: a PPS1 pixel blob is translated RDNA code producing a constant
+  // draw colour from PS user data 0..7 (base rgba, intensity, ambient, clamp
+  // bounds). Anything else keeps the fixed pass-through colour, stated below.
+  bool pps1 = false;
+  float ps_colour[4] = {0, 0, 0, 1};
+  {
+    std::uint32_t phdr[6];
+    if (mem.read(b.ps.address, phdr, sizeof phdr) && phdr[0] == kPnrPsMagic && phdr[1] == 4) {
+      std::vector<std::vector<std::uint32_t>> pk(4);
+      std::uint64_t poff = sizeof phdr;
+      for (int c = 0; c < 4; ++c) {
+        if (phdr[2 + c] == 0 || phdr[2 + c] > 4096) return fail(r, "PPS1 kernel length is out of range");
+        pk[c].resize(phdr[2 + c]);
+        if (!mem.read(b.ps.address + poff, pk[c].data(), pk[c].size() * 4)) return fail(r, "PPS1 kernel runs past its mapping: " + mem.last_error());
+        poff += pk[c].size() * 4;
+      }
+      std::vector<std::uint32_t> pu(8);
+      for (int k = 0; k < 8; ++k) {
+        if (!b.ps.user_data_set[k]) return fail(r, "PPS1 blob needs pixel user data 0..7 (base rgba, intensity, ambient, clamp bounds)");
+        pu[k] = b.ps.user_data[k];
+      }
+      for (int c = 0; c < 4; ++c) {
+        auto t = shader::translate_compute_words(pk[c], kRdnaPixelBase, 1, 1, 8);
+        if (!t.ok) return fail(r, "RDNA pixel translation failed: " + t.error);
+        std::vector<std::uint32_t> io(1, 0);
+        auto st = shader::run_translated_compute(vk, t, &io, pu);
+        if (!st) return fail(r, "translated pixel shader did not run: " + st.error.message);
+        std::memcpy(&ps_colour[c], &io[0], 4);
+      }
+      pps1 = true;
+    }
+  }
 
   // Vertex-stage blob.
   std::uint32_t hdr[9];
@@ -141,7 +174,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   std::vector<std::uint32_t> idx;
   for (std::uint32_t i = 0; i < n; ++i) {
     for (int c = 0; c < 4; ++c) verts.push_back(clip[i * 4 + c]);
-    for (int c = 3; c < 6; ++c) verts.push_back(vb[i * 6 + c]);
+    for (int c = 3; c < 6; ++c) verts.push_back(pps1 ? ps_colour[c - 3] : vb[i * 6 + c]);
     idx.push_back(i);
   }
   if (draw.kind == pm4::DrawKind::Indexed) idx = indices;
@@ -149,8 +182,10 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   std::vector<std::uint32_t> vsp(std::begin(clip_vert), std::end(clip_vert)), fsp(std::begin(spin_frag), std::end(spin_frag));
   auto st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, false, clear, &r.rgba);
   if (!st) return fail(r, "Vulkan draw failed: " + st.error.message);
-  r.notes = pvs2 ? "pixel shader not translated: fixed pass-through colour used; PVS2 blob: clip and perspective divide are translated RDNA, w = 1 fed to the rasterizer"
-                 : "pixel shader not translated: fixed pass-through colour used; vertex shader is a PNR PVS1 test blob";
+  r.notes = pvs2 ? "PVS2 blob: clip and perspective divide are translated RDNA, w = 1 fed to the rasterizer"
+                 : "vertex shader is a PNR PVS1 test blob";
+  r.notes += pps1 ? "; pixel shader is a translated PPS1 blob (constant colour, no varyings)"
+                  : "; pixel shader not translated: fixed pass-through colour used";
   if (draw.kind == pm4::DrawKind::Indexed) r.notes += "; indexed draw: index buffer fetched from guest memory";
   const std::size_t bytes = std::size_t(w) * h * 4;
   if (std::uint8_t* dst = mem.resolve_mut(b.color0.address, bytes)) {
