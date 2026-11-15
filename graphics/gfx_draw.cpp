@@ -7,6 +7,8 @@
 
 #include "graphics/demo/clip_shaders.hpp"
 #include "graphics/demo/spin_shaders.hpp"
+#include "graphics/gfx_vsharp.hpp"
+#include "graphics/rdna_fetch.hpp"
 #include "graphics/rdna_pixel.hpp"
 #include "graphics/rdna_vertex.hpp"
 #include "shader/translate.hpp"
@@ -37,6 +39,19 @@ std::vector<std::uint32_t> make_pnr_vs3_blob(bool with_post) {
   for (std::uint32_t c = 0; c < 4; ++c) k.push_back(rdna_vertex_component_kernel(c, kRdnaVertexMax));
   if (with_post) for (std::uint32_t c = 0; c < 3; ++c) k.push_back(rdna_post_ndc_kernel(c, kRdnaVertexMax));
   std::vector<std::uint32_t> blob = {kPnrVs3Magic, static_cast<std::uint32_t>(k.size())};
+  for (auto& v : k) blob.push_back(static_cast<std::uint32_t>(v.size()));
+  for (auto& v : k) blob.insert(blob.end(), v.begin(), v.end());
+  return blob;
+}
+
+std::vector<std::uint32_t> make_pnr_vs5_blob(std::uint32_t pos_fmt, std::uint32_t col_fmt,
+                                             std::uint32_t pos_stride_words, std::uint32_t col_stride_words) {
+  std::vector<std::vector<std::uint32_t>> k;
+  for (std::uint32_t c = 0; c < 3; ++c) k.push_back(rdna_fetch_component_kernel(c, pos_stride_words, kRdnaVertexMax));
+  for (std::uint32_t c = 0; c < 3; ++c) k.push_back(rdna_fetch_component_kernel(c, col_stride_words, kRdnaVertexMax));
+  for (std::uint32_t c = 0; c < 4; ++c) k.push_back(rdna_vertex_component_kernel(c, kRdnaVertexMax));
+  for (std::uint32_t c = 0; c < 3; ++c) k.push_back(rdna_post_ndc_kernel(c, kRdnaVertexMax));
+  std::vector<std::uint32_t> blob = {kPnrVs5Magic, 13, pos_fmt, col_fmt, pos_stride_words, col_stride_words};
   for (auto& v : k) blob.push_back(static_cast<std::uint32_t>(v.size()));
   for (auto& v : k) blob.insert(blob.end(), v.begin(), v.end());
   return blob;
@@ -271,32 +286,90 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   }
 
   // Vertex-stage blob.
-  std::uint32_t hdr[9];
+  std::uint32_t hdr[19];
   if (!mem.read(vs->address, hdr, sizeof hdr)) return fail(r, "vertex shader address is not mapped: " + mem.last_error());
   const bool pvs2 = hdr[0] == kPnrVs2Magic && hdr[1] == 7;
   const bool pvs3 = hdr[0] == kPnrVs3Magic && (hdr[1] == 4 || hdr[1] == 7);
   const bool pvs4 = hdr[0] == kPnrVs4Magic && hdr[1] == 7;
-  if (!(hdr[0] == kPnrVsMagic && hdr[1] == 4) && !pvs2 && !pvs3 && !pvs4)
-    return fail(r, "vertex shader memory is not a PNR PVS1/PVS2/PVS3/PVS4 blob (a real GCN/RDNA program is not accepted here)");
-  if (!pvs3 && !pvs4 && n > kRdnaVertexMax)
-    return fail(r, "PVS1/PVS2 blobs are built per vertex count and run one dispatch (at most 64 vertices); a PVS3/PVS4 blob batches larger draws");
-  const uint32_t nk = (pvs2 || pvs3 || pvs4) ? hdr[1] : 4;
-  const bool batched = pvs3 || pvs4;
+  const bool pvs5 = hdr[0] == kPnrVs5Magic && hdr[1] == 13;
+  if (!(hdr[0] == kPnrVsMagic && hdr[1] == 4) && !pvs2 && !pvs3 && !pvs4 && !pvs5)
+    return fail(r, "vertex shader memory is not a PNR PVS1/PVS2/PVS3/PVS4/PVS5 blob (a real GCN/RDNA program is not accepted here)");
+  if (!pvs3 && !pvs4 && !pvs5 && n > kRdnaVertexMax)
+    return fail(r, "PVS1/PVS2 blobs are built per vertex count and run one dispatch (at most 64 vertices); a PVS3/PVS4/PVS5 blob batches larger draws");
+  const uint32_t nk = (pvs2 || pvs3 || pvs4 || pvs5) ? hdr[1] : 4;
+  const uint32_t len_off = pvs5 ? 6 : 2;
+  const bool batched = pvs3 || pvs4 || pvs5;
   std::vector<std::vector<std::uint32_t>> kern(nk);
-  std::uint64_t off = (2 + nk) * 4;
+  std::uint64_t off = (len_off + nk) * 4;
   for (uint32_t c = 0; c < nk; ++c) {
-    if (hdr[2 + c] == 0 || hdr[2 + c] > 4096) return fail(r, "PVS blob kernel length is out of range");
-    kern[c].resize(hdr[2 + c]);
+    if (hdr[len_off + c] == 0 || hdr[len_off + c] > 4096) return fail(r, "PVS blob kernel length is out of range");
+    kern[c].resize(hdr[len_off + c]);
     if (!mem.read(vs->address + off, kern[c].data(), kern[c].size() * 4)) return fail(r, "PVS blob kernel runs past its mapping: " + mem.last_error());
     off += kern[c].size() * 4;
   }
-  std::uint64_t mat_va = 0, vb_va = 0;
-  if (!read_u64(*vs, 0, &mat_va) || !read_u64(*vs, 2, &vb_va)) return fail(r, "vertex user data 0..3 (matrix and vertex buffer addresses) not set");
+  // PVS5 runs the 6 fetch kernels first; clip + post come from kern[6..12].
+  std::vector<std::vector<std::uint32_t>> stage;
+  if (pvs5) stage.assign(kern.begin() + 6, kern.end()); else stage = kern;
+  const std::uint32_t lanes = batched ? kRdnaVertexMax : n;
+  const std::uint32_t batches = batched ? (n + lanes - 1) / lanes : 1;
+  std::uint64_t mat_va = 0;
+  if (!read_u64(*vs, 0, &mat_va)) return fail(r, "vertex user data 0..1 (matrix address) not set");
   std::vector<std::uint32_t> mat(16);
   const std::uint32_t stride = pvs4 ? 9 : 6;   // PVS4 adds per-vertex normals (slice S11)
-  std::vector<float> vb(std::size_t(n) * stride);
+  std::vector<float> vb;
   if (!mem.read(mat_va, mat.data(), 64)) return fail(r, "matrix address is not mapped: " + mem.last_error());
-  if (!mem.read(vb_va, vb.data(), vb.size() * 4)) return fail(r, "vertex buffer is not mapped: " + mem.last_error());
+  if (pvs5) {
+    // Slice S15: vertex user data 2..3 addresses a two-entry V# table
+    // (position, colour). The fetch kernels gather float components from
+    // the raw records into the interleaved layout the clip kernels consume.
+    std::uint64_t vt_va = 0;
+    if (!read_u64(*vs, 2, &vt_va)) return fail(r, "PVS5 blob needs vertex user data 2..3 (V# table address)");
+    std::uint32_t table[8];
+    if (!mem.read(vt_va, table, sizeof table)) return fail(r, "V# table is not mapped: " + mem.last_error());
+    VSharp pv, cv;
+    decode_vsharp(table, &pv);
+    decode_vsharp(table + 4, &cv);
+    std::string why;
+    if (!validate_vsharp_fetch(pv, 3, n, hdr[4], &why)) return fail(r, "position V#: " + why);
+    if (!validate_vsharp_fetch(cv, 3, n, hdr[5], &why)) return fail(r, "colour V#: " + why);
+    if (pv.data_format != hdr[2]) return fail(r, "position V# data format does not match the fetch blob's compiled layout");
+    if (cv.data_format != hdr[3]) return fail(r, "colour V# data format does not match the fetch blob's compiled layout");
+    // Only the consumed components are read from guest memory: a strided
+    // colour V# pointing into the middle of a record must not run past the
+    // end of the mapped buffer on the last vertex.
+    const std::uint32_t psw = hdr[4], csw = hdr[5];
+    std::vector<std::uint32_t> raw[2];
+    raw[0].resize(std::size_t(n - 1) * psw + 3);
+    raw[1].resize(std::size_t(n - 1) * csw + 3);
+    if (!mem.read(pv.base, raw[0].data(), raw[0].size() * 4)) return fail(r, "position buffer is not mapped: " + mem.last_error());
+    if (!mem.read(cv.base, raw[1].data(), raw[1].size() * 4)) return fail(r, "colour buffer is not mapped: " + mem.last_error());
+    vb.assign(std::size_t(n) * 6, 0.0f);
+    for (std::uint32_t attr = 0; attr < 2; ++attr) {
+      const std::uint32_t sw = attr ? csw : psw;
+      for (std::uint32_t c = 0; c < 3; ++c) {
+        auto t = shader::translate_compute_words(kern[attr * 3 + c], kRdnaVertexBase, lanes * sw + lanes, lanes, 0);
+        if (!t.ok) return fail(r, "RDNA fetch translation failed: " + t.error);
+        for (std::uint32_t bno = 0; bno < batches; ++bno) {
+          const std::uint32_t base = bno * lanes, m = (n - base < lanes) ? (n - base) : lanes;
+          std::vector<std::uint32_t> io(std::size_t(lanes) * sw + lanes, 0);
+          for (std::uint32_t i = 0; i < m; ++i)
+            for (std::uint32_t dw = 0; dw < sw; ++dw) {
+              const std::size_t src = std::size_t(base + i) * sw + dw;
+              io[i * sw + dw] = src < raw[attr].size() ? raw[attr][src] : 0;
+            }
+          auto st = shader::run_translated_compute(vk, t, &io, {});
+          if (!st) return fail(r, "translated fetch shader did not run: " + st.error.message);
+          for (std::uint32_t i = 0; i < m; ++i)
+            std::memcpy(&vb[(base + i) * 6 + attr * 3 + c], &io[lanes * sw + i], 4);
+        }
+      }
+    }
+  } else {
+    std::uint64_t vb_va = 0;
+    if (!read_u64(*vs, 2, &vb_va)) return fail(r, "vertex user data 0..3 (matrix and vertex buffer addresses) not set");
+    vb.resize(std::size_t(n) * stride);
+    if (!mem.read(vb_va, vb.data(), vb.size() * 4)) return fail(r, "vertex buffer is not mapped: " + mem.last_error());
+  }
   std::vector<std::uint32_t> shade_params(6);
   if (pvs4) {
     for (int k = 0; k < 6; ++k) {
@@ -309,11 +382,9 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   // to n (one dispatch). PVS3 kernels are built for the fixed 64-lane
   // workgroup, so any n runs as ceil(n/64) dispatches; the last batch
   // zero-pads its tail lanes and their stores land in scratch (slice S9).
-  const std::uint32_t lanes = batched ? kRdnaVertexMax : n;
-  const std::uint32_t batches = batched ? (n + lanes - 1) / lanes : 1;
   std::vector<float> clip(std::size_t(n) * 4, 0.0f);
   for (std::uint32_t c = 0; c < 4; ++c) {
-    auto t = shader::translate_compute_words(kern[c], kRdnaVertexBase, lanes * 4, lanes, 16);
+    auto t = shader::translate_compute_words(stage[c], kRdnaVertexBase, lanes * 4, lanes, 16);
     if (!t.ok) return fail(r, "RDNA translation failed: " + t.error);
     for (std::uint32_t bno = 0; bno < batches; ++bno) {
       const std::uint32_t base = bno * lanes, m = (n - base < lanes) ? (n - base) : lanes;
@@ -330,10 +401,10 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   // The rasterizer receives ndc with w = 1; viewport scale/offset on screen
   // stays host fixed-function. PVS3 with 7 kernels runs the same divide in
   // 64-lane batches.
-  const bool with_post = pvs2 || (pvs3 && nk == 7);
+  const bool with_post = pvs2 || (pvs3 && nk == 7) || pvs5;
   if (with_post) {
     for (std::uint32_t c = 0; c < 3; ++c) {
-      auto t = shader::translate_compute_words(kern[4 + c], kRdnaVertexBase, lanes * 5, lanes, 0);
+      auto t = shader::translate_compute_words(stage[4 + c], kRdnaVertexBase, lanes * 5, lanes, 0);
       if (!t.ok) return fail(r, "RDNA post-transform translation failed: " + t.error);
       for (std::uint32_t bno = 0; bno < batches; ++bno) {
         const std::uint32_t base = bno * lanes, m = (n - base < lanes) ? (n - base) : lanes;
@@ -412,6 +483,8 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     r.notes += "; shared frame targets (draws accumulate into the bound colour target)";
   if (blend.enable)
     r.notes += "; target-0 blending on (CB_BLEND0_CONTROL; fragment alpha is 1.0 on this pipeline)";
+  if (pvs5)
+    r.notes += "; vertex fetch via V# descriptors (PVS5; 32-bit float formats, position w ignored)";
   const std::size_t bytes = std::size_t(w) * h * 4;
   if (std::uint8_t* dst = mem.resolve_mut(b.color0.address, bytes)) {
     std::memcpy(dst, r.rgba.data(), bytes);
