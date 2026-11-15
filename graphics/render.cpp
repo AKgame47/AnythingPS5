@@ -49,7 +49,8 @@ Status VulkanBackend::render_clip_mesh_rgba(
     uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
     const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
     const std::vector<uint32_t>& indices, bool depth, const float clear[4],
-    std::vector<uint8_t>* image, FrameSurface* shared_frame, bool depth_write) {
+    std::vector<uint8_t>* image, FrameSurface* shared_frame, bool depth_write,
+    const BlendState* blend) {
   if (!image) return Status::Fail(100, "vulkan", "clip mesh render needs an output image");
   if (vertices.empty() || vertices.size() % 7 || vertices.size() / 7 > 65536)
     return Status::Fail(100, "vulkan", "clip mesh vertices must be float4 clip position + float3 colour (multiple of 7 floats, max 65536 vertices)");
@@ -60,7 +61,7 @@ Status VulkanBackend::render_clip_mesh_rgba(
       return Status::Fail(100, "vulkan", "mesh index out of range of the vertex array");
   MeshInput m;
   m.vertices = &vertices; m.pos_floats = 4; m.indices = &indices; m.depth = depth;
-  m.shared_frame = shared_frame; m.depth_write = depth_write;
+  m.shared_frame = shared_frame; m.depth_write = depth_write; m.blend = blend;
   std::vector<std::vector<uint8_t>> frames;
   auto st = render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, nullptr, clear, &frames);
   if (!st) return st;
@@ -715,6 +716,15 @@ Status VulkanBackend::render_core(
   ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
   VkPipelineColorBlendAttachmentState cba{};
   cba.colorWriteMask = kColorWriteRGBA;
+  if (mesh && mesh->blend && mesh->blend->enable) {
+    cba.blendEnable = 1;
+    cba.srcColorBlendFactor = mesh->blend->src_color;
+    cba.dstColorBlendFactor = mesh->blend->dst_color;
+    cba.colorBlendOp = mesh->blend->color_op;
+    cba.srcAlphaBlendFactor = mesh->blend->src_alpha;
+    cba.dstAlphaBlendFactor = mesh->blend->dst_alpha;
+    cba.alphaBlendOp = mesh->blend->alpha_op;
+  }
   VkPipelineColorBlendStateCreateInfo cb{};
   cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
   cb.attachmentCount = 1; cb.pAttachments = &cba;
