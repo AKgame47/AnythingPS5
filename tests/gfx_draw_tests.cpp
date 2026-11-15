@@ -89,6 +89,62 @@ struct IndexedScene {
     return execute_draw(vk, mem, sum.draws[0]);
   }
 };
+// Slice S9: PVS3 batched draws. nverts/3 triangles, all red at the standard
+// position except the LAST triangle, green and mirrored (apex down).
+struct BatchScene {
+  GpuAddressSpace mem;
+  std::vector<std::uint32_t> vs_blob, ps_blob{0xbf810000}, mat;
+  std::vector<float> vb;
+  std::vector<std::uint32_t> ib;
+  std::vector<std::uint8_t> target;
+  std::vector<std::uint32_t> cmd;
+  std::uint32_t count_override = 0;
+  static constexpr std::uint32_t W = 64, H = 64;
+  void build(bool post, bool indexed, std::uint32_t nverts) {
+    vs_blob = make_pnr_vs3_blob(post);
+    mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
+    const float tri_r[9] = {-0.8f, -0.8f, 0, 0.8f, -0.8f, 0, 0, 0.8f, 0};
+    const float tri_g[9] = {0.8f, 0.8f, 0, -0.8f, 0.8f, 0, 0, -0.8f, 0};
+    const std::uint32_t ntri = nverts / 3;
+    for (std::uint32_t t = 0; t < ntri; ++t) {
+      const float* pos = (t == ntri - 1) ? tri_g : tri_r;
+      const float g = (t == ntri - 1) ? 1.0f : 0.0f, rr = (t == ntri - 1) ? 0.0f : 1.0f;
+      for (int v = 0; v < 3; ++v) {
+        vb.push_back(pos[v * 3]); vb.push_back(pos[v * 3 + 1]); vb.push_back(pos[v * 3 + 2]);
+        vb.push_back(rr); vb.push_back(g); vb.push_back(0.0f);
+      }
+    }
+    target.assign(W * H * 4, 0xCD);
+    mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
+    mem.map_external(0x200000, ps_blob.data(), 4, "ps");
+    mem.map_external(0x300000, mat.data(), 64, "matrix");
+    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x500000, target.data(), target.size(), "target");
+    const std::uint32_t dc = count_override ? count_override : nverts;
+    pm4::Builder b;
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+    b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
+    b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+    b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
+    b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1);
+    if (indexed) {
+      for (std::uint32_t i = 0; i < nverts; ++i) ib.push_back(i);
+      mem.map_external(0x600000, ib.data(), ib.size() * 4, "indices");
+      b.index_type(1u);
+      b.draw_indexed(0x600000, dc, dc);
+    } else {
+      b.draw_auto(dc);
+    }
+    cmd = b.dwords();
+  }
+  DrawResult run(VulkanBackend& vk) {
+    auto sum = pm4::interpret(cmd.data(), cmd.size());
+    if (sum.draws.size() != 1) { DrawResult r; r.error = "no draw parsed"; return r; }
+    return execute_draw(vk, mem, sum.draws[0]);
+  }
+};
 }  // namespace
 
 void pnr_gfx_draw_tests(int& pass, int& fail) {
@@ -305,5 +361,56 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       auto r3 = execute_draw(vk, s.mem, sum3.draws[0]);
       check(!r3.ok && r3.error.find("pixel user data") != std::string::npos, "pps1: missing pixel user data refused");
     }
+  }
+
+  // ---- slice S9: batched draws past the 64-lane single-dispatch limit ----
+  {
+    BatchScene a; a.build(false, false, 96);   // 2 batches: 64 + 32 vertices
+    auto ra = a.run(vk);
+    if (!ra.ok) std::printf("  pvs3 error: %s\n", ra.error.c_str());
+    check(ra.ok && ra.vertices == 96 && ra.wrote_target, "pvs3: 96-vertex batched auto draw ok, pixels written");
+    check(ra.ok && ra.notes.find("2 for 96 vertices") != std::string::npos, "pvs3: result states the batch count");
+    if (ra.ok) {
+      auto px = [&](int x, int y) { return &ra.rgba[(y * 64 + x) * 4]; };
+      auto red = [&](const std::uint8_t* p) { return p[0] == 255 && p[1] == 0 && p[2] == 0 && p[3] == 255; };
+      auto green = [&](const std::uint8_t* p) { return p[0] == 0 && p[1] == 255 && p[2] == 0 && p[3] == 255; };
+      int greens = 0;
+      for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x) greens += green(px(x, y));
+      // The mirrored green triangle is drawn last, so its full area shows: about 1311 pixels.
+      check(greens > 1250 && greens < 1370, "pvs3: last-batch green triangle covers the expected area (count " + std::to_string(greens) + ")");
+      check(green(px(32, 32)), "pvs3: centre pixel is the last-batch green triangle");
+      check((red(px(8, 8)) && green(px(8, 56))) || (green(px(8, 8)) && red(px(8, 56))),
+            "pvs3: first-batch red and last-batch green each own an exclusive pixel");
+      check(std::memcmp(a.target.data(), ra.rgba.data(), ra.rgba.size()) == 0, "pvs3: target memory holds exactly the rendered pixels");
+    }
+    // Indexed draws referencing 66 vertices (2 batches), with and without the
+    // translated post-transform: identity w = 1 geometry must give identical pixels.
+    BatchScene b4; b4.build(false, true, 66);
+    auto r4 = b4.run(vk);
+    BatchScene b7; b7.build(true, true, 66);
+    auto r7 = b7.run(vk);
+    if (!r4.ok) std::printf("  pvs3-4 error: %s\n", r4.error.c_str());
+    if (!r7.ok) std::printf("  pvs3-7 error: %s\n", r7.error.c_str());
+    check(r4.ok && r4.vertices == 66, "pvs3: 66-vertex batched indexed draw ok");
+    check(r7.ok && r7.vertices == 66 && r7.notes.find("2 for 66 vertices") != std::string::npos,
+          "pvs3: batched indexed draw with translated divide ok, batches stated");
+    if (r4.ok && r7.ok) {
+      std::uint32_t d = 0;
+      for (size_t p = 0; p < size_t(64) * 64 * 4; ++p) d += r4.rgba[p] != r7.rgba[p];
+      check(d == 0, "pvs3: batched draws with and without the translated divide are pixel-identical (w = 1 geometry)");
+    }
+    // Refusals.
+    { BatchScene d; d.build(false, false, 66);
+      d.mem.unmap(0x100000);
+      d.vs_blob = make_pnr_vs_blob(3);
+      d.mem.map_external(0x100000, d.vs_blob.data(), d.vs_blob.size() * 4, "vs");
+      auto r = d.run(vk);
+      check(!r.ok && r.error.find("PVS3") != std::string::npos, "pvs3: PVS1 blob with 66 vertices refused, PVS3 named"); }
+    { BatchScene e; e.count_override = 65538; e.build(false, false, 96);
+      auto r = e.run(vk);
+      check(!r.ok && r.error.find("at most 65536") != std::string::npos, "pvs3: auto draw over the 65536-vertex cap refused"); }
+    { BatchScene f; f.count_override = 7; f.build(false, false, 96);
+      auto r = f.run(vk);
+      check(!r.ok && r.error.find("multiple of 3") != std::string::npos, "pvs3: non-multiple-of-3 vertex count refused"); }
   }
 }
