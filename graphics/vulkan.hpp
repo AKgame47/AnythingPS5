@@ -47,6 +47,10 @@ struct TexInput {
   uint32_t levels = 1;
   int32_t mip_mode = -1;
   float min_lod = 0.0f, max_lod = -1.0f;
+  // Slice S27: array slices for a Color2DArray T# (1 = a plain 2D texture).
+  // The rgba buffer holds the levels major-first, each level's slices
+  // tightly packed - the layout the upload regions assume.
+  uint32_t layers = 1;
 };
 
 // Colour blend state for one target (slice S14), decoded from GNM
@@ -220,6 +224,24 @@ public:
   // surface, depth write and blend like render_clip_mesh_rgba. The fragment
   // shader samples a combined image sampler at set 0 binding 0.
   Status render_textured_clip_mesh_rgba(uint32_t width, uint32_t height,
+                                        const std::vector<uint32_t>& vert_spirv,
+                                        const std::vector<uint32_t>& frag_spirv,
+                                        const std::vector<float>& vertices,
+                                        const std::vector<uint32_t>& indices, bool depth,
+                                        const TexInput& tex,
+                                        const float clear[4], std::vector<uint8_t>* image,
+                                        FrameSurface* shared_frame = nullptr,
+                                        bool depth_write = true,
+                                        const BlendState* blend = nullptr,
+                                        int32_t cull_mode = VK_CULL_MODE_NONE,
+                                        int32_t front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+                                        int32_t depth_compare = VK_COMPARE_OP_LESS);
+
+  // Texture-array variant (slice S27): float4 clip position + float3 colour +
+  // float3 (u, v, layer) per vertex (10 floats); the fragment shader samples a
+  // 2D_ARRAY combined image sampler at set 0 binding 0 with the layer from the
+  // third coordinate. tex.layers gives the slice count (>= 1).
+  Status render_textured_array_clip_mesh_rgba(uint32_t width, uint32_t height,
                                         const std::vector<uint32_t>& vert_spirv,
                                         const std::vector<uint32_t>& frag_spirv,
                                         const std::vector<float>& vertices,
