@@ -122,6 +122,57 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
       z_base = b.db_z_read_base;
     }
   }
+  // Slice S14: CB_BLEND0_CONTROL bit 30 switches on target-0 blending.
+  // GNM orders factors 4..9 alpha-first (4 src-alpha .. 7 inv-dst-alpha,
+  // 8 dst-colour, 9 inv-dst-colour); Vulkan orders them colour-first
+  // (4 dst-colour, 5 inv-dst-colour, 6 src-alpha .. 9 inv-dst-alpha), so
+  // values 4..9 translate through a small table. All five GNM blend funcs
+  // have Vulkan equivalents. Constant colour/alpha, dual-source (src1) and
+  // src-alpha-saturate factors are refused (no blend constants or
+  // dual-source outputs yet). Bit 29 selects separate alpha factors;
+  // without it the colour factors apply to alpha. Fragment alpha is 1.0 on
+  // the current pipeline (no vertex alpha, no pixel-shader alpha export),
+  // stated in the notes.
+  BlendState blend;
+  if (b.blend0_set && ((b.blend0 >> 30) & 1)) {
+    auto factor = [](std::uint32_t f, int32_t* out) -> bool {
+      // GNM factor value -> VK_BLEND_FACTOR_* (alpha/colour rows 4..9 swap).
+      static const int32_t kToVulkan[10] = {
+          VK_BLEND_FACTOR_ZERO,
+          VK_BLEND_FACTOR_ONE,
+          VK_BLEND_FACTOR_SRC_COLOR,
+          VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR,
+          VK_BLEND_FACTOR_SRC_ALPHA,
+          VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+          VK_BLEND_FACTOR_DST_ALPHA,
+          VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
+          VK_BLEND_FACTOR_DST_COLOR,
+          VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR,
+      };
+      if (f > 9) return false;
+      *out = kToVulkan[f];
+      return true;
+    };
+    auto func = [](std::uint32_t f, int32_t* out) -> bool {
+      switch (f) {  // GNM: 0 add, 1 sub, 2 min, 3 max, 4 reverse-sub
+        case 0: *out = VK_BLEND_OP_ADD; return true;
+        case 1: *out = VK_BLEND_OP_SUBTRACT; return true;
+        case 2: *out = VK_BLEND_OP_MIN; return true;
+        case 3: *out = VK_BLEND_OP_MAX; return true;
+        case 4: *out = VK_BLEND_OP_REVERSE_SUBTRACT; return true;
+      }
+      return false;
+    };
+    const std::uint32_t csf = b.blend0 & 31, cf = (b.blend0 >> 5) & 7, cdf = (b.blend0 >> 8) & 31;
+    const std::uint32_t asf = (b.blend0 >> 16) & 31, af = (b.blend0 >> 21) & 7, adf = (b.blend0 >> 24) & 31;
+    const bool sep = (b.blend0 >> 29) & 1;
+    blend.enable = true;
+    if (!factor(csf, &blend.src_color) || !factor(cdf, &blend.dst_color) ||
+        !factor(sep ? asf : csf, &blend.src_alpha) || !factor(sep ? adf : cdf, &blend.dst_alpha))
+      return fail(r, "blend factor not supported (constant colour/alpha, dual-source and src-alpha-saturate are not implemented)");
+    if (!func(cf, &blend.color_op) || !func(sep ? af : cf, &blend.alpha_op))
+      return fail(r, "blend function not supported");
+  }
   // Slice S7: indexed draws fetch the index buffer from guest memory. The
   // vertex transform runs over the referenced vertices (max index + 1);
   // indices pass through unchanged. Slice S9: PVS1/PVS2 blobs run one
@@ -341,7 +392,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   (void)frame_changed;  // the renderer restarts the frame on size change; binding change is below
   if (frame.surface.color_image != 0 && frame_changed) vk.destroy_frame(frame.surface);
   auto st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, use_depth, clear, &r.rgba,
-                                     &frame.surface, depth_write);
+                                     &frame.surface, depth_write, blend.enable ? &blend : nullptr);
   if (!st) return fail(r, "Vulkan draw failed: " + st.error.message);
   r.notes = pvs4 ? "PVS4 blob: clip and Gouraud shade varyings are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices); the rasterizer interpolates the shade"
                  : pvs3 ? (with_post ? "PVS3 blob: clip and perspective divide are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices), w = 1 fed to the rasterizer"
@@ -359,6 +410,8 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     r.notes += "; depth testing on (LESS, per-draw depth surface, no cross-draw depth or readback)";
   if (frame.surface.color_image != 0)
     r.notes += "; shared frame targets (draws accumulate into the bound colour target)";
+  if (blend.enable)
+    r.notes += "; target-0 blending on (CB_BLEND0_CONTROL; fragment alpha is 1.0 on this pipeline)";
   const std::size_t bytes = std::size_t(w) * h * 4;
   if (std::uint8_t* dst = mem.resolve_mut(b.color0.address, bytes)) {
     std::memcpy(dst, r.rgba.data(), bytes);
