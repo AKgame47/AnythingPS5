@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2790/2790 unit tests, 22/22 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2695 unit checks without it; the
+Test state: **2804/2804 unit tests, 22/22 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2709 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -205,6 +205,7 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Depth testing (slice S12): `DB_DEPTH_CONTROL` (ctx 0x200) tracked in the draw bindings; depth enable + LESS compare render through the host depth attachment (clear 1.0); register layout from public shadPS4 regs.cpp/regs_depth.h (values only) | Experimental, Tested on lavapipe: two overlapping quads in one draw - the near quad wins in BOTH draw orders (byte-identical pixels, 0 differing bytes), the same order with depth off lets the last-drawn quad win (control), stencil enable and non-LESS compares refused with plain reasons; per-draw depth surface only (no cross-draw depth, no readback, depth-write-enable not separated), hardware GPU untested |
 | Frame-persistent render targets (slice S13): DB depth buffer binding (`DB_Z_INFO`/`DB_Z_READ_BASE`/`DB_Z_WRITE_BASE`/`DB_DEPTH_SIZE`; layout from public shadPS4 regs.cpp/regs_depth.h, values only); draws into one caller-shared frame accumulate into the bound colour target and test against earlier draws' depth; depth write-enable honoured; the frame restarts (fresh clear) on a binding or size change | Experimental, Tested on lavapipe: two draws one frame - far quad then near quad keeps far pixels outside and near inside (accumulation + cross-draw depth), reversed order blocks the far draw over the near one, no-cache control repaints (per-draw), write-off leaves depth untouched, new z_base clears; Z16/tiled/stencil/separate-base bindings refused; linear D32 only, no readback, DB clears untracked (frame boundaries not modelled), hardware GPU untested |
 | Target-0 alpha blending (slice S14): `CB_BLEND0_CONTROL` (ctx 0x1E0) tracked in the draw bindings; enable bit 30, separate-alpha bit 29, colour/alpha src/dst factors and blend function decoded; GNM factor order (alpha rows 4..7, colour rows 8..9) translated to Vulkan's (colour rows 4..5, alpha rows 6..9); layout from public shadPS4 regs.cpp/regs_color.h (values only) | Experimental, Tested on lavapipe: additive ONE+ONE over green gives yellow, MIN gives black, src*DST_COLOR multiplies (red over green -> black), SRC_ALPHA acts as ONE at fragment alpha 1.0 (pins the factor-table row swap), no-register control replaces; constant-colour/alpha, dual-source (src1) and src-alpha-saturate factors refused with plain reasons; target 0 only, separate-alpha decoded but untested at pixel level, fragment alpha is 1.0 on the current pipeline, hardware GPU untested |
+| Vertex buffer fetch - V# descriptors (slice S15): "PVS5" blob adds 6 fetch kernels (pos xyz + colour rgb) ahead of the batched clip kernels; each gathers one float component per dispatch from raw V#-described records (base 44-bit, stride, num_records; layout from public shadPS4 resource.h/pixel_format.h, values only); like GNM fetch shaders the code is built per layout and the blob header carries it - the bound V# is validated against it (stride, format, records, identity swizzle) | Experimental, Tested on lavapipe: strided/interleaved, packed and Format32_32_32_32 (w ignored) vertex data all render byte-identical to the raw-pointer reference; 66-vertex batched draw crosses two fetch dispatches; add_tid, swizzled, unorm/integer, packed 8-bit, non-identity dst_sel, short-buffer and layout-mismatch bindings refused with plain reasons; 32-bit float formats only (unorm/snorm/integer conversion Planned - needs lshr + cvt_f32_u32 in the translator), hardware GPU untested |
 | Full64 runtime pointers: scalar add/addc/sub/subb pair arithmetic, carry-aware FLAT offsets, lexicographic bounds/alignment guards | Experimental, Tested (cross-low-word bindings, overflow/borrow/OOB, spirv-val + lavapipe); single invocation, existing bounded SSBO only |
 | Strict counted loop: scalar constant or runtime uniform count 1..64, one uint32 vector accumulator add, decrement/compare/backedge; real SPIR-V LoopMerge/Phi | Experimental, Tested (1/2/8/64 invocations, 1/2/16/64 counts, spirv-val + lavapipe); invalid runtime count rejected before dispatch plus GPU no-op guard; no body memory, nesting or general CFG |
 | Proof-checked copy loop: guarded dword load/store, two affine pointer increments, constant/runtime uniform count; exact lane x iteration collision/alias proof | Experimental, Tested (spirv-val + lavapipe, tiled/transposed maps, offsets, invalid-count no-op); no in-place updates, full64 loop pointers or broader body/control flow |
@@ -219,12 +220,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2790/2790 unit tests pass (2695 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
+**2804/2804 unit tests pass (2709 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2695/2695
+not re-run for these counts). ASan+UBSan: 2709/2709
 unit tests pass (the sanitizer build has no `spirv-val`), leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
