@@ -25,8 +25,10 @@ struct VulkanDeviceInfo {
 // Mesh description for the 3D slice. Vertices are interleaved: pos_floats
 // position floats (2 or 3) then 3 colour floats. indices may be null (plain
 // vertex list). depth enables a D32_SFLOAT depth buffer (LESS, write on).
-// One RGBA8 texture (single mip level, no mipmaps). rgba is w*h*4 bytes, row 0
-// at the top; the sampler is nearest or linear, repeat or clamp-to-edge.
+// One RGBA8 texture. rgba is w*h*4 bytes for one level, row 0 at the top;
+// the sampler is nearest or linear, repeat or clamp-to-edge. Slice S19: a
+// mip chain is levels > 1 packed levels (level l tightly pitched at
+// max(1,w>>l) x max(1,h>>l), one after another after level 0).
 struct TexInput {
   const uint8_t* rgba = nullptr;
   uint32_t w = 0, h = 0;
@@ -36,6 +38,12 @@ struct TexInput {
   // -1 keeps the linear/repeat-derived default so older callers are unchanged.
   int32_t mag_filter = -1, min_filter = -1;
   int32_t addr_u = -1, addr_v = -1;
+  // Slice S19 mip state: levels = packed mip count (1 = no chain);
+  // mip_mode is a VK_SAMPLER_MIPMAP_MODE_* value (-1 = nearest); max_lod
+  // < 0 means the top level index.
+  uint32_t levels = 1;
+  int32_t mip_mode = -1;
+  float min_lod = 0.0f, max_lod = -1.0f;
 };
 
 // Colour blend state for one target (slice S14), decoded from GNM
