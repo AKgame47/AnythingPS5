@@ -93,6 +93,31 @@ Status VulkanBackend::render_lit_mesh_frames_rgba(
   return render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, &fp, clear, frames);
 }
 
+Status VulkanBackend::render_textured_clip_mesh_rgba(
+    uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
+    const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
+    const std::vector<uint32_t>& indices, bool depth, const TexInput& tex,
+    const float clear[4], std::vector<uint8_t>* image, FrameSurface* shared_frame,
+    bool depth_write, const BlendState* blend) {
+  if (!image) return Status::Fail(100, "vulkan", "textured clip mesh render needs an output image");
+  if (vertices.empty() || vertices.size() % 9 || vertices.size() / 9 > 65536)
+    return Status::Fail(100, "vulkan", "textured clip mesh vertices must be float4 clip position + float3 colour + float2 uv (multiple of 9 floats, max 65536 vertices)");
+  if (indices.empty() || indices.size() % 3 || indices.size() > 30000)
+    return Status::Fail(100, "vulkan", "mesh indices must be a nonzero multiple of 3 (max 30000)");
+  for (uint32_t i : indices)
+    if (i >= vertices.size() / 9)
+      return Status::Fail(100, "vulkan", "mesh index out of range of the vertex array");
+  MeshInput m;
+  m.vertices = &vertices; m.pos_floats = 4; m.extra_floats = 2; m.indices = &indices; m.depth = depth;
+  m.tex = &tex; m.shared_frame = shared_frame; m.depth_write = depth_write; m.blend = blend;
+  std::vector<std::vector<uint8_t>> frames;
+  auto st = render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, nullptr, clear, &frames);
+  if (!st) return st;
+  if (frames.size() != 1) return Status::Fail(100, "vulkan", "textured clip mesh render produced an unexpected frame count");
+  *image = std::move(frames[0]);
+  return Status::Ok();
+}
+
 Status VulkanBackend::render_textured_mesh_frames_rgba(
     uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
     const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
@@ -559,10 +584,13 @@ Status VulkanBackend::render_core(
     undo.push_back([&, tview] { fn<void (*)(VkDevice, VkImageView, void*)>(vkDestroyImageView)(device_, tview, nullptr); });
     VkSamplerCreateInfo sci{};
     sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sci.magFilter = sci.minFilter = tex->linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    sci.magFilter = tex->mag_filter >= 0 ? tex->mag_filter : (tex->linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    sci.minFilter = tex->min_filter >= 0 ? tex->min_filter : (tex->linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    sci.addressModeU = sci.addressModeV = sci.addressModeW =
-        tex->repeat ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    const int32_t def_addr = tex->repeat ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.addressModeU = tex->addr_u >= 0 ? tex->addr_u : def_addr;
+    sci.addressModeV = tex->addr_v >= 0 ? tex->addr_v : def_addr;
+    sci.addressModeW = def_addr;
     sci.minLod = 0.0f; sci.maxLod = 0.0f;
     VkSampler samp = 0;
     r = fn<VkResult (*)(VkDevice, const VkSamplerCreateInfo*, void*, VkSampler*)>(vkCreateSampler)(device_, &sci, nullptr, &samp);
