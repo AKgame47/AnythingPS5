@@ -55,6 +55,7 @@ DrawBindings extract_bindings(const pm4::DrawCall& d) {
     if (get(r, DB_Z_WRITE_BASE, &zwb)) b.db_z_write_base = static_cast<std::uint64_t>(zwb) << 8;
     if (get(r, DB_DEPTH_SIZE, &b.db_depth_size)) b.db_depth_size_set = true;
   }
+  if (get(r, CB_BLEND0_CONTROL, &v)) { b.blend0_set = true; b.blend0 = v; }
   if (get(r, PA_SC_SCREEN_SCISSOR_BR, &b.screen_scissor_br)) { b.has_scissor = true; get(r, PA_SC_SCREEN_SCISSOR_TL, &b.screen_scissor_tl); }
   if (!b.vertex_stage()) b.missing += "no vertex-stage program address (VS or GS); ";
   if (!b.ps.present) b.missing += "no pixel shader address; ";
