@@ -214,3 +214,20 @@ makes the load fail with a message naming it, and nothing runs.
 - `pnr-window-demo` now runs clip AND the perspective divide through translated RDNA every frame.
 - Not done: indexed draws, other primitive types, viewport depth bounds, w guards/clipping,
   RDNA-accurate approximate rcp, SDWA/DPP, hardware GPU verification.
+
+## Slice S7 notes (indexed draws)
+- `execute_draw` accepts DRAW_INDEX_INDX: the index buffer is fetched from guest memory through the
+  GPU address space (16-bit or 32-bit indices, bounds-checked against the mapping), and the vertex
+  transform runs over the referenced vertices (max index + 1, still the 24-lane kernel limit).
+  Indices pass through unchanged, so winding and shared vertices behave as on hardware. The result
+  notes the guest-memory index fetch. Status: Experimental, Tested.
+- Refusals are honest: unmapped index buffer, an index count that is not a positive multiple of 3,
+  and an index past the vertex buffer (caught at the vertex fetch) all fail with plain reasons.
+  Without an INDEX_TYPE packet the PM4 interpreter's default (32-bit) applies; that default is
+  documented, not hidden.
+- Tests (gfx_draw_tests.cpp): a 4-vertex square drawn indexed (32-bit and 16-bit index buffers,
+  byte-identical pixels), pixel-identical to the same square drawn with DRAW_INDEX_AUTO over 6
+  expanded vertices, pixel-identical through the PVS2 (translated divide) path, red coverage within
+  about 4% of the square area, and the three refusals above.
+- Not done: 8-bit indices, primitive restart, strips/fans, instancing beyond 1, indirect draws,
+  vertex counts past 24, real GNM fetch shaders.
