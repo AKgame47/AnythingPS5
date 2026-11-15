@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2652/2652 unit tests, 22/22 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2560 unit checks without it; the
+Test state: **2677/2677 unit tests, 22/22 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2585 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -202,7 +202,7 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Adaptive Performance Engine (deterministic rules, hardware class heuristic, closed-loop controller) | Implemented, Tested |
 | Laptop Optimization Manager (battery/balanced/max-performance caps) | Implemented, Tested |
 | Game services: virtual filesystem (jailed areas, per-game/user save isolation) | Implemented, Tested |
-| Game services: input (evdev enumeration, mapping profiles, virtual device) | Implemented, Tested |
+| Game services: input (evdev enumeration, mapping profiles, virtual device, axis normalization with deadzone) plus a live SDL2 pad source (`input/sdl_pad.*`, optional window build): first joystick polled per frame into the same `InputEvent` control names the C5 pad model uses; `pnr-window-demo` steers the spin with the left stick and pauses while the south button is held; tested end to end through SDL's virtual joystick (`pnr_pad_smoke`) | Implemented, Tested (virtual pad under Xvfb); physical pad Untested, button order is PNR's positional convention (no controller database) |
 | Game services: audio (interface + honest null backend) | Interface Implemented, host backends Planned |
 | CI (`.github/workflows/ci.yml`) | Implemented (Linux x86-64 only: Release `-Werror` build + unit suite + CTest, and an ASan+UBSan job; Windows not built or run there, no packaging, no GPU). Check the Actions tab for the current result |
 | Windows backend | Partial: hwinfo via Win32 Implemented; game launch Blocked. Cross-compiles with llvm-mingw (not built by CI and not run on real Windows) |
@@ -210,12 +210,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2652/2652 unit tests pass (2560 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
+**2677/2677 unit tests pass (2585 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2652/2652
+not re-run for these counts). ASan+UBSan: 2677/2677
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
@@ -1342,7 +1342,7 @@ STORE REFRESH
 | Downloading purchased games | Blocked: no authorized mechanism found; PNR will not bypass DRM or licensing |
 | Desktop launcher UI | Implemented (SDL2 + Dear ImGui `pnr-ui`: Library, game page, Store, Settings/Plugins; see `docs/ui.md`); checked under Xvfb only, not in CI, Windows Blocked |
 | Security manager with a real isolation boundary (seccomp, namespaces) | Partial: `launch --sandbox` and plugin execution use a partial Linux sandbox (see `docs/sandbox.md`); no CPU/memory limits, not escape-proof |
-| Hardware GPU testing and a swapchain or window | Planned, untested |
+| Hardware GPU testing (the window/swapchain landed in slice S3, on software Vulkan) | Planned, untested |
 | Wider RDNA-to-SPIR-V coverage | Experimental, subset only |
 | Audio host backends | Planned (null backend only; see the audio slice) |
 | Windows execution path | Blocked (ELF cannot run on Windows) |
