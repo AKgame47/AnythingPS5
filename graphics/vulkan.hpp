@@ -56,7 +56,23 @@ public:
   bool available() const { return lib_ != nullptr; }
 
   Status create_instance(const char* app_name);
+  // Variant enabling extra instance extensions (e.g. VK_KHR_surface plus a
+  // platform surface extension for window presentation). Missing extensions
+  // surface as the honest vkCreateInstance error code.
+  Status create_instance(const char* app_name,
+                         const std::vector<const char*>& extra_extensions);
   const std::vector<VulkanDeviceInfo>& devices() const { return devices_; }
+
+  // Window-presentation device: requires a queue family that is graphics +
+  // compute AND can present to `surface`, and enables VK_KHR_swapchain.
+  // Fails honestly when no such family exists. create_instance must have
+  // been called with the surface's extensions first.
+  Status create_device_for_present(uint32_t physical_index, VkSurfaceKHR surface);
+  VkInstance instance_handle() const { return instance_; }
+  VkDevice device_handle() const { return device_; }
+  VkPhysicalDevice physical_handle() const { return phys_; }
+  VkQueue queue_handle() const { return queue_; }
+  uint32_t queue_family_index() const { return queue_family_; }
 
   // Create a logical device with one compute-capable queue on
   // devices()[physical_index]. Fails honestly when no compute queue exists.
@@ -165,6 +181,7 @@ public:
   void shutdown();
 
 private:
+  friend class WindowPresenter;  // uses resolved entry points for swapchain I/O
   Status render_core(uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
                      const std::vector<uint32_t>& fs, uint32_t vertex_count,
                      const MeshInput* mesh,
@@ -210,6 +227,19 @@ private:
   X(vkCreateSampler) X(vkDestroySampler) X(vkCmdPipelineBarrier) X(vkCmdCopyBufferToImage)
 #define PNR_VK_MEMBER(name) void* name = nullptr;
   PNR_VK_LIST(PNR_VK_MEMBER)
+#undef PNR_VK_MEMBER
+  // Optional presentation entry points (KHR_surface/KHR_swapchain). Resolved
+  // in open() but NOT required there: a headless host without them stays a
+  // working compute/offscreen backend; presentation fails honestly later.
+#define PNR_VK_LIST_PRESENT(X) \
+  X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceSurfaceSupportKHR) \
+  X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
+  X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkCreateSwapchainKHR) \
+  X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) \
+  X(vkAcquireNextImageKHR) X(vkQueuePresentKHR) X(vkCreateSemaphore) \
+  X(vkDestroySemaphore)
+#define PNR_VK_MEMBER(name) void* name = nullptr;
+  PNR_VK_LIST_PRESENT(PNR_VK_MEMBER)
 #undef PNR_VK_MEMBER
 };
 
