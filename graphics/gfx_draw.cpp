@@ -11,6 +11,7 @@
 #include "graphics/demo/tex_shaders.hpp"
 #include "graphics/gfx_tsharp.hpp"
 #include "graphics/gfx_bc.hpp"
+#include "graphics/gfx_swizzle.hpp"
 #include "graphics/gfx_vsharp.hpp"
 #include "graphics/rdna_fetch.hpp"
 #include "graphics/rdna_pixel.hpp"
@@ -363,6 +364,38 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
         chain_bytes += std::uint64_t(lw) * lh * 4;
       }
       texels.resize(chain_bytes);
+      // Tiled (thin swizzle) surfaces: normalize the base for pipe/bank XOR
+      // modes, read the whole guest surface, then detile every level into a
+      // linear buffer before the common repack below. Element = texel for
+      // 8_8_8_8 (4 bytes), 4x4 block for BC (8/16 bytes).
+      std::uint64_t tiled_base = ts.base;
+      std::uint32_t pipe_bank_xor = 0;
+      TiledMip tiled_layout[kMaxTiledMips];
+      std::vector<std::uint8_t> detiled;
+      if (ts.tiling_index != kSwLinear) {
+        if (swizzle_mode_xor(ts.tiling_index)) {
+          const std::uint64_t mask = ts.tiling_index == kSwS4KBX || ts.tiling_index == kSwD4KBX ? 0xFFFu : 0xFFFFu;
+          pipe_bank_xor = std::uint32_t(ts.base & mask);
+          tiled_base = ts.base & ~mask;
+        }
+        std::uint64_t guest_surface = 0;
+        if (!thin_mip_layout(ts.tiling_index, bb, bc ? 4 : 1, bc ? 4 : 1, ts.width, ts.height,
+                             levels, tiled_layout, kMaxTiledMips, guest_surface))
+          return fail(r, "T# tiled mip layout is not representable");
+        std::vector<std::uint8_t> surface(guest_surface);
+        if (!mem.read(tiled_base, surface.data(), guest_surface))
+          return fail(r, "T# tiled surface is not mapped: " + mem.last_error());
+        std::uint64_t linear_total = 0;
+        for (std::uint32_t l = 0; l < levels; ++l)
+          linear_total = std::max(linear_total, tiled_layout[l].linear_offset + tiled_layout[l].linear_size);
+        detiled.resize(linear_total);
+        for (std::uint32_t l = 0; l < levels; ++l) {
+          // TiledMip dimensions are already in elements (blocks for BC).
+          const std::uint32_t ew = tiled_layout[l].width;
+          const std::uint32_t eh = tiled_layout[l].height;
+          detile_thin_mip(ts.tiling_index, bb, tiled_layout[l], ew, eh, surface.data(), detiled.data(), pipe_bank_xor);
+        }
+      }
       std::vector<std::uint8_t> raw;
       std::uint64_t off = 0, src = ts.base;
       for (std::uint32_t l = 0; l < levels; ++l) {
@@ -372,9 +405,27 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
         // For compressed formats a "row" is a row of 4x4 blocks.
         const std::uint32_t rows = bc ? (lh + 3) / 4 : lh;
         const std::uint64_t row_bytes = bc ? std::uint64_t((lw + 3) / 4) * bb : std::uint64_t(lw) * 4;
-        const std::uint64_t src_row = l == 0 && !bc ? std::uint64_t(ts.pitch) * 4
+        const std::uint64_t src_row = ts.tiling_index != kSwLinear ? tiled_layout[l].pitch_bytes
+                                     : l == 0 && !bc ? std::uint64_t(ts.pitch) * 4
                                      : l == 0 ? std::uint64_t(ts.pitch / 4) * bb
                                               : row_bytes;
+        if (ts.tiling_index != kSwLinear) {
+          // Detiled level: rows at the hardware layout pitch.
+          const std::uint64_t level_base = tiled_layout[l].linear_offset;
+          if (!bc) {
+            for (std::uint32_t row = 0; row < rows; ++row)
+              std::memcpy(texels.data() + off + std::size_t(row) * row_bytes,
+                          detiled.data() + level_base + std::uint64_t(row) * src_row, row_bytes);
+          } else {
+            raw.resize(rows * row_bytes);
+            for (std::uint32_t row = 0; row < rows; ++row)
+              std::memcpy(raw.data() + std::size_t(row) * row_bytes,
+                          detiled.data() + level_base + std::uint64_t(row) * src_row, row_bytes);
+            decode_bc_level(ts.data_format, raw.data(), row_bytes, lw, lh, texels.data() + off);
+          }
+          off += std::uint64_t(lw) * lh * 4;
+          continue;
+        }
         if (!bc) {
           for (std::uint32_t row = 0; row < rows; ++row)
             if (!mem.read(src + std::uint64_t(row) * src_row, texels.data() + off + std::size_t(row) * row_bytes, row_bytes))
