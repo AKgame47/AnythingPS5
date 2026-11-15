@@ -41,6 +41,53 @@ struct Scene {
     cmd = b.dwords();
   }
 };
+struct IndexedScene {
+  GpuAddressSpace mem;
+  std::vector<std::uint32_t> vs_blob, ps_blob{0xbf810000}, mat;
+  std::vector<float> vb;
+  std::vector<std::uint8_t> ibuf;
+  std::vector<std::uint8_t> target;
+  std::vector<std::uint32_t> cmd;
+  static constexpr std::uint32_t W = 64, H = 64;
+  // Square from 4 vertices + 6 indices; u16=false uses a 32-bit index buffer.
+  void build(bool u16, bool pvs2 = false, bool with_index_type = true) {
+    vs_blob = pvs2 ? make_pnr_vs2_blob(4) : make_pnr_vs_blob(4);
+    mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);  // identity
+    vb = {-0.8f, -0.8f, 0, 1, 0, 0,   0.8f, -0.8f, 0, 1, 0, 0,
+           0.8f,  0.8f, 0, 1, 0, 0,  -0.8f,  0.8f, 0, 1, 0, 0};
+    const std::uint32_t ix[6] = {0, 1, 2, 0, 2, 3};
+    if (u16) {
+      ibuf.resize(12);
+      for (int i = 0; i < 6; ++i) { std::uint16_t v = std::uint16_t(ix[i]); std::memcpy(&ibuf[2 * i], &v, 2); }
+    } else {
+      ibuf.resize(24);
+      for (int i = 0; i < 6; ++i) std::memcpy(&ibuf[4 * i], &ix[i], 4);
+    }
+    target.assign(W * H * 4, 0xCD);
+    mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
+    mem.map_external(0x200000, ps_blob.data(), 4, "ps");
+    mem.map_external(0x300000, mat.data(), 64, "matrix");
+    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x500000, target.data(), target.size(), "target");
+    mem.map_external(0x600000, ibuf.data(), ibuf.size(), "indices");
+    pm4::Builder b;
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+    b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
+    b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+    b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
+    b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1);
+    if (with_index_type) b.index_type(u16 ? 0u : 1u);
+    b.draw_indexed(0x600000, 6, 6);
+    cmd = b.dwords();
+  }
+  DrawResult run(VulkanBackend& vk) {
+    auto sum = pm4::interpret(cmd.data(), cmd.size());
+    if (sum.draws.size() != 1) { DrawResult r; r.error = "no draw parsed"; return r; }
+    return execute_draw(vk, mem, sum.draws[0]);
+  }
+};
 }  // namespace
 
 void pnr_gfx_draw_tests(int& pass, int& fail) {
@@ -94,4 +141,90 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
   { Scene s; s.build(); s.mem.unmap(0x400000); refused(s, "vertex buffer is not mapped", "draw: unmapped vertex buffer refused"); }
   { Scene s; s.build(); s.mem.unmap(0x500000); auto sum = pm4::interpret(s.cmd.data(), s.cmd.size()); auto r = execute_draw(vk, s.mem, sum.draws[0]);
     check(r.ok && !r.wrote_target && r.notes.find("not mapped") != std::string::npos, "draw: unmapped colour target returns pixels only and says so"); }
+
+  // ---- slice S7: indexed draws (DRAW_INDEX_INDX) ----
+  {
+    IndexedScene s32; s32.build(false);
+    auto r32 = s32.run(vk);
+    if (!r32.ok) std::printf("  indexed-32 error: %s\n", r32.error.c_str());
+    check(r32.ok && r32.rgba.size() == 64 * 64 * 4 && r32.wrote_target, "draw: indexed 32-bit draw ok, pixels written to the target");
+    IndexedScene s16; s16.build(true);
+    auto r16 = s16.run(vk);
+    if (!r16.ok) std::printf("  indexed-16 error: %s\n", r16.error.c_str());
+    check(r16.ok, "draw: indexed 16-bit draw ok");
+    if (r32.ok && r16.ok) {
+      uint32_t d = 0;
+      for (size_t p = 0; p < size_t(64) * 64 * 4; ++p) d += r32.rgba[p] != r16.rgba[p];
+      check(d == 0, "draw: 16-bit and 32-bit index buffers give byte-identical pixels");
+      int reds = 0;
+      for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x)
+        reds += r32.rgba[(y * 64 + x) * 4] == 255 && r32.rgba[(y * 64 + x) * 4 + 1] == 0 && r32.rgba[(y * 64 + x) * 4 + 2] == 0;
+      // square (-0.8..0.8)^2 covers 64% of the target: about 2621 pixels
+      check(reds > 2500 && reds < 2750, "draw: indexed square covers about 64% of the target (red count " + std::to_string(reds) + ")");
+      check(r32.notes.find("index buffer fetched") != std::string::npos, "draw: indexed result notes the guest-memory index fetch");
+    }
+    // Same square through DRAW_INDEX_AUTO with 6 expanded vertices: identical pixels.
+    {
+      GpuAddressSpace mem2;
+      auto blob = make_pnr_vs_blob(6);
+      std::vector<std::uint32_t> m6(16, 0); for (int i = 0; i < 4; ++i) m6[i * 5] = f2u(1.0f);
+      std::vector<float> vb6 = {-0.8f, -0.8f, 0, 1, 0, 0,   0.8f, -0.8f, 0, 1, 0, 0,   0.8f, 0.8f, 0, 1, 0, 0,
+                                -0.8f, -0.8f, 0, 1, 0, 0,   0.8f,  0.8f, 0, 1, 0, 0,  -0.8f, 0.8f, 0, 1, 0, 0};
+      std::vector<std::uint8_t> t6(64 * 64 * 4, 0xCD);
+      std::vector<std::uint32_t> ps6{0xbf810000};
+      mem2.map_external(0x100000, blob.data(), blob.size() * 4, "vs");
+      mem2.map_external(0x200000, ps6.data(), 4, "ps");
+      mem2.map_external(0x300000, m6.data(), 64, "matrix");
+      mem2.map_external(0x400000, vb6.data(), vb6.size() * 4, "vertices");
+      mem2.map_external(0x500000, t6.data(), t6.size(), "target");
+      pm4::Builder b;
+      b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+      b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+      b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+      b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(32.0f), f2u(32.0f), f2u(-32.0f), f2u(32.0f), f2u(0.5f), f2u(0.5f)});
+      b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+      b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (64 << 16) | 64);
+      b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(6);
+      auto cmd6 = b.dwords();
+      auto sum = pm4::interpret(cmd6.data(), cmd6.size());
+      auto ra = execute_draw(vk, mem2, sum.draws[0]);
+      if (!ra.ok) std::printf("  auto-square error: %s\n", ra.error.c_str());
+      if (ra.ok && r32.ok) {
+        uint32_t d = 0;
+        for (size_t p = 0; p < size_t(64) * 64; ++p) {
+          bool df = false;
+          for (int c = 0; c < 3; ++c) df |= ra.rgba[p * 4 + c] != r32.rgba[p * 4 + c];
+          d += df;
+        }
+        std::printf("  draw: pixels differing auto vs indexed same-square = %u of %u\n", d, 64 * 64);
+        check(d == 0, "draw: indexed draw is pixel-identical to the expanded auto draw");
+      } else check(false, "draw: auto square reference draw succeeded");
+    }
+    // Refusals.
+    { IndexedScene s; s.build(false); s.mem.unmap(0x600000);
+      auto r = s.run(vk);
+      check(!r.ok && r.error.find("index buffer is not mapped") != std::string::npos, "draw: unmapped index buffer refused"); }
+    { // Without INDEX_TYPE the PM4 interpreter defaults to 32-bit indices;
+      // the draw then succeeds against the 32-bit buffer.
+      IndexedScene s; s.build(false, false, false);
+      auto r = s.run(vk);
+      check(r.ok, "draw: draw_indexed without INDEX_TYPE uses the interpreter's 32-bit default"); }
+    { IndexedScene s; s.build(false);
+      std::uint32_t big = 5; std::memcpy(&s.ibuf[0], &big, 4);  // index 5 with only 4 vertices
+      auto r = s.run(vk);
+      check(!r.ok && r.error.find("vertex buffer is not mapped") != std::string::npos, "draw: index past the vertex buffer refused at the vertex fetch"); }
+    // Indexed + PVS2 (translated divide) combo.
+    { IndexedScene s; s.build(false, true);
+      auto r = s.run(vk);
+      if (!r.ok) std::printf("  indexed-pvs2 error: %s\n", r.error.c_str());
+      if (r.ok && r32.ok) {
+        uint32_t d = 0;
+        for (size_t p = 0; p < size_t(64) * 64; ++p) {
+          bool df = false;
+          for (int c = 0; c < 3; ++c) df |= r.rgba[p * 4 + c] != r32.rgba[p * 4 + c];
+          d += df;
+        }
+        check(d == 0, "draw: indexed PVS2 draw pixel-identical to indexed PVS1");
+      } else check(false, "draw: indexed PVS2 draw ok"); }
+  }
 }
