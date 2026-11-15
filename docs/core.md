@@ -230,8 +230,9 @@ makes the load fail with a message naming it, and nothing runs.
   byte-identical pixels), pixel-identical to the same square drawn with DRAW_INDEX_AUTO over 6
   expanded vertices, pixel-identical through the PVS2 (translated divide) path, red coverage within
   about 4% of the square area, and the three refusals above.
-- Not done: 8-bit indices, primitive restart, strips/fans, instancing beyond 1, indirect draws,
-  vertex counts past 65536 (draw cap), real GNM fetch shaders.
+- Not done: primitive restart, instancing beyond 1, indirect draws, vertex counts past 65536
+  (draw cap), real GNM fetch shaders. (Strips/fans landed in slice S10; GNM has no 8-bit index
+  type, so none is emulated.)
 
 ## Slice S8 notes (translated pixel stage)
 - `graphics/rdna_pixel.hpp`: a "PPS1" pixel blob (magic 0x31535050, 4 kernels - one store per
@@ -267,5 +268,24 @@ makes the load fail with a message naming it, and nothing runs.
   translated divide are pixel-identical; a 64-lane helper transform matches the CPU float
   reference (<1e-5); PVS1 blob with 66 vertices, over-cap and non-multiple-of-3 counts refused.
 - Not done: multiple workgroups in one dispatch (the translator ABI is one workgroup, so
-  batching is host-side), >64-lane waves, 8-bit indices, strips/fans, instancing, indirect
-  draws, real GNM fetch shaders, hardware GPU verification.
+  batching is host-side), >64-lane waves, instancing, indirect draws, real GNM fetch shaders,
+  hardware GPU verification. (Strips/fans landed in slice S10.)
+
+## Slice S10 notes (triangle strips and fans)
+- `execute_draw` accepts VGT_PRIMITIVE_TYPE TriangleStrip (6) and TriangleFan (5) alongside
+  TriangleList (4), for auto and indexed draws. The strip/fan source sequence expands to a
+  plain triangle list on the host before rasterization: strip triangle i takes source vertices
+  (i, i+1, i+2) with the first two swapped on odd i to keep the winding consistent; fan
+  triangle i takes (0, i+1, i+2). The rasterizer does not cull today, so the winding swap is a
+  correctness pre-step for when culling exists. Status: Experimental, Tested.
+- Count rules follow the hardware: the multiple-of-3 rule applies to triangle lists only;
+  strips/fans need at least 3 vertices/indices. The expanded index stream stays under the
+  existing 4M-index draw cap. The result note states the expansion.
+- 8-bit indices are NOT implemented on purpose: the GNM INDEX_TYPE field has only 16-bit and
+  32-bit encodings, so there is nothing real to translate.
+- Tests (gfx_draw_tests.cpp): a 4-vertex strip quad pixel-identical (0 of 16384 bytes) to the
+  expanded triangle list, auto and indexed strips pixel-identical, a 5-vertex fan
+  pixel-identical to its expanded list with the missing wedge at the clear colour, a 2-vertex
+  strip and point/line primitives refused.
+- Not done: primitive restart, culling/winding enforcement, line/point primitives, instancing,
+  indirect draws, hardware GPU verification.
