@@ -70,6 +70,12 @@ private:
   std::map<std::string, std::string> map_;  // action -> control
 };
 
+// Normalizes a raw analog axis reading to [-1, 1] with a symmetric deadzone.
+// raw is clamped to [-raw_max, +raw_max] first; |v| <= deadzone becomes 0;
+// outside the deadzone the value is rescaled so travel stays linear to the
+// rim. deadzone is a fraction in [0, 1). Slice S4.
+float normalize_axis(std::int32_t raw, std::int32_t raw_max, float deadzone);
+
 std::shared_ptr<IInputBackend> make_input_backend();
 
 }  // namespace pnr::services
