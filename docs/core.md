@@ -115,3 +115,18 @@ makes the load fail with a message naming it, and nothing runs.
   semaphore waiter, destroy-while-waiting) and check all 10 symbols are registered. They are NOT yet exercised from guest
   machine code through the NID path, and argument layouts follow public pthread/semaphore conventions, unverified against a console.
 - Not done: event queues, rwlocks, thread-local keys, thread priorities and affinity, cancellation.
+
+## Slice S2 notes (fused multiply-add vertex path)
+- The RDNA decoder now names one VOP3A opcode: `v_fma_f32` (331, from AMD's public "RDNA 2" Instruction Set
+  Architecture, Table 83) and decodes the third source operand. Neighbouring opcodes stay unnamed and unsupported.
+- The translator accepts a restricted `v_fma_f32`: vector destination, register/constant sources, no ABS/OPSEL/CLMP
+  clamp or OMOD/NEG modifiers (any set modifier bit fails translation). Status: Implemented, Tested.
+- It emits GLSL.std.450 `Fma` (fused, single rounding) instead of mul+add, which matches RDNA `v_fma_f32` semantics
+  more closely; the mul+add path keeps its NoContraction pair. Still host Vulkan FP policy, not PS5 rounding modes.
+- A fused variant of the compute-as-vertex component kernel transforms the same cube through translated RDNA machine
+  code. Measured on lavapipe over 8 frames x 24 vertices x 4 components: bit-identical to the CPU `std::fma`
+  reference (max diff 0), within 2.4e-7 of the mul+add path, and 0 of 9216 pixels differing per frame from the
+  hand-authored vertex shader.
+- Tests: decode naming, modifier rejection (ABS/CLMP/NEG/OMOD), translation flags, spirv-val acceptance of the fused
+  module, on-GPU execution against both CPU references, and the pixel comparison above.
+- Not done: other VOP3 opcodes, source modifiers, SDWA/DPP, 64-bit `v_fma_f64`, output modifiers.
