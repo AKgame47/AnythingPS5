@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2711/2711 unit tests, 22/22 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2616 unit checks without it; the
+Test state: **2721/2721 unit tests, 22/22 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2626 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -197,6 +197,7 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Scalar/uniform inputs: initial s0..s15 from explicit runtime push constants, scalar copies, vector ALU broadcast and uniform-driven workgroup selection | Experimental, Tested (changed uniforms on same SPIR-V, Vulkan shim + official headers, lavapipe); not a Sony user-data ABI |
 | Float32 ALU: VOP2 add/sub/mul plus slice S5 subrev/min/max and v_mac_f32 (mul-then-add, two roundings), VOP1 rcp/sqrt/cvt_f32_i32/cvt_i32_f32, VOP3A v_fma_f32 fused single-rounding; raw-bit registers, real SPIR-V arithmetic, NoContraction on the add/sub/mul family | Experimental host-Vulkan FP policy, Tested on lavapipe against a CPU float reference (sub/subrev/min/max/mac/rcp/sqrt/conversions all 0 ulp measured; spirv-val on a mixed module); rcp is emitted as correctly-rounded 1.0/x, NOT RDNA's approximate rcp; min/max NaN and signed-zero picks follow host GLSL.std.450, not RDNA's operand rule; exact PS5 rounding/denormal/NaN payload behavior not implemented; SDWA/DPP/source modifiers stay rejected |
 | Translated vertex post-transform (slice S6): `v_rcp_f32` perspective divide + `v_fma_f32` viewport transform + `v_min_f32`/`v_max_f32` depth clamp as restricted RDNA kernels (`rdna_post_ndc_kernel`/`rdna_post_win_kernel`, one store per kernel); the "PVS2" draw blob runs clip AND the divide in translated RDNA and feeds the rasterizer ndc with w = 1; `pnr-window-demo` presents frames through this path | Experimental, Tested on lavapipe: 0 of 144 components differ from a CPU division/fma reference (0 ulp) and the PVS2 draw is pixel-identical (0 of 4096) to the GPU-side divide; rcp is correctly-rounded 1.0/w (not RDNA's approximate rcp), w = 0 gives IEEE inf/NaN (no guard), viewport depth bounds untracked (0..1), on-screen viewport stays host fixed-function, indexed draws and other primitives Planned |
+| Indexed draws (slice S7): DRAW_INDEX_INDX with a 16/32-bit index buffer fetched from guest memory through the GPU address space; the translated vertex transform covers the referenced vertices (max index + 1, 24-lane limit), indices pass through unchanged | Experimental, Tested on lavapipe: 16/32-bit index buffers byte-identical, indexed square pixel-identical to the expanded auto draw and to the PVS2 path, unmapped index buffer / bad count / index past the vertex buffer refused; 8-bit indices, primitive restart, strips/fans and >24 vertices Planned |
 | Full64 runtime pointers: scalar add/addc/sub/subb pair arithmetic, carry-aware FLAT offsets, lexicographic bounds/alignment guards | Experimental, Tested (cross-low-word bindings, overflow/borrow/OOB, spirv-val + lavapipe); single invocation, existing bounded SSBO only |
 | Strict counted loop: scalar constant or runtime uniform count 1..64, one uint32 vector accumulator add, decrement/compare/backedge; real SPIR-V LoopMerge/Phi | Experimental, Tested (1/2/8/64 invocations, 1/2/16/64 counts, spirv-val + lavapipe); invalid runtime count rejected before dispatch plus GPU no-op guard; no body memory, nesting or general CFG |
 | Proof-checked copy loop: guarded dword load/store, two affine pointer increments, constant/runtime uniform count; exact lane x iteration collision/alias proof | Experimental, Tested (spirv-val + lavapipe, tiled/transposed maps, offsets, invalid-count no-op); no in-place updates, full64 loop pointers or broader body/control flow |
@@ -211,12 +212,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2711/2711 unit tests pass (2616 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
+**2721/2721 unit tests pass (2626 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2711/2711
+not re-run for these counts). ASan+UBSan: 2721/2721
 unit tests pass with leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
