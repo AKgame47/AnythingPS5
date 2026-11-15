@@ -327,3 +327,34 @@ makes the load fail with a message naming it, and nothing runs.
   one draw - with depth on red wins in BOTH draw orders (byte-identical pixels, 0 differing
   bytes); the same red-first order with depth off lets the last-drawn green quad win
   (control); stencil and GREATER draws refused.
+
+## Slice S13 notes (frame-persistent render targets: bound DB depth buffer)
+- Depth buffer binding registers (graphics/amd_regs.hpp): DB_Z_INFO ctx 0x010, DB_STENCIL_INFO
+  0x011, DB_Z_READ_BASE 0x012, DB_Z_WRITE_BASE 0x014, DB_DEPTH_SIZE 0x016. Addresses and field
+  layout (ZInfo format bits 0..1: 1 = Z16, 3 = Z32 float; tile surface enable bit 28; DepthSize
+  pitch/height tile maxima, pitch = (max+1)<<3; bases << 8) from public shadPS4
+  src/video_core/amdgpu/{regs.cpp,regs_depth.h} (values only, no code).
+- `FrameSurface` (graphics/vulkan.hpp) + `VulkanBackend::create_frame_targets`/`destroy_frame`
+  (graphics/render.cpp): a colour + D32 depth attachment pair kept across draws. First use (or a
+  size change) creates and clears both (LOAD_OP_CLEAR); later draws reload them (LOAD_OP_LOAD),
+  so consecutive draws accumulate into the bound colour target and test against earlier depth.
+  Single-frame renders only.
+- `DrawFrameCache` (graphics/gfx_draw.{hpp,cpp}): caller-owned frame state (colour base, z base,
+  size, surface). `execute_draw(vk, mem, draw, frame)` renders into the cache; the 3-argument
+  overload keeps an empty cache, so single draws behave exactly as before (slice S12 per-draw
+  depth). The frame restarts (fresh clear) when the colour base, z base or size changes.
+- Binding rules: with depth enable + LESS and a valid linear Z32 float DB binding, the draw uses
+  the persistent depth surface; DB_DEPTH_CONTROL depth_write_enable (bit 2) is honoured (read-only
+  depth tests without it). Without a valid binding the draw keeps the slice-S12 per-draw depth
+  surface. Refused with plain reasons: Z16 and the reserved format, tiled depth (HTILE, bit 28),
+  a stencil format, separate read/write bases, and a shared frame that gains depth after its
+  first draw (bind everything up front, like a real game).
+- Limits (stated in the draw notes): no depth readback; DB render-control clears and
+  DB_DEPTH_CLEAR are not tracked, so the frame clears only on a binding/size change - frame
+  boundaries are not modelled yet; the depth surface is linear D32 only.
+- Tests (gfx_draw_tests.cpp): two separate draws into one frame - far green full quad then near
+  red centre quad keeps green outside and red inside (accumulation + cross-draw depth); reversed
+  order (near first, far second) keeps the centre red (the far draw is blocked by earlier depth)
+  while still covering empty depth; the same draws without a shared cache repaint the centre
+  (control, per-draw behaviour); depth-write-off leaves depth untouched; a new z_base restarts
+  the frame; Z16, tiled, stencil and separate-base bindings refused.
