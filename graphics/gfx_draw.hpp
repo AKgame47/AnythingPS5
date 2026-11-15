@@ -28,6 +28,7 @@ inline constexpr std::uint32_t kPnrVsMagic = 0x31535650u;   // "PVS1"
 inline constexpr std::uint32_t kPnrVs2Magic = 0x32535650u;  // "PVS2"
 inline constexpr std::uint32_t kPnrVs3Magic = 0x33535650u;  // "PVS3"
 inline constexpr std::uint32_t kPnrVs4Magic = 0x34535650u;  // "PVS4"
+inline constexpr std::uint32_t kPnrVs5Magic = 0x35535650u;  // "PVS5"
 
 // Slice S9 sanity caps for one draw (PNR TEST ABI limits, not hardware):
 // at most 64k transformed vertices and 4M indices per draw call.
@@ -65,6 +66,12 @@ std::vector<std::uint32_t> make_pnr_vs3_blob(bool with_post);
 // lo/hi (missing data is refused). A PPS1 pixel blob still overrides the
 // whole draw colour. No specular, no textures, one directional light.
 std::vector<std::uint32_t> make_pnr_vs4_blob();
+// Slice S15: PVS5 blob - 6 fetch kernels (pos xyz + colour rgb, built per
+// layout: component stride in dwords baked in), then the PVS3 clip+post
+// kernels. Header dwords: {kPnrVs5Magic, 13, pos_fmt, col_fmt,
+// pos_stride_words, col_stride_words, then 13 kernel lengths}.
+std::vector<std::uint32_t> make_pnr_vs5_blob(std::uint32_t pos_fmt, std::uint32_t col_fmt,
+                                             std::uint32_t pos_stride_words, std::uint32_t col_stride_words);
 
 struct DrawResult {
   bool ok = false;
