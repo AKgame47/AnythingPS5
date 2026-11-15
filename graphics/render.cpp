@@ -121,6 +121,35 @@ Status VulkanBackend::render_textured_clip_mesh_rgba(
   return Status::Ok();
 }
 
+Status VulkanBackend::render_textured_array_clip_mesh_rgba(
+    uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
+    const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
+    const std::vector<uint32_t>& indices, bool depth, const TexInput& tex,
+    const float clear[4], std::vector<uint8_t>* image, FrameSurface* shared_frame,
+    bool depth_write, const BlendState* blend, int32_t cull_mode, int32_t front_face,
+    int32_t depth_compare) {
+  if (!image) return Status::Fail(100, "vulkan", "texture-array clip mesh render needs an output image");
+  if (vertices.empty() || vertices.size() % 10 || vertices.size() / 10 > 65536)
+    return Status::Fail(100, "vulkan", "texture-array clip mesh vertices must be float4 clip position + float3 colour + float3 uv-layer (multiple of 10 floats, max 65536 vertices)");
+  if (indices.empty() || indices.size() % 3 || indices.size() > 30000)
+    return Status::Fail(100, "vulkan", "mesh indices must be a nonzero multiple of 3 (max 30000)");
+  for (uint32_t i : indices)
+    if (i >= vertices.size() / 10)
+      return Status::Fail(100, "vulkan", "mesh index out of range of the vertex array");
+  if (tex.layers < 1)
+    return Status::Fail(100, "vulkan", "texture-array render needs at least one slice");
+  MeshInput m;
+  m.vertices = &vertices; m.pos_floats = 4; m.extra_floats = 3; m.indices = &indices; m.depth = depth;
+  m.tex = &tex; m.shared_frame = shared_frame; m.depth_write = depth_write; m.blend = blend;
+  m.cull_mode = cull_mode; m.front_face = front_face; m.depth_compare = depth_compare;
+  std::vector<std::vector<uint8_t>> frames;
+  auto st = render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, nullptr, clear, &frames);
+  if (!st) return st;
+  if (frames.size() != 1) return Status::Fail(100, "vulkan", "texture-array clip mesh render produced an unexpected frame count");
+  *image = std::move(frames[0]);
+  return Status::Ok();
+}
+
 Status VulkanBackend::render_textured_mesh_frames_rgba(
     uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
     const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
@@ -544,17 +573,21 @@ Status VulkanBackend::render_core(
   VkBuffer tstage = 0;
   // Slice S19: mip chain extents/byte count (level l tightly pitched at
   // max(1,w>>l) x max(1,h>>l)); valid only while tex != nullptr.
+  // Slice S27: each level holds tex->layers tightly packed array slices.
   uint32_t levels = 1, lw[9], lh[9];
+  uint32_t layers = 1;
   size_t tex_bytes = 0;
   if (tex) {
     if (!tex->rgba || tex->w == 0 || tex->h == 0 || tex->w > 256 || tex->h > 256)
       return Status::Fail(100, "vulkan", "texture must be 1..256 per side with pixel data");
     levels = tex->levels ? tex->levels : 1;
     if (levels > 9) return Status::Fail(100, "vulkan", "texture mip levels exceed 9");
+    layers = tex->layers ? tex->layers : 1;
+    if (layers > 256) return Status::Fail(100, "vulkan", "texture array slices exceed 256");
     for (uint32_t l = 0; l < levels; ++l) {
       lw[l] = (tex->w >> l) ? (tex->w >> l) : 1;
       lh[l] = (tex->h >> l) ? (tex->h >> l) : 1;
-      tex_bytes += (size_t)lw[l] * lh[l] * 4;
+      tex_bytes += (size_t)lw[l] * lh[l] * 4 * layers;
     }
     // Slice S23: sRGB guest textures stage as SRGB images so the host sampler
     // does the sRGB -> linear conversion in hardware.
@@ -571,7 +604,7 @@ Status VulkanBackend::render_core(
     VkImageCreateInfo tci{};
     tci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     tci.imageType = VK_IMAGE_TYPE_2D; tci.format = tex_vk_format;
-    tci.extent = {tex->w, tex->h, 1}; tci.mipLevels = levels; tci.arrayLayers = 1;
+    tci.extent = {tex->w, tex->h, 1}; tci.mipLevels = levels; tci.arrayLayers = layers;
     tci.samples = VK_SAMPLE_COUNT_1_BIT; tci.tiling = VK_IMAGE_TILING_OPTIMAL;
     tci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     tci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; tci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -594,8 +627,8 @@ Status VulkanBackend::render_core(
     if (r != VK_SUCCESS) return vkfail("vkBindImageMemory (texture)", r);
     VkImageViewCreateInfo tvci{};
     tvci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    tvci.image = timg; tvci.viewType = VK_IMAGE_VIEW_TYPE_2D; tvci.format = tex_vk_format;
-    tvci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+    tvci.image = timg; tvci.viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D; tvci.format = tex_vk_format;
+    tvci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, layers};
     VkImageView tview = 0;
     r = fn<VkResult (*)(VkDevice, const VkImageViewCreateInfo*, void*, VkImageView*)>(vkCreateImageView)(device_, &tvci, nullptr, &tview);
     if (r != VK_SUCCESS) return vkfail("vkCreateImageView (texture)", r);
@@ -886,7 +919,7 @@ Status VulkanBackend::render_core(
     b1.srcAccessMask = 0; b1.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     b1.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     b1.srcQueueFamilyIndex = b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b1.image = timg; b1.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+    b1.image = timg; b1.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, layers};
     using BarrierFn = void (*)(VkCommandBuffer, VkFlags, VkFlags, VkFlags, uint32_t, const void*, uint32_t, const void*, uint32_t, const VkImageMemoryBarrier*);
     fn<BarrierFn>(vkCmdPipelineBarrier)(ucmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b1);
     VkBufferImageCopy tr[9];
@@ -896,9 +929,9 @@ Status VulkanBackend::render_core(
       VkBufferImageCopy& c = tr[nreg++];
       c = VkBufferImageCopy{};
       c.bufferOffset = (uint64_t)level_off;
-      c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
+      c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, layers};
       c.imageExtent = {lw[l], lh[l], 1};
-      level_off += (size_t)lw[l] * lh[l] * 4;
+      level_off += (size_t)lw[l] * lh[l] * 4 * layers;
     }
     fn<void (*)(VkCommandBuffer, VkBuffer, VkImage, int32_t, uint32_t, const VkBufferImageCopy*)>(
         vkCmdCopyBufferToImage)(ucmd, tstage, timg, (int32_t)VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, nreg, tr);
