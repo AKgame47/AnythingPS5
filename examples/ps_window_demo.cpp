@@ -1,6 +1,7 @@
 // PNR window demo "game" (developer-controlled), GPL-2.0. Slice S3.
 // Opens a real SDL2 + Vulkan window and presents a spinning cube whose clip
 // positions come from the translated-RDNA fused multiply-add path (slice S2)
+// with the perspective divide also done by translated RDNA code (slice S6)
 // every frame, rendered through the clip-space path and presented through a
 // real swapchain. This is PNR's own demo content, NOT PS5 game output.
 // Options: --frames N (default 240), --width W --height H, --shot F:path.ppm
@@ -154,13 +155,22 @@ int main(int argc, char** argv) {
     }
     angle += 0.03f * (pad_paused ? 0.0f : (1.0f + pad_lx));
     const Mat4 mvp = mat4_mul(P, mat4_mul(T, mat4_mul(mat4_rotate_x(0.5f), mat4_rotate_y(angle))));
-    // Vertex stage on translated RDNA machine code (fused multiply-add path).
+    // Vertex stage on translated RDNA machine code (fused multiply-add path),
+    // then the slice S6 post-transform: the perspective divide runs in
+    // translated RDNA too, and the rasterizer gets ndc with w = 1.
     std::vector<float> clip;
     st = rdna_transform_points(vk, xyz, mat4_words(mvp), &clip, true);
     if (!st) { std::fprintf(stderr, "pnr-window-demo: FAIL transform: %s\n", st.error.message.c_str()); return 1; }
+    const float vpf[8] = {float(w) / 2, float(w) / 2, float(h) / 2, float(h) / 2, 1.0f, 0.0f, 0.0f, 1.0f};
+    std::vector<uint32_t> vp8(8);
+    for (int c = 0; c < 8; ++c) std::memcpy(&vp8[c], &vpf[c], 4);
+    std::vector<float> ndc, winco;
+    st = rdna_post_transform_clip(vk, clip, vp8, &ndc, &winco);
+    if (!st) { std::fprintf(stderr, "pnr-window-demo: FAIL post-transform: %s\n", st.error.message.c_str()); return 1; }
     std::vector<float> cv;
     for (size_t i = 0; i < 24; ++i) {
-      for (int c = 0; c < 4; ++c) cv.push_back(clip[i * 4 + c]);
+      for (int c = 0; c < 3; ++c) cv.push_back(ndc[i * 3 + c]);
+      cv.push_back(1.0f);
       for (int c = 0; c < 3; ++c) cv.push_back(col[i * 3 + c]);
     }
     std::vector<uint8_t> img;
@@ -179,7 +189,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "pnr-window-demo: FAIL shot frame %d was never reached\n", shot_frame);
     return 1;
   }
-  std::printf("pnr-window-demo: presented %u frames (RDNA fma vertex path, real swapchain)\n", done);
+  std::printf("pnr-window-demo: presented %u frames (RDNA fma vertex + rcp/fma post-transform path, real swapchain)\n", done);
   if (virtual_pad) {
     // The scripted pattern must have arrived through the real SDL joystick
     // path: three axis settings, one button down, one button up.
