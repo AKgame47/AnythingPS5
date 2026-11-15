@@ -160,7 +160,7 @@ set_target_properties(ps_cube_demo PROPERTIES BUILD_RPATH "$ORIGIN")
 target_link_libraries(pnr_test_app PRIVATE pnr_compat pnr_core)
 
 enable_testing()
-add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp tests/psn_sync_tests.cpp tests/store_tests.cpp tests/download_tests.cpp tests/signature_tests.cpp tests/sandbox_tests.cpp tests/scan_tests.cpp tests/research_tests.cpp tests/ask_tests.cpp tests/suggest_tests.cpp tests/ui_model_tests.cpp tests/module_tests.cpp tests/kernel_tests.cpp tests/libc_tests.cpp tests/pm4_tests.cpp tests/gfx_state_tests.cpp tests/gpu_va_tests.cpp tests/gfx_draw_tests.cpp tests/hw_tests.cpp tests/plugin_tests.cpp)
+add_executable(pnr_tests tests/test_main.cpp tests/loop_tests.cpp tests/loop_memory_tests.cpp tests/loop_copy_tests.cpp tests/render_tests.cpp tests/cube_tests.cpp tests/rdna_vertex_tests.cpp tests/launcher_tests.cpp tests/launcher_mgmt_tests.cpp tests/launcher_install_tests.cpp tests/launcher_care_tests.cpp tests/psn_tests.cpp tests/psn_sync_tests.cpp tests/store_tests.cpp tests/download_tests.cpp tests/signature_tests.cpp tests/sandbox_tests.cpp tests/scan_tests.cpp tests/research_tests.cpp tests/ask_tests.cpp tests/suggest_tests.cpp tests/ui_model_tests.cpp tests/module_tests.cpp tests/kernel_tests.cpp tests/libc_tests.cpp tests/pm4_tests.cpp tests/gfx_state_tests.cpp tests/gpu_va_tests.cpp tests/gfx_draw_tests.cpp tests/hw_tests.cpp tests/plugin_tests.cpp tests/pad_tests.cpp)
 
 # Let the tests launch the real PS-style demo binary.
 target_compile_definitions(pnr_tests PRIVATE
@@ -308,14 +308,23 @@ if(PNR_BUILD_WINDOW)
   add_library(pnr_window graphics/window.cpp)
   target_include_directories(pnr_window PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${SDL2_INCLUDE_DIR})
   target_link_libraries(pnr_window PUBLIC pnr_graphics ${SDL2_LIBRARY} ${CMAKE_DL_LIBS})
+  # Slice S4: live pad input over SDL2 (joystick state -> PNR input events).
+  add_library(pnr_pad input/sdl_pad.cpp)
+  target_include_directories(pnr_pad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${SDL2_INCLUDE_DIR})
+  target_link_libraries(pnr_pad PUBLIC pnr_services ${SDL2_LIBRARY})
   add_executable(pnr-window-demo examples/ps_window_demo.cpp)
-  target_link_libraries(pnr-window-demo PRIVATE pnr_window pnr_shader)
+  target_link_libraries(pnr-window-demo PRIVATE pnr_window pnr_pad pnr_shader)
   find_program(PNR_XVFB_RUN xvfb-run)
   if(PNR_XVFB_RUN)
     # Smoke: a real window on a virtual display presents real swapchain frames.
     add_test(NAME pnr_window_smoke COMMAND ${PNR_XVFB_RUN} -a -s "-screen 0 800x600x24"
              $<TARGET_FILE:pnr-window-demo> --frames 12 --shot 10:${CMAKE_BINARY_DIR}/window_smoke.ppm)
     set_tests_properties(pnr_window_smoke PROPERTIES PASS_REGULAR_EXPRESSION "presented 12 frames" WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    # Pad smoke: the demo attaches SDL's virtual joystick, drives a scripted
+    # pattern through the real SDL joystick path, and verifies it arrived.
+    add_test(NAME pnr_pad_smoke COMMAND ${PNR_XVFB_RUN} -a -s "-screen 0 800x600x24"
+             $<TARGET_FILE:pnr-window-demo> --frames 16 --virtual-pad)
+    set_tests_properties(pnr_pad_smoke PROPERTIES PASS_REGULAR_EXPRESSION "pad-check: ok axis=3 button-down=1 button-up=1 presented=16" WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   else()
     message(STATUS "xvfb-run not found: pnr_window_smoke test not registered")
   endif()
