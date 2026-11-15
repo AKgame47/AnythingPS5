@@ -49,7 +49,7 @@ struct RdnaInstruction {
   uint32_t opcode_id = 0;      // raw opcode number inside the family
   std::string mnemonic;        // empty when not in the named subset
   bool supported = false;      // true only for the named subset
-  RdnaOperand dst, src0, src1;
+  RdnaOperand dst, src0, src1, src2;  // src2: VOP3 three-operand form only
   int32_t simm = 0;            // SOPP/SOPK signed immediate
   uint32_t branch_target = 0;  // SOPP branches: pc + 4 + simm*4
   uint32_t word_count = 1;     // words consumed (2 for 64-bit / literal)
