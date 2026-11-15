@@ -328,6 +328,32 @@ makes the load fail with a message naming it, and nothing runs.
   bytes); the same red-first order with depth off lets the last-drawn green quad win
   (control); stencil and GREATER draws refused.
 
+## Slice S17 notes (texture sampling - T#/S#)
+- A "PPS2" pixel blob ({magic, 0}) marks the textured pixel stage. Pixel user data 0..1
+  addresses the T# (8 dwords), 2..3 the S# (4 dwords); both descriptors live in guest
+  memory and are decoded and validated on every draw (gfx_tsharp.hpp; layouts from public
+  shadPS4 resource.h / pixel_format.h / tiling.h - values only, no code).
+- Accepted subset, everything else refused with a named reason: Color2D images,
+  8_8_8_8 unorm, linear tiling (DisplayLinearAligned / DisplayLinearGeneral), one mip
+  level, no arrays, identity component select, extent 1..256 (this slice's staging cap);
+  wrap/mirror/clamp/mirror-once addressing, point or bilinear filters, no depth compare,
+  no min/max filter mode, no mip filtering.
+- The draw repacks the guest pixels (T# pitch honoured) into a tightly packed RGBA8
+  image, builds a Vulkan sampler from the S# state (GNM ClampMode/Filter values mapped
+  to VK_SAMPLER_ADDRESS_MODE_* / VK_FILTER_*), and renders with the clip-space textured
+  pipeline (cliptex_vert + tex_frag, 9-float records: clip4 + colour3 + uv2). The uv
+  arrives as a plain second varying, like the fixed colour pass-through.
+- Sampling itself runs in the host rasterizer's fragment stage - it is NOT translated
+  RDNA in this slice (unlike the S8 PPS1 constant-colour kernels); the draw notes say so.
+- PPS2 combines with PVS1..PVS3 vertex blobs only; PVS4 (normals) and PVS5 (V# fetch)
+  combinations are refused as not implemented.
+- Tests (13 in gfx_draw_tests + 15 descriptor tests in gfx_tsharp_tests): 4x4 checker
+  nearest draw byte-exact in 16-pixel blocks (either row orientation), target memory
+  exact; wrap addressing repeats the pattern every 32 pixels with 8-pixel texel blocks;
+  bilinear midpoint is the four-texel average (127/128) and a pixel landing on a texel
+  centre samples that texel exactly; refusals: missing T#/S# pointers, tiled image,
+  border clamp, PPS2+PVS4.
+
 ## Slice S16 notes (8_8_8_8 unorm vertex colours)
 - The S15 fetch kernels gain a conversion path for data format 10 (8_8_8_8) with unorm
   numerics: all four components share the record's first dword, so the component dword
