@@ -403,6 +403,30 @@ makes the load fail with a message naming it, and nothing runs.
   and T# min_lod clamp the sampled level, mip filter none keeps level 0 on a chain,
   and the refusal cases above all name their reason.
 
+## Slice S20 notes (compressed textures - BC1/BC3)
+- T# data formats 35 (BC1) and 37 (BC3) with unorm numerics join the sampled subset
+  (values from public shadPS4 pixel_format.h, values only). The block bit layout is the
+  public S3TC/DXT specification. The subset requires linear tiling, a tight pitch
+  (pitch == width) and extents that are multiples of 4; everything else is refused
+  with a named reason. Mip chains combine with S19: level l covers ceil(w/4) x
+  ceil(h/4) 4x4 blocks, packed like S19's levels.
+- gfx_bc.hpp decodes blocks to RGBA8 with exact integer arithmetic: BC1's two
+  RGB565 endpoints expand by bit replication, the 4-colour ramp interpolates the
+  expanded channels ((2c0+c1)/3, (c0+2c1)/3), the 3-colour mode adds transparent
+  black; BC3's alpha block interpolates 6 or 4 values between the endpoints (plus
+  0 and 255 in 6-alpha mode) and its colour half always uses the 4-colour ramp.
+- The draw repack (gfx_draw.cpp) reads the guest's block rows and decodes each level
+  into the S19 tight RGBA8 chain, so mips, filters and addressing apply unchanged.
+- The hand-authored tex_frag shader now passes the sampled alpha through
+  (previously forced to 1), so BC3 alpha and BC1 punch-through reach the target;
+  tint has no alpha channel.
+- Tests (14 in gfx_bc_tests + 8 in gfx_draw_tests): every decode rule byte-exact
+  against hand-computed blocks (both BC1 modes, both BC3 alpha modes incl. nonzero
+  endpoints, BC3's 4-colour colour half, edge-block dropping), then end-to-end:
+  BC1 solid and checker draws byte-exact, BC3 alpha gradient byte-exact in the
+  target, BC1/BC3 mip chains select the right level, loose pitch and non-multiple-
+  of-4 extents refused.
+
 ## Slice S16 notes (8_8_8_8 unorm vertex colours)
 - The S15 fetch kernels gain a conversion path for data format 10 (8_8_8_8) with unorm
   numerics: all four components share the record's first dword, so the component dword
