@@ -89,8 +89,8 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
   auto no = [&](const char* m) { *why = m; return false; };
   if (t.type != 9) return no("T# image type is not Color2D (1D/3D/cube/array/MSAA images are not implemented)");
   const bool bc1 = t.data_format == 35, bc2 = t.data_format == 36, bc3 = t.data_format == 37;
-  const bool bc4 = t.data_format == 38, bc5 = t.data_format == 39;  // shadPS4 DataFormat values
-  const bool bc = bc1 || bc2 || bc3 || bc4 || bc5;
+  const bool bc4 = t.data_format == 38, bc5 = t.data_format == 39, bc7 = t.data_format == 41;
+  const bool bc = bc1 || bc2 || bc3 || bc4 || bc5 || bc7;  // shadPS4 DataFormat values
   PlainFormat pf{};
   const bool plain = plain_format_info(t.data_format, t.num_format, pf);
   const bool bc_ok = bc && (t.num_format == kNumUnorm || format_uses_srgb_image(t.data_format, t.num_format));
