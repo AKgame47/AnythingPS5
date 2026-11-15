@@ -99,6 +99,48 @@ void pnr_gfx_bc_tests(int& pass, int& fail) {
     decode_bc3_block(blk, out);
     check(out[8] == 85 && out[9] == 0 && out[10] == 170, "bc3: colour half always uses the 4-colour ramp");
   }
+  // Slice S21: BC2 explicit alpha nibbles (scaled by 17), 4-colour colour half.
+  {
+    std::uint8_t blk[16], out[64];
+    for (int i = 0; i < 8; ++i) blk[i] = std::uint8_t((2 * i) | ((2 * i + 1) << 4));
+    put_block(blk + 8, 0x001F, 0xF800, 0xE4);  // blue <= red, still 4-colour
+    decode_bc2_block(blk, out);
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) ok &= out[i * 4 + 3] == i * 17;
+    check(ok, "bc2: explicit 4-bit alphas scale by 17 exactly");
+    check(out[8] == 85 && out[9] == 0 && out[10] == 170, "bc2: colour half always uses the 4-colour ramp");
+  }
+  // BC4: single channel in the red channel, both interpolation modes.
+  {
+    std::uint8_t blk[8], out[64];
+    blk[0] = 200; blk[1] = 100;  // 8-value mode
+    std::uint64_t abits = 0;
+    for (int i = 0; i < 8; ++i) abits |= std::uint64_t(i) << (3 * i);
+    for (int i = 0; i < 6; ++i) blk[2 + i] = std::uint8_t(abits >> (8 * i));
+    decode_bc4_block(blk, out);
+    const std::uint8_t want[8] = {200, 100, 185, 171, 157, 142, 128, 114};
+    bool ok = true;
+    for (int i = 0; i < 8; ++i)
+      ok &= out[i * 4] == want[i] && out[i * 4 + 1] == 0 && out[i * 4 + 2] == 0 && out[i * 4 + 3] == 255;
+    check(ok, "bc4: 8-value mode decodes into red with opaque alpha");
+    blk[0] = 50; blk[1] = 200;  // 6-value mode
+    decode_bc4_block(blk, out);
+    check(out[0] == 50 && out[4] == 200 && out[8] == 80 && out[28] == 255,
+          "bc4: 6-value mode adds exact 0 and 255");
+  }
+  // BC5: two independent channels.
+  {
+    std::uint8_t blk[16], out[64];
+    blk[0] = 255; blk[1] = 0;    // red block: 255 everywhere (index 0)
+    blk[8] = 0; blk[9] = 128;    // green block: 128 everywhere (index 1)
+    std::uint64_t z = 0;
+    for (int i = 0; i < 16; ++i) { z |= std::uint64_t(1) << (3 * i); }  // all index 1
+    for (int i = 0; i < 6; ++i) { blk[2 + i] = 0; blk[10 + i] = std::uint8_t(z >> (8 * i)); }
+    decode_bc5_block(blk, out);
+    check(out[0] == 255 && out[1] == 128 && out[2] == 0 && out[3] == 255 &&
+          out[60] == 255 && out[61] == 128,
+          "bc5: red and green blocks decode independently");
+  }
   // Level decode: a 6x4 BC1 level (2x1 blocks) drops pixels outside w.
   {
     std::uint8_t lvl[16], out[6 * 4 * 4];
