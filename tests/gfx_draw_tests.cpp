@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "graphics/gfx_draw.hpp"
+#include "graphics/rdna_pixel.hpp"
 #include "graphics/gpu_va.hpp"
 #include "graphics/pm4.hpp"
 
@@ -226,5 +227,83 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
         }
         check(d == 0, "draw: indexed PVS2 draw pixel-identical to indexed PVS1");
       } else check(false, "draw: indexed PVS2 draw ok"); }
+  }
+
+  // ---- slice S8: translated pixel stage (PPS1 constant colour) ----
+  {
+    auto pu = [](float br, float bg, float bb, float ba, float inten, float amb) {
+      const float f[8] = {br, bg, bb, ba, inten, amb, 0.0f, 1.0f};
+      std::vector<std::uint32_t> u(8);
+      for (int k = 0; k < 8; ++k) std::memcpy(&u[k], &f[k], 4);
+      return u;
+    };
+    {
+      const struct { float b[4]; float i, a; } cases[3] = {
+        {{1.0f, 0.5f, 0.25f, 1.0f}, 0.5f, 0.5f},
+        {{1.0f, 0.5f, 0.25f, 0.75f}, 0.3f, 0.1f},
+        {{0.9f, 0.5f, 0.25f, 1.0f}, 1.5f, 0.75f},
+      };
+      bool ok = true;
+      for (const auto& cs : cases) {
+        float got[4];
+        auto st = rdna_pixel_colour(vk, pu(cs.b[0], cs.b[1], cs.b[2], cs.b[3], cs.i, cs.a), got);
+        if (!st) { std::printf("  pps1 run error: %s\n", st.error.message.c_str()); ok = false; break; }
+        for (int c = 0; c < 4; ++c) {
+          const float want = std::min(std::max(cs.b[c] * (cs.i + cs.a), 0.0f), 1.0f);
+          ok = ok && std::memcmp(&got[c], &want, 4) == 0;
+        }
+      }
+      check(ok, "pps1: translated colour bitwise equal to CPU float reference (3 parameter sets)");
+    }
+    {
+      Scene s; s.build();
+      s.ps_blob = make_pnr_ps_blob();
+      s.mem.map_external(0x210000, s.ps_blob.data(), s.ps_blob.size() * 4, "ps1blob");
+      auto u = pu(1.0f, 0.5f, 0.25f, 1.0f, 0.3f, 0.1f);
+      pm4::Builder b;
+      b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+      b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x210000 >> 8, 0});
+      b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+      b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_PS_0, {u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]});
+      b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(32.0f), f2u(32.0f), f2u(-32.0f), f2u(32.0f), f2u(0.5f), f2u(0.5f)});
+      b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+      b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (64 << 16) | 64);
+      b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(3);
+      auto cmd = b.dwords();
+      auto sum = pm4::interpret(cmd.data(), cmd.size());
+      auto r = execute_draw(vk, s.mem, sum.draws[0]);
+      if (!r.ok) std::printf("  pps1 draw error: %s\n", r.error.c_str());
+      check(r.ok && r.notes.find("translated PPS1") != std::string::npos, "pps1: draw ok, result states the pixel shader is translated");
+      if (r.ok) {
+        Scene ref; ref.build();
+        const float cc[3] = {0.4f, 0.2f, 0.1f};
+        for (int v = 0; v < 3; ++v) for (int c = 0; c < 3; ++c) ref.vb[v * 6 + 3 + c] = cc[c];
+        auto sum2 = pm4::interpret(ref.cmd.data(), ref.cmd.size());
+        auto rr = execute_draw(vk, ref.mem, sum2.draws[0]);
+        if (!rr.ok) std::printf("  pps1 ref error: %s\n", rr.error.c_str());
+        if (rr.ok) {
+          uint32_t d = 0;
+          for (size_t p = 0; p < size_t(64) * 64 * 4; ++p) d += r.rgba[p] != rr.rgba[p];
+          std::printf("  pps1: bytes differing vs constant-colour reference = %u of %u\n", d, 64 * 64 * 4);
+          check(d == 0, "pps1: translated-colour draw byte-identical to the reference");
+          auto px = [&](int x, int y) { return &r.rgba[(y * 64 + x) * 4]; };
+          check(px(32, 32)[0] > 90 && px(32, 32)[0] < 115 && px(32, 32)[1] > 40 && px(32, 32)[1] < 62,
+                "pps1: centre pixel is the translated colour (about 102,51,26)");
+          check(px(1, 1)[0] == 0 && px(1, 1)[1] == 0, "pps1: a corner stays at the clear colour");
+        } else check(false, "pps1: reference draw ok");
+      }
+      pm4::Builder b2;
+      b2.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+      b2.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x210000 >> 8, 0});
+      b2.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+      b2.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(32.0f), f2u(32.0f), f2u(-32.0f), f2u(32.0f), f2u(0.5f), f2u(0.5f)});
+      b2.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+      b2.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (64 << 16) | 64);
+      b2.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(3);
+      auto cmd2 = b2.dwords();
+      auto sum3 = pm4::interpret(cmd2.data(), cmd2.size());
+      auto r3 = execute_draw(vk, s.mem, sum3.draws[0]);
+      check(!r3.ok && r3.error.find("pixel user data") != std::string::npos, "pps1: missing pixel user data refused");
+    }
   }
 }
