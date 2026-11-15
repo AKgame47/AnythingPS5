@@ -87,9 +87,9 @@ struct DrawResult {
 // slice S10). PVS1/PVS2 blobs are built for one specific vertex count (at most 64, one
 // dispatch); a PVS3 blob batches any count up to kDrawMaxVertices (slice S9). Other
 // primitives and instancing beyond 1 are refused. (GNM has no 8-bit index type; nothing
-// is emulated for one.) DB_DEPTH_CONTROL switches on depth testing (slice S12): only the
-// LESS compare, no stencil, and the depth surface is per-draw (no cross-draw depth or
-// readback; the host clears to 1.0).
+// is emulated for one.) DB_DEPTH_CONTROL switches on depth testing (slice S12): all
+// eight compare functions (slice S26), no stencil, and the depth surface is per-draw
+// (no cross-draw depth or readback; the host clears to 1.0).
 // Frame-persistent render targets (slice S13): reuse one cache across the
 // draws of a frame so consecutive draws accumulate into the bound colour
 // target and test against earlier depth, the way GNM games bind CB_COLOR0_*
