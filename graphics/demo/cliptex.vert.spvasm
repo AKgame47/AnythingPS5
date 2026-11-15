@@ -1,0 +1,40 @@
+; PNR hand-authored clip-space textured vertex shader (slice S17):
+; gl_Position = position (already clip space, float4 at location 0).
+; Passes colour (tint) and uv through to the fragment stage. GPL-2.0.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %inPos %inCol %inUV %outCol %outUV %glpos
+               OpDecorate %inPos Location 0
+               OpDecorate %inCol Location 1
+               OpDecorate %inUV Location 2
+               OpDecorate %outCol Location 0
+               OpDecorate %outUV Location 1
+               OpDecorate %glpos BuiltIn Position
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+         %v2 = OpTypeVector %float 2
+         %v3 = OpTypeVector %float 3
+         %v4 = OpTypeVector %float 4
+       %pi2 = OpTypePointer Input %v2
+       %pi3 = OpTypePointer Input %v3
+       %pi4 = OpTypePointer Input %v4
+       %po2 = OpTypePointer Output %v2
+       %po3 = OpTypePointer Output %v3
+       %po4 = OpTypePointer Output %v4
+      %inPos = OpVariable %pi4 Input
+      %inCol = OpVariable %pi3 Input
+       %inUV = OpVariable %pi2 Input
+     %outCol = OpVariable %po3 Output
+      %outUV = OpVariable %po2 Output
+      %glpos = OpVariable %po4 Output
+       %main = OpFunction %void None %fn
+          %e = OpLabel
+          %p = OpLoad %v4 %inPos
+               OpStore %glpos %p
+        %col = OpLoad %v3 %inCol
+               OpStore %outCol %col
+         %uv = OpLoad %v2 %inUV
+               OpStore %outUV %uv
+               OpReturn
+               OpFunctionEnd
