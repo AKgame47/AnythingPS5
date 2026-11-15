@@ -33,6 +33,9 @@ struct DrawBindings {
   amd::PrimitiveType primitive = amd::PrimitiveType::None;
   std::uint32_t screen_scissor_tl = 0, screen_scissor_br = 0;
   bool has_scissor = false;
+  bool depth_control_set = false;      // DB_DEPTH_CONTROL was written (slice S12)
+  std::uint32_t depth_control = 0;     // raw value: bit 0 stencil, bit 1 depth enable,
+                                       // bit 2 depth write enable, bits 4..6 compare func
   // What a minimal draw would need but is missing, in plain words.
   std::string missing;
   const ShaderBinding* vertex_stage() const { return vs.present ? &vs : (gs.present ? &gs : nullptr); }
