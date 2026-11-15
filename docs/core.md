@@ -218,7 +218,8 @@ makes the load fail with a message naming it, and nothing runs.
 ## Slice S7 notes (indexed draws)
 - `execute_draw` accepts DRAW_INDEX_INDX: the index buffer is fetched from guest memory through the
   GPU address space (16-bit or 32-bit indices, bounds-checked against the mapping), and the vertex
-  transform runs over the referenced vertices (max index + 1, still the 24-lane kernel limit).
+  transform runs over the referenced vertices (max index + 1; slice S9 lifts the lane limit
+  with PVS3 batching).
   Indices pass through unchanged, so winding and shared vertices behave as on hardware. The result
   notes the guest-memory index fetch. Status: Experimental, Tested.
 - Refusals are honest: unmapped index buffer, an index count that is not a positive multiple of 3,
@@ -230,7 +231,7 @@ makes the load fail with a message naming it, and nothing runs.
   expanded vertices, pixel-identical through the PVS2 (translated divide) path, red coverage within
   about 4% of the square area, and the three refusals above.
 - Not done: 8-bit indices, primitive restart, strips/fans, instancing beyond 1, indirect draws,
-  vertex counts past 24, real GNM fetch shaders.
+  vertex counts past 65536 (draw cap), real GNM fetch shaders.
 
 ## Slice S8 notes (translated pixel stage)
 - `graphics/rdna_pixel.hpp`: a "PPS1" pixel blob (magic 0x31535050, 4 kernels - one store per
@@ -248,3 +249,23 @@ makes the load fail with a message naming it, and nothing runs.
   and missing user data is refused.
 - Not done: varyings/interpolation from translated code, texture sampling, multiple render
   targets, per-pixel execution (real PS waves), discard/depth export, hardware GPU verification.
+
+## Slice S9 notes (batched draws past the lane limit)
+- The per-dispatch lane cap moves from 24 to 64, the translator's hard limit (verified:
+  64-lane vertex kernels translate, validate and run bitwise-correct on lavapipe).
+- `make_pnr_vs3_blob(bool with_post)` builds the "PVS3" vertex blob (magic 0x33535650): the
+  same layout as PVS1/PVS2, but the kernels are built ONCE for the fixed 64-lane workgroup and
+  carry no vertex count. `execute_draw` runs ceil(n/64) dispatches, zero-padding the tail lanes
+  of the last batch (their stores land in scratch and are discarded). Kernel count 4 = clip
+  only; 7 = clip + the translated post-transform (PVS2 divide semantics). PVS1/PVS2 blobs keep
+  their per-count single-dispatch path (now up to 64 vertices). Status: Experimental, Tested.
+- Draw caps (PNR TEST ABI sanity limits, not hardware): 65536 transformed vertices and 4M
+  indices per draw; larger counts are refused with plain reasons.
+- Tests (gfx_draw_tests.cpp, rdna_vertex_tests.cpp): a 96-vertex auto draw in 2 batches (a green
+  triangle in the LAST batch covers the expected area, first/last-batch exclusive pixels,
+  centre pixel, exact target copy); 66-vertex batched indexed draws with and without the
+  translated divide are pixel-identical; a 64-lane helper transform matches the CPU float
+  reference (<1e-5); PVS1 blob with 66 vertices, over-cap and non-multiple-of-3 counts refused.
+- Not done: multiple workgroups in one dispatch (the translator ABI is one workgroup, so
+  batching is host-side), >64-lane waves, 8-bit indices, strips/fans, instancing, indirect
+  draws, real GNM fetch shaders, hardware GPU verification.
