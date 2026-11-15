@@ -332,7 +332,8 @@ struct TexScene {
   static constexpr std::uint32_t W = 64, H = 64;
   void make_tdesc(std::uint32_t w[8], std::uint64_t base, std::uint32_t tw, std::uint32_t th,
                   std::uint32_t pitch, std::uint32_t tiling, std::uint32_t last_level = 0,
-                  std::uint32_t min_lod = 0, std::uint32_t df = 10, std::uint32_t nf = 0) {
+                  std::uint32_t min_lod = 0, std::uint32_t df = 10, std::uint32_t nf = 0,
+                  std::uint32_t type = 9, std::uint32_t last_array = 0) {
     std::uint64_t q0 = (base >> 8) & 0x3FFFFFFFFFull;
     q0 |= std::uint64_t(min_lod & 0xFFF) << 40;
     q0 |= std::uint64_t(df & 0x3F) << 52;  // data format (10 = 8_8_8_8, 35 = BC1, 37 = BC3)
@@ -341,8 +342,9 @@ struct TexScene {
     q1 |= std::uint64_t(1) << 35 | std::uint64_t(2) << 38 | std::uint64_t(3) << 41;
     q1 |= std::uint64_t(last_level & 0xF) << 48;
     q1 |= std::uint64_t(tiling & 0x1F) << 52;
-    q1 |= std::uint64_t(9) << 60;  // Color2D
+    q1 |= std::uint64_t(type & 0xF) << 60;  // 9 = Color2D, 13 = Color2DArray
     std::uint64_t q2 = std::uint64_t(pitch - 1) << 13;
+    q2 |= std::uint64_t(last_array & 0x1FFF) << 45;
     w[0] = std::uint32_t(q0); w[1] = std::uint32_t(q0 >> 32);
     w[2] = std::uint32_t(q1); w[3] = std::uint32_t(q1 >> 32);
     w[4] = std::uint32_t(q2); w[5] = std::uint32_t(q2 >> 32);
@@ -635,6 +637,74 @@ struct TexScene {
     tsharp.assign(tw, tw + 8);
     std::uint64_t sq0 = 0;  // wrap x and y
     std::uint64_t sq1 = 0;  // point mag/min, mip filter none
+    ssharp = {std::uint32_t(sq0), std::uint32_t(sq0 >> 32), std::uint32_t(sq1), std::uint32_t(sq1 >> 32)};
+    target.assign(W * H * 4, 0xCD);
+    mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
+    mem.map_external(0x200000, ps_blob.data(), ps_blob.size() * 4, "ps");
+    mem.map_external(0x300000, mat.data(), 64, "matrix");
+    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x500000, target.data(), target.size(), "target");
+    mem.map_external(0x700000, texels.data(), texels.size(), "texture");
+    mem.map_external(0x710000, tsharp.data(), tsharp.size() * 4, "tsharp");
+    mem.map_external(0x711000, ssharp.data(), ssharp.size() * 4, "ssharp");
+    pm4::Builder b;
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_PS_0, {0x710000, 0, 0x711000, 0});
+    b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
+    b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+    b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
+    b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(6);
+    cmd = b.dwords();
+  }
+  // Slice S27: 2D texture array (PPS2 v1 blob). nslices solid-colour slices
+  // per level in the level-major guest layout; one fullscreen quad whose
+  // 9-float vertex records carry the slice index after the uv pair. Colour
+  // of (level l, slice s) = cols[(s + 2*l) % 4], so slice and level are
+  // independently visible. df 10 = 8_8_8_8 unorm, df 35 = BC1.
+  void build_array(std::uint32_t nslices, float layer, std::uint32_t df = 10,
+                   std::uint32_t last_level = 0, std::uint32_t mip_filter = 0,
+                   std::uint32_t t_min_lod = 0, std::uint32_t tiling = 0,
+                   bool array_blob = true) {
+    vs_blob = make_pnr_vs3_blob(true);
+    ps_blob = array_blob ? make_pnr_ps2_array_blob() : make_pnr_ps2_blob();
+    mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
+    const float px[6][2] = {{-1,-1},{1,-1},{1,1},{-1,-1},{1,1},{-1,1}};
+    const float pu[6][2] = {{0,0},{1,0},{1,1},{0,0},{1,1},{0,1}};
+    for (int v = 0; v < 6; ++v) {
+      vb.push_back(px[v][0]); vb.push_back(px[v][1]); vb.push_back(0.0f);
+      vb.push_back(1.0f); vb.push_back(1.0f); vb.push_back(1.0f);  // white tint
+      vb.push_back(pu[v][0]); vb.push_back(pu[v][1]);
+      vb.push_back(layer);  // slice index
+    }
+    const std::uint32_t side = 8;
+    const std::uint8_t cols[4][3] = {{255,0,0},{0,255,0},{0,0,255},{255,255,255}};
+    for (std::uint32_t l = 0; l <= last_level; ++l) {
+      const std::uint32_t lw = side >> l ? side >> l : 1;
+      for (std::uint32_t s = 0; s < nslices; ++s) {
+        const auto& c = cols[(s + 2 * l) % 4];
+        if (df == 35) {
+          const std::uint32_t nb = (lw + 3) / 4;
+          const size_t at = texels.size();
+          texels.resize(at + std::size_t(nb) * nb * 8);
+          for (std::uint32_t i = 0; i < nb * nb; ++i)
+            bc_solid(&texels[at + i * 8], df, c[0], c[1], c[2], 255);
+        } else {
+          const size_t at = texels.size();
+          texels.resize(at + std::size_t(lw) * lw * 4);
+          for (std::uint32_t i = 0; i < lw * lw; ++i) {
+            auto* p = &texels[at + i * 4];
+            p[0] = c[0]; p[1] = c[1]; p[2] = c[2]; p[3] = 255;
+          }
+        }
+      }
+    }
+    std::uint32_t tw[8];
+    make_tdesc(tw, 0x700000, side, side, side, tiling, last_level, t_min_lod, df, 0, 13, nslices - 1);
+    tsharp.assign(tw, tw + 8);
+    std::uint64_t sq0 = std::uint64_t(2) << 3;  // wrap x, clamp y
+    std::uint64_t sq1 = std::uint64_t(mip_filter & 3) << 26;  // point mag/min
     ssharp = {std::uint32_t(sq0), std::uint32_t(sq0 >> 32), std::uint32_t(sq1), std::uint32_t(sq1 >> 32)};
     target.assign(W * H * 4, 0xCD);
     mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
@@ -1515,6 +1585,49 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       b4.mem.map_external(0x100000, b4.vs_blob.data(), b4.vs_blob.size() * 4, "vs4");
       auto r4 = b4.run(vk);
       check(!r4.ok && r4.error.find("not implemented") != std::string::npos, "pps2: PVS4 combination refused"); }
+  }
+
+  // ---- slice S27: 2D texture arrays (Color2DArray T#, PPS2 v1 blob) ----
+  {
+    auto solid = [&](const DrawResult& r, std::uint8_t cr, std::uint8_t cg, std::uint8_t cb) {
+      for (int i = 0; i < 64 * 64; ++i) {
+        const auto* p = &r.rgba[i * 4];
+        if (p[0] != cr || p[1] != cg || p[2] != cb || p[3] != 255) return false;
+      }
+      return true;
+    };
+    { TexScene s; s.build_array(2, 0.0f);
+      auto r = s.run(vk);
+      if (!r.ok) std::printf("  array draw error: %s\n", r.error.c_str());
+      check(r.ok && r.notes.find("2D texture array") != std::string::npos,
+            "array: PPS2 v1 draw ok, result states the 2D array stage (S27)");
+      check(r.ok && solid(r, 255, 0, 0), "array: slice 0 draws solid red byte-exact (S27)"); }
+    { TexScene s; s.build_array(2, 1.0f);
+      auto r = s.run(vk);
+      check(r.ok && solid(r, 0, 255, 0), "array: slice 1 draws solid green byte-exact (S27)"); }
+    { TexScene s; s.build_array(2, 1.0f, 35);  // BC1 slices
+      auto r = s.run(vk);
+      check(r.ok && solid(r, 0, 255, 0), "array: BC1 slice 1 draws solid green byte-exact (S27)"); }
+    { TexScene s; s.build_array(2, 1.0f, 10, 1, 1, 256);  // point mips, T# min_lod 1.0
+      auto r = s.run(vk);
+      check(r.ok && solid(r, 255, 255, 255), "array: mip level 1 slice 1 draws solid white byte-exact (S27)"); }
+    // Refusals.
+    { TexScene s; s.build_array(2, 0.0f, 10, 0, 0, 0, 0, false);  // v0 blob, array T#
+      auto r = s.run(vk);
+      check(!r.ok && r.error.find("does not match the T# image type") != std::string::npos,
+            "array: v0 blob with an array T# is refused (S27)"); }
+    { TexScene s; s.build_array(2, 0.0f);  // v1 blob, swap in a Color2D T#
+      std::uint32_t tw[8]; s.make_tdesc(tw, 0x700000, 8, 8, 8, 0);
+      s.tsharp.assign(tw, tw + 8);
+      s.mem.unmap(0x710000);
+      s.mem.map_external(0x710000, s.tsharp.data(), s.tsharp.size() * 4, "tsharp2d");
+      auto r = s.run(vk);
+      check(!r.ok && r.error.find("does not match the T# image type") != std::string::npos,
+            "array: v1 blob with a 2D T# is refused (S27)"); }
+    { TexScene s; s.build_array(2, 0.0f, 10, 0, 0, 0, 9);  // tiled array T#
+      auto r = s.run(vk);
+      check(!r.ok && r.error.find("array") != std::string::npos,
+            "array: tiled texture array is refused (S27)"); }
   }
 
   // ---- slice S22: thin-tiled (swizzled) textures, end to end ----
