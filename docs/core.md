@@ -148,3 +148,26 @@ makes the load fail with a message naming it, and nothing runs.
   Measured locally: 12/12 (smoke) and 380/380 presented frames, zero present errors.
 - Not done: swapchain resize, frames in flight, direct-to-swapchain rendering, pad input, real display or hardware
   GPU verification.
+
+## Slice S4 notes (pad input)
+- `input/sdl_pad.hpp/.cpp`: a LIVE pad source for the services/input model. The earlier backends only enumerate
+  devices (evdev) or replay scripted events (virtual); `SdlPadSource` opens the first SDL joystick, polls real
+  pad state each frame and emits the same `InputEvent` control names the evdev/C5 pad model uses
+  (`BTN_SOUTH`..., `ABS_X`...), so live pad events can feed `pnr::prx::pad_apply_host_event` unchanged.
+  Status: Implemented, Tested (virtual pad); a physical USB/Bluetooth pad is Untested (no hardware here).
+- The axis/button-index to name mapping is PNR's own positional convention; SDL's controller database is not
+  consulted, so an unusual physical pad can order buttons differently. Documented in `input/sdl_pad.cpp`.
+- `SdlVirtualPad` drives SDL's virtual joystick (SDL 2.0.14+): hosts without hardware - Xvfb, containers -
+  exercise the REAL SDL joystick path end to end. No mock: the device is attached through SDL, opened by
+  `SdlPadSource` like any joystick, and driven through SDL's own setters.
+- `services/input.hpp/.cpp` gains `normalize_axis` (clamp, symmetric deadzone, linear rescale to the rim),
+  unit-tested in the default build (`tests/pad_tests.cpp`, 25 checks).
+- `pnr-window-demo` reads the pad: left stick X scales the spin, holding the south button pauses it.
+  `--virtual-pad` runs a scripted pattern (stick right/left/neutral, button down/up) and the demo verifies the
+  events arrived (`pad-check: ok ...`), so `pnr_pad_smoke` (Xvfb) tests input and presentation together.
+  Without a pad the demo behaves exactly as in slice S3.
+- Built only with `-DPNR_BUILD_WINDOW=ON` (needs SDL2); headless CI does not build it, same policy as
+  `pnr-window-demo` and `pnr-ui`.
+- Not done: physical-pad verification, controller-database mapping, multiple pads, hotplug during play,
+  hat-to-dpad naming beyond hat 0 (extra hats report as zeroed axes), feeding the C5 guest pad model from the
+  live source inside a `pnr run` game loop.
