@@ -83,4 +83,16 @@ std::shared_ptr<IInputBackend> make_input_backend() {
 #endif
 }
 
+float normalize_axis(std::int32_t raw, std::int32_t raw_max, float deadzone) {
+  if (raw_max <= 0) return 0.0f;
+  if (deadzone < 0.0f) deadzone = 0.0f;
+  if (deadzone >= 1.0f) deadzone = 0.999999f;
+  float v = float(raw) / float(raw_max);
+  if (v > 1.0f) v = 1.0f;
+  if (v < -1.0f) v = -1.0f;
+  const float a = v < 0.0f ? -v : v;
+  if (a <= deadzone) return 0.0f;
+  const float rescaled = (a - deadzone) / (1.0f - deadzone);
+  return v < 0.0f ? -rescaled : rescaled;
+}
 }  // namespace pnr::services
