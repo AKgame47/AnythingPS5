@@ -33,12 +33,12 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   auto check = [&](bool ok, const std::string& l) { if (ok) ++pass; else ++fail; std::printf("%s %s\n", ok ? "PASS" : "FAIL", l.c_str()); };
 
   std::uint32_t w[8];
-  make_tsharp(w, 0x100000, 64, 32, 64, 31);
+  make_tsharp(w, 0x100000, 64, 32, 64, 0);
   TSharp t;
   check(decode_tsharp(w, &t), "tsharp: Color2D descriptor decodes (valid bit set)");
   check(t.base == 0x100000 && t.width == 64 && t.height == 32 && t.pitch == 64,
         "tsharp: base, width, height and pitch come back exactly");
-  check(t.data_format == 10 && t.num_format == 0 && t.type == 9 && t.tiling_index == 31,
+  check(t.data_format == 10 && t.num_format == 0 && t.type == 9 && t.tiling_index == 0,
         "tsharp: format, type and tiling index decode");
   check(t.dst_sel[0] == 0 && t.dst_sel[1] == 1 && t.dst_sel[2] == 2 && t.dst_sel[3] == 3,
         "tsharp: identity component select decodes");
@@ -46,19 +46,19 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   check(!decode_tsharp(w, &t), "tsharp: a descriptor with the valid bit clear is rejected at decode");
 
   std::string why;
-  make_tsharp(w, 0x100000, 64, 32, 64, 8);
+  make_tsharp(w, 0x100000, 64, 32, 64, 0);
   decode_tsharp(w, &t);
   check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: linear 8_8_8_8 unorm 2D image validates");
-  make_tsharp(w, 0x100000, 64, 32, 64, 13);  // Thin1DThin = tiled
+  make_tsharp(w, 0x100000, 64, 32, 64, 13);  // 13 is not a PS5-native SW_MODE
   decode_tsharp(w, &t);
   check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("tiling") != std::string::npos,
-        "tsharp: tiled images are refused with a named reason");
-  make_tsharp(w, 0x100000, 64, 32, 64, 31);
+        "tsharp: unknown SW_MODE tiling is refused with a named reason");
+  make_tsharp(w, 0x100000, 64, 32, 64, 0);
   w[1] = (w[1] & 0xC3FFFFFFu) | (7u << 26);  // num_format = float(7), q0 bits 58-61
   decode_tsharp(w, &t);
   check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("format") != std::string::npos,
         "tsharp: non-unorm 8_8_8_8 textures are refused");
-  make_tsharp(w, 0x100000, 64, 32, 64, 31);
+  make_tsharp(w, 0x100000, 64, 32, 64, 0);
   w[3] = (w[3] & 0xFFF0FFFFu) | (1u << 16);  // last_level = 1, q1 bits 48-51
   decode_tsharp(w, &t);
   check(t.base_level == 0 && t.last_level == 1, "tsharp: mip chain fields decode");
@@ -68,17 +68,17 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   decode_tsharp(w, &t);
   check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("base_level") != std::string::npos,
         "tsharp: chains starting above level 0 are refused");
-  make_tsharp(w, 0x100000, 4, 4, 4, 31);
+  make_tsharp(w, 0x100000, 4, 4, 4, 0);
   w[3] = (w[3] & 0xFFF0FFFFu) | (3u << 16);  // last_level = 3 on a 4x4 (only 3 levels exist)
   decode_tsharp(w, &t);
   check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("last_level") != std::string::npos,
         "tsharp: last_level beyond the extent's levels is refused");
-  make_tsharp(w, 0x100000, 64, 32, 64, 31);
+  make_tsharp(w, 0x100000, 64, 32, 64, 0);
   w[3] = (w[3] & 0xFFF0FFFFu) | (1u << 16);  // chain of 2 levels
   decode_tsharp(w, &t);
   check(!validate_tsharp_sample(t, 0x100000 + 64ull * 32 * 4 + 32ull * 16 * 4 - 1, &why) && why.find("outside") != std::string::npos,
         "tsharp: a mip chain outside the guest address space is refused");
-  make_tsharp(w, 0x100000, 64, 32, 64, 31);
+  make_tsharp(w, 0x100000, 64, 32, 64, 0);
   decode_tsharp(w, &t);
   check(!validate_tsharp_sample(t, 0x100000 + 64ull * 32 * 4 - 1, &why) && why.find("outside") != std::string::npos,
         "tsharp: pixels outside the guest address space are refused");
