@@ -541,9 +541,20 @@ Status VulkanBackend::render_core(
   VkDescriptorSet tset = 0;
   VkImage timg = 0;
   VkBuffer tstage = 0;
+  // Slice S19: mip chain extents/byte count (level l tightly pitched at
+  // max(1,w>>l) x max(1,h>>l)); valid only while tex != nullptr.
+  uint32_t levels = 1, lw[9], lh[9];
+  size_t tex_bytes = 0;
   if (tex) {
     if (!tex->rgba || tex->w == 0 || tex->h == 0 || tex->w > 256 || tex->h > 256)
       return Status::Fail(100, "vulkan", "texture must be 1..256 per side with pixel data");
+    levels = tex->levels ? tex->levels : 1;
+    if (levels > 9) return Status::Fail(100, "vulkan", "texture mip levels exceed 9");
+    for (uint32_t l = 0; l < levels; ++l) {
+      lw[l] = (tex->w >> l) ? (tex->w >> l) : 1;
+      lh[l] = (tex->h >> l) ? (tex->h >> l) : 1;
+      tex_bytes += (size_t)lw[l] * lh[l] * 4;
+    }
     VkFormatProperties fprops{};
     fn<void (*)(VkPhysicalDevice, int32_t, VkFormatProperties*)>(vkGetPhysicalDeviceFormatProperties)(
         phys_, (int32_t)VK_FORMAT_R8G8B8A8_UNORM, &fprops);
@@ -551,11 +562,11 @@ Status VulkanBackend::render_core(
       return Status::Fail(100, "vulkan", "RGBA8 sampled images unsupported on this device; texture Blocked");
     if (tex->linear && !(fprops.optimalTilingFeatures & 0x1000))
       return Status::Fail(100, "vulkan", "linear filtering of RGBA8 unsupported on this device; use nearest");
-    if (Status s = host_buffer(tex->rgba, (size_t)tex->w * tex->h * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, "texture staging", &tstage); !s.ok) return s;
+    if (Status s = host_buffer(tex->rgba, tex_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, "texture staging", &tstage); !s.ok) return s;
     VkImageCreateInfo tci{};
     tci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     tci.imageType = VK_IMAGE_TYPE_2D; tci.format = VK_FORMAT_R8G8B8A8_UNORM;
-    tci.extent = {tex->w, tex->h, 1}; tci.mipLevels = 1; tci.arrayLayers = 1;
+    tci.extent = {tex->w, tex->h, 1}; tci.mipLevels = levels; tci.arrayLayers = 1;
     tci.samples = VK_SAMPLE_COUNT_1_BIT; tci.tiling = VK_IMAGE_TILING_OPTIMAL;
     tci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     tci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; tci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -579,7 +590,7 @@ Status VulkanBackend::render_core(
     VkImageViewCreateInfo tvci{};
     tvci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     tvci.image = timg; tvci.viewType = VK_IMAGE_VIEW_TYPE_2D; tvci.format = VK_FORMAT_R8G8B8A8_UNORM;
-    tvci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    tvci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
     VkImageView tview = 0;
     r = fn<VkResult (*)(VkDevice, const VkImageViewCreateInfo*, void*, VkImageView*)>(vkCreateImageView)(device_, &tvci, nullptr, &tview);
     if (r != VK_SUCCESS) return vkfail("vkCreateImageView (texture)", r);
@@ -588,12 +599,13 @@ Status VulkanBackend::render_core(
     sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     sci.magFilter = tex->mag_filter >= 0 ? tex->mag_filter : (tex->linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     sci.minFilter = tex->min_filter >= 0 ? tex->min_filter : (tex->linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
-    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sci.mipmapMode = tex->mip_mode >= 0 ? tex->mip_mode : VK_SAMPLER_MIPMAP_MODE_NEAREST;
     const int32_t def_addr = tex->repeat ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.addressModeU = tex->addr_u >= 0 ? tex->addr_u : def_addr;
     sci.addressModeV = tex->addr_v >= 0 ? tex->addr_v : def_addr;
     sci.addressModeW = def_addr;
-    sci.minLod = 0.0f; sci.maxLod = 0.0f;
+    sci.minLod = tex->min_lod;
+    sci.maxLod = tex->max_lod >= 0.0f ? tex->max_lod : (float)(levels - 1);
     VkSampler samp = 0;
     r = fn<VkResult (*)(VkDevice, const VkSamplerCreateInfo*, void*, VkSampler*)>(vkCreateSampler)(device_, &sci, nullptr, &samp);
     if (r != VK_SUCCESS) return vkfail("vkCreateSampler", r);
@@ -869,14 +881,22 @@ Status VulkanBackend::render_core(
     b1.srcAccessMask = 0; b1.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     b1.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     b1.srcQueueFamilyIndex = b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b1.image = timg; b1.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b1.image = timg; b1.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
     using BarrierFn = void (*)(VkCommandBuffer, VkFlags, VkFlags, VkFlags, uint32_t, const void*, uint32_t, const void*, uint32_t, const VkImageMemoryBarrier*);
     fn<BarrierFn>(vkCmdPipelineBarrier)(ucmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b1);
-    VkBufferImageCopy tr{};
-    tr.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    tr.imageExtent = {tex->w, tex->h, 1};
+    VkBufferImageCopy tr[9];
+    uint32_t nreg = 0;
+    size_t level_off = 0;
+    for (uint32_t l = 0; l < levels; ++l) {
+      VkBufferImageCopy& c = tr[nreg++];
+      c = VkBufferImageCopy{};
+      c.bufferOffset = (uint64_t)level_off;
+      c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
+      c.imageExtent = {lw[l], lh[l], 1};
+      level_off += (size_t)lw[l] * lh[l] * 4;
+    }
     fn<void (*)(VkCommandBuffer, VkBuffer, VkImage, int32_t, uint32_t, const VkBufferImageCopy*)>(
-        vkCmdCopyBufferToImage)(ucmd, tstage, timg, (int32_t)VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &tr);
+        vkCmdCopyBufferToImage)(ucmd, tstage, timg, (int32_t)VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, nreg, tr);
     VkImageMemoryBarrier b2 = b1;
     b2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
