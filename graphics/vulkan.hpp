@@ -34,6 +34,9 @@ struct TexInput {
   uint32_t w = 0, h = 0;
   bool linear = false;
   bool repeat = false;
+  // Slice S23: stage as VK_FORMAT_R8G8B8A8_SRGB so the host sampler does the
+  // sRGB -> linear conversion (the guest bytes are sRGB-encoded).
+  bool srgb = false;
   // Slice S17 overrides (VK_FILTER_* / VK_SAMPLER_ADDRESS_MODE_* values);
   // -1 keeps the linear/repeat-derived default so older callers are unchanged.
   int32_t mag_filter = -1, min_filter = -1;
