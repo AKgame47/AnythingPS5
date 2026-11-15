@@ -93,6 +93,14 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   set_fmt(41, 7);
   check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("format") != std::string::npos,
         "tsharp: BC7 float is refused with a named reason");
+  set_fmt(40, 4); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: BC6H uint validates (S25)");
+  set_fmt(40, 5); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: BC6H sint validates (S25)");
+  set_fmt(40, 0);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("format") != std::string::npos,
+        "tsharp: BC6H unorm is refused with a named reason");
+  set_fmt(40, 9);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("format") != std::string::npos,
+        "tsharp: BC6H sRGB is refused with a named reason");
   set_fmt(36, 9); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: BC2 sRGB validates (S23)");
   set_fmt(37, 9); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: BC3 sRGB validates (S23)");
   set_fmt(38, 9);
