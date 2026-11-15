@@ -289,3 +289,23 @@ makes the load fail with a message naming it, and nothing runs.
   strip and point/line primitives refused.
 - Not done: primitive restart, culling/winding enforcement, line/point primitives, instancing,
   indirect draws, hardware GPU verification.
+
+## Slice S11 notes (translated per-vertex varying: Gouraud shade)
+- `rdna_shade_kernel` (graphics/rdna_vertex.hpp): a restricted RDNA kernel per colour channel
+  over the full-vertex layout (x y z nx ny nz col_c, out): dot = fma(nz, l.z, fma(ny, l.y,
+  nx * l.x)), out_c = col_c * clamp(dot + ambient, lo, hi). Uniform ABI: light xyz, ambient,
+  clamp lo/hi (6 words). One store per kernel. Status: Experimental, Tested.
+- `make_pnr_vs4_blob()` builds the "PVS4" vertex blob (magic 0x34535650): 4 clip kernels + 3
+  shade kernels, all built once for the fixed 64-lane workgroup and batched like PVS3. A PVS4
+  draw's vertex buffer holds 9 floats per vertex (x y z r g b nx ny nz); VS user data 4..9
+  carry the light/ambient/clamp parameters (missing data is refused). The shaded rgb replaces
+  the raw vertex colours and the rasterizer interpolates it - the first varying produced by
+  translated code on the draw path. A PPS1 pixel blob still overrides the whole draw colour.
+- Tests (gfx_draw_tests.cpp): a triangle with per-vertex normals nz = 0, 0.5, 1 shades to greys
+  0, 0.5, 1 and interpolates (centre luminance 162 vs the 159 ideal, gradient endpoints near
+  0.28 and 0.98); a constant-normal draw is byte-identical (0 of 16384 bytes) to a PVS1 draw
+  with CPU pre-scaled colours; a 66-vertex draw batches into 2 dispatches; missing shade
+  parameters refused.
+- Not done: interpolated INPUTS to translated pixel code (real PS varyings per pixel), more
+  than one varying channel, specular/multiple lights, normal transforms, textures, hardware
+  GPU verification.
