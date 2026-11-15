@@ -76,6 +76,20 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (!vs) return fail(r, "no vertex-stage shader address set");
   if (!b.ps.present) return fail(r, "no pixel-stage shader address set");
   if (!b.color0.present || !b.has_scissor) return fail(r, "colour target 0 or screen scissor not set");
+  // Slice S12: depth testing. DB_DEPTH_CONTROL bit 1 switches on the host
+  // depth attachment; only the LESS compare (bits 4..6 = 1) is supported,
+  // stencil (bit 0) is refused. The depth surface is per-draw: it is created
+  // and destroyed with this draw, so there is no cross-draw depth and no
+  // depth readback, and DB_DEPTH_CLEAR/compare selection beyond LESS are not
+  // tracked yet (the host clears to 1.0).
+  bool use_depth = false;
+  if (b.depth_control_set) {
+    if (b.depth_control & 1) return fail(r, "stencil testing is not supported");
+    if (b.depth_control & 2) {
+      if (((b.depth_control >> 4) & 7) != 1) return fail(r, "only the LESS depth compare function is supported");
+      use_depth = true;
+    }
+  }
   // Slice S7: indexed draws fetch the index buffer from guest memory. The
   // vertex transform runs over the referenced vertices (max index + 1);
   // indices pass through unchanged. Slice S9: PVS1/PVS2 blobs run one
@@ -283,7 +297,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (!indices.empty()) idx = indices;
   const float clear[4] = {0, 0, 0, 1};
   std::vector<std::uint32_t> vsp(std::begin(clip_vert), std::end(clip_vert)), fsp(std::begin(spin_frag), std::end(spin_frag));
-  auto st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, false, clear, &r.rgba);
+  auto st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, use_depth, clear, &r.rgba);
   if (!st) return fail(r, "Vulkan draw failed: " + st.error.message);
   r.notes = pvs4 ? "PVS4 blob: clip and Gouraud shade varyings are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices); the rasterizer interpolates the shade"
                  : pvs3 ? (with_post ? "PVS3 blob: clip and perspective divide are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices), w = 1 fed to the rasterizer"
@@ -295,6 +309,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (draw.kind == pm4::DrawKind::Indexed) r.notes += "; indexed draw: index buffer fetched from guest memory";
   if (tristrip) r.notes += "; triangle strip expanded to a list on the host (winding corrected)";
   if (trifan) r.notes += "; triangle fan expanded to a list on the host";
+  if (use_depth) r.notes += "; depth testing on (LESS, per-draw depth surface, no cross-draw depth or readback)";
   const std::size_t bytes = std::size_t(w) * h * 4;
   if (std::uint8_t* dst = mem.resolve_mut(b.color0.address, bytes)) {
     std::memcpy(dst, r.rgba.data(), bytes);
