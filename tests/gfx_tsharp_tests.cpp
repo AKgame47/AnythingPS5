@@ -68,6 +68,46 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   decode_tsharp(w, &t);
   check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("base_level") != std::string::npos,
         "tsharp: chains starting above level 0 are refused");
+
+  // ---- slice S23: the extended plain-format matrix ----
+  auto set_fmt = [&](std::uint32_t df, std::uint32_t nf) {
+    make_tsharp(w, 0x100000, 64, 32, 64, 0);
+    w[1] = (w[1] & ~(0x3Fu << 20) & ~(0xFu << 26)) | (df << 20) | (nf << 26);
+    decode_tsharp(w, &t);
+  };
+  set_fmt(1, 0);  check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 8 unorm validates (S23)");
+  set_fmt(2, 0);  check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 16 unorm validates (S23)");
+  set_fmt(2, 7);  check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 16 half float validates (S23)");
+  set_fmt(3, 0);  check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 8_8 unorm validates (S23)");
+  set_fmt(4, 7);  check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 32 float validates (S23)");
+  set_fmt(5, 0);  check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 16_16 unorm validates (S23)");
+  set_fmt(11, 7); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 32_32 float validates (S23)");
+  set_fmt(12, 0); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 16_16_16_16 unorm validates (S23)");
+  set_fmt(12, 7); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 16_16_16_16 float validates (S23)");
+  set_fmt(14, 7); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 32_32_32_32 float validates (S23)");
+  set_fmt(16, 0); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 5_6_5 unorm validates (S23)");
+  set_fmt(10, 9); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: 8_8_8_8 sRGB validates (S23)");
+  set_fmt(35, 9); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: BC1 sRGB validates (S23)");
+  set_fmt(36, 9); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: BC2 sRGB validates (S23)");
+  set_fmt(37, 9); check(validate_tsharp_sample(t, 0x2000000, &why), "tsharp: BC3 sRGB validates (S23)");
+  set_fmt(38, 9);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("format") != std::string::npos,
+        "tsharp: BC4 sRGB is refused with a named reason");
+  set_fmt(1, 9);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("format") != std::string::npos,
+        "tsharp: 8 sRGB is refused (only 8_8_8_8/BC1-BC3 go through the sRGB image)");
+  set_fmt(3, 7);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("format") != std::string::npos,
+        "tsharp: 8_8 float is refused");
+  set_fmt(4, 0);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("format") != std::string::npos,
+        "tsharp: 32 unorm is refused");
+  set_fmt(10, 1);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("format") != std::string::npos,
+        "tsharp: 8_8_8_8 snorm is refused");
+  set_fmt(9, 0);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("format") != std::string::npos,
+        "tsharp: 2_10_10_10 is refused (packed formats are not implemented)");
   make_tsharp(w, 0x100000, 4, 4, 4, 0);
   w[3] = (w[3] & 0xFFF0FFFFu) | (3u << 16);  // last_level = 3 on a 4x4 (only 3 levels exist)
   decode_tsharp(w, &t);
