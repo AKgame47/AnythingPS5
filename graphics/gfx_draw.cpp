@@ -6,7 +6,10 @@
 #include <cstring>
 
 #include "graphics/demo/clip_shaders.hpp"
+#include "graphics/demo/cliptex_shaders.hpp"
 #include "graphics/demo/spin_shaders.hpp"
+#include "graphics/demo/tex_shaders.hpp"
+#include "graphics/gfx_tsharp.hpp"
 #include "graphics/gfx_vsharp.hpp"
 #include "graphics/rdna_fetch.hpp"
 #include "graphics/rdna_pixel.hpp"
@@ -285,6 +288,55 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     }
   }
 
+  // Slice S17: a PPS2 blob {magic, 0} marks the textured pixel stage. Pixel
+  // user data 0..1 addresses the T# (8 dwords), 2..3 the S# (4 dwords). The
+  // texture image and sampler state are built from the guest descriptors;
+  // the host rasterizer's fragment stage samples them (tex_frag), tinted by
+  // the vertex colour varying. Sampling is not translated RDNA in this
+  // slice, stated in the notes.
+  bool pps2 = false;
+  TexInput tex;
+  std::vector<std::uint8_t> texels;
+  {
+    std::uint32_t p2[2];
+    if (!pps1 && mem.read(b.ps.address, p2, sizeof p2) && p2[0] == kPnrPs2Magic && p2[1] == 0) {
+      std::uint64_t t_va = 0, s_va = 0;
+      if (!read_u64(b.ps, 0, &t_va) || !read_u64(b.ps, 2, &s_va))
+        return fail(r, "PPS2 blob needs pixel user data 0..3 (T# and S# descriptor addresses)");
+      std::uint32_t tw[8], sw[4];
+      if (!mem.read(t_va, tw, sizeof tw)) return fail(r, "T# descriptor is not mapped: " + mem.last_error());
+      TSharp ts;
+      if (!decode_tsharp(tw, &ts)) return fail(r, "T# descriptor is not a valid image (the type valid bit is clear)");
+      std::string why;
+      if (!validate_tsharp_sample(ts, 1ull << 48, &why)) return fail(r, "T#: " + why);
+      if (ts.width > 256 || ts.height > 256)
+        return fail(r, "T# extent is over 256x256 (this slice's rasterizer staging cap)");
+      if (!mem.read(s_va, sw, sizeof sw)) return fail(r, "S# descriptor is not mapped: " + mem.last_error());
+      SSharp ss;
+      decode_ssharp(sw, &ss);
+      if (!validate_ssharp_sample(ss, &why)) return fail(r, "S#: " + why);
+      // Repack pitched rows into a tightly packed RGBA8 image for staging.
+      texels.resize(std::size_t(ts.width) * ts.height * 4);
+      for (std::uint32_t row = 0; row < ts.height; ++row)
+        if (!mem.read(ts.base + std::uint64_t(row) * ts.pitch * 4,
+                      texels.data() + std::size_t(row) * ts.width * 4, ts.width * 4))
+          return fail(r, "T# pixels are not mapped: " + mem.last_error());
+      tex.rgba = texels.data(); tex.w = ts.width; tex.h = ts.height;
+      tex.mag_filter = ss.mag_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+      tex.min_filter = ss.min_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+      auto addr = [](std::uint32_t cm) -> int32_t {
+        switch (cm) {  // GNM ClampMode: 0 wrap, 1 mirror, 2 clamp, 3 mirror-once
+          case 0: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+          case 1: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+          case 2: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+          default: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
+        }
+      };
+      tex.addr_u = addr(ss.clamp_x); tex.addr_v = addr(ss.clamp_y);
+      pps2 = true;
+    }
+  }
+
   // Vertex-stage blob.
   std::uint32_t hdr[19];
   if (!mem.read(vs->address, hdr, sizeof hdr)) return fail(r, "vertex shader address is not mapped: " + mem.last_error());
@@ -296,6 +348,8 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     return fail(r, "vertex shader memory is not a PNR PVS1/PVS2/PVS3/PVS4/PVS5 blob (a real GCN/RDNA program is not accepted here)");
   if (!pvs3 && !pvs4 && !pvs5 && n > kRdnaVertexMax)
     return fail(r, "PVS1/PVS2 blobs are built per vertex count and run one dispatch (at most 64 vertices); a PVS3/PVS4/PVS5 blob batches larger draws");
+  if (pps2 && (pvs4 || pvs5))
+    return fail(r, "PPS2 textured draws with PVS4/PVS5 vertex blobs are not implemented (use a PVS1..PVS3 blob with pos+colour+uv records)");
   const uint32_t nk = (pvs2 || pvs3 || pvs4 || pvs5) ? hdr[1] : 4;
   const uint32_t len_off = pvs5 ? 6 : 2;
   const bool batched = pvs3 || pvs4 || pvs5;
@@ -315,7 +369,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   std::uint64_t mat_va = 0;
   if (!read_u64(*vs, 0, &mat_va)) return fail(r, "vertex user data 0..1 (matrix address) not set");
   std::vector<std::uint32_t> mat(16);
-  const std::uint32_t stride = pvs4 ? 9 : 6;   // PVS4 adds per-vertex normals (slice S11)
+  const std::uint32_t stride = pvs4 ? 9 : (pps2 ? 8 : 6);  // PVS4: normals (S11); PPS2: uv (S17)
   std::vector<float> vb;
   if (!mem.read(mat_va, mat.data(), 64)) return fail(r, "matrix address is not mapped: " + mem.last_error());
   if (pvs5) {
@@ -447,6 +501,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   for (std::uint32_t i = 0; i < n; ++i) {
     for (int c = 0; c < 4; ++c) verts.push_back(clip[i * 4 + c]);
     for (int c = 0; c < 3; ++c) verts.push_back(pps1 ? ps_colour[c] : pvs4 ? shade[i * 3 + c] : vb[i * stride + 3 + c]);
+    if (pps2) { verts.push_back(vb[i * stride + 6]); verts.push_back(vb[i * stride + 7]); }
     idx.push_back(i);
   }
   if (!indices.empty()) idx = indices;
@@ -463,8 +518,15 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   frame.color_base = color_base; frame.z_base = z_base; frame.width = w; frame.height = h;
   (void)frame_changed;  // the renderer restarts the frame on size change; binding change is below
   if (frame.surface.color_image != 0 && frame_changed) vk.destroy_frame(frame.surface);
-  auto st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, use_depth, clear, &r.rgba,
-                                     &frame.surface, depth_write, blend.enable ? &blend : nullptr);
+  Status st;
+  if (pps2) {
+    std::vector<std::uint32_t> tvsp(std::begin(cliptex_vert), std::end(cliptex_vert)), tfsp(std::begin(tex_frag), std::end(tex_frag));
+    st = vk.render_textured_clip_mesh_rgba(w, h, tvsp, tfsp, verts, idx, use_depth, tex, clear, &r.rgba,
+                                           &frame.surface, depth_write, blend.enable ? &blend : nullptr);
+  } else {
+    st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, use_depth, clear, &r.rgba,
+                                  &frame.surface, depth_write, blend.enable ? &blend : nullptr);
+  }
   if (!st) return fail(r, "Vulkan draw failed: " + st.error.message);
   r.notes = pvs4 ? "PVS4 blob: clip and Gouraud shade varyings are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices); the rasterizer interpolates the shade"
                  : pvs3 ? (with_post ? "PVS3 blob: clip and perspective divide are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices), w = 1 fed to the rasterizer"
@@ -472,7 +534,8 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
                  : pvs2 ? "PVS2 blob: clip and perspective divide are translated RDNA, w = 1 fed to the rasterizer"
                         : "vertex shader is a PNR PVS1 test blob";
   r.notes += pps1 ? "; pixel shader is a translated PPS1 blob (constant colour, no varyings)"
-                  : "; pixel shader not translated: fixed pass-through colour used";
+                  : pps2 ? "; pixel stage is a PPS2 blob: texture built from the guest T# (linear 8_8_8_8 unorm), sampler state from the guest S#, sampled by the host rasterizer's fragment stage (sampling is not translated RDNA yet)"
+                         : "; pixel shader not translated: fixed pass-through colour used";
   if (draw.kind == pm4::DrawKind::Indexed) r.notes += "; indexed draw: index buffer fetched from guest memory";
   if (tristrip) r.notes += "; triangle strip expanded to a list on the host (winding corrected)";
   if (trifan) r.notes += "; triangle fan expanded to a list on the host";
