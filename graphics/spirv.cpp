@@ -160,7 +160,16 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   // belongs before OpMemoryModel in the logical layout; only emitted when an
   // FFma node exists so other modules stay byte-identical.
   uint32_t ext_id = 0;
-  for (const auto& n : nodes) if (n.op == U32Op::FFma) { ext_id = next++; break; }
+  for (const auto& n : nodes)
+    if (n.op == U32Op::FFma || n.op == U32Op::FMin || n.op == U32Op::FMax ||
+        n.op == U32Op::FSqrt) { ext_id = next++; break; }
+  // Extra declarations allocated only when the new float/convert nodes are
+  // used, so modules without them stay byte-identical.
+  uint32_t sint_type = 0, one_f32 = 0;
+  for (const auto& n : nodes) {
+    if ((n.op == U32Op::CvtFToI || n.op == U32Op::CvtIToF) && !sint_type) sint_type = next++;
+    if (n.op == U32Op::FRcp && !one_f32) one_f32 = next++;
+  }
   if (ext_id) {
     std::vector<uint32_t> imp;
     imp.push_back(ext_id);
@@ -204,6 +213,7 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
       inst(m, spv::OpConstant, {6, indices[i], index});
     }
   }
+  if(one_f32) inst(m, spv::OpConstant, {26, one_f32, 0x3f800000u}); // 1.0f for FRcp
   inst(m, spv::OpFunction, {4, 1, 0, 5});
   inst(m, spv::OpLabel, {11});
   uint32_t current_label = 11;
@@ -417,6 +427,43 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
       ids[i]=next++;inst(m,124,{6,ids[i],result});
       continue;
     }
+    if(n.op==U32Op::FMin || n.op==U32Op::FMax) {
+      if (!ext_id) return {};
+      const uint32_t a=next++, b=next++, result=next++;
+      inst(m,124,{26,a,ids[n.a]}); // raw bits -> f32
+      inst(m,124,{26,b,ids[n.b]});
+      inst(m,12,{26,result,ext_id,n.op==U32Op::FMin?37u:40u,a,b}); // GLSL.std.450 FMin/FMax
+      ids[i]=next++;inst(m,124,{6,ids[i],result});
+      continue;
+    }
+    if(n.op==U32Op::FSqrt || n.op==U32Op::FRcp) {
+      const uint32_t a=next++, result=next++;
+      inst(m,124,{26,a,ids[n.a]}); // raw bits -> f32
+      if(n.op==U32Op::FSqrt) {
+        if (!ext_id) return {};
+        inst(m,12,{26,result,ext_id,31u,a}); // GLSL.std.450 Sqrt
+      } else {
+        if (!one_f32) return {};
+        inst(m,136,{26,result,one_f32,a}); // OpFDiv: exact 1.0f/x, not RDNA's approximate rcp
+      }
+      ids[i]=next++;inst(m,124,{6,ids[i],result});
+      continue;
+    }
+    if(n.op==U32Op::CvtFToI || n.op==U32Op::CvtIToF) {
+      if (!sint_type) return {};
+      if(n.op==U32Op::CvtFToI) {
+        const uint32_t f=next++, conv=next++;
+        inst(m,124,{26,f,ids[n.a]});        // raw bits -> f32
+        inst(m,110,{sint_type,conv,f});     // OpConvertFToS: truncate toward zero
+        ids[i]=next++;inst(m,124,{6,ids[i],conv});
+      } else {
+        const uint32_t iv=next++, f=next++;
+        inst(m,124,{sint_type,iv,ids[n.a]}); // raw bits -> i32
+        inst(m,111,{26,f,iv});              // OpConvertSToF
+        ids[i]=next++;inst(m,124,{6,ids[i],f});
+      }
+      continue;
+    }
     uint16_t op = 0;
     switch (n.op) {
       case U32Op::Add: op = 128; break;
@@ -438,6 +485,15 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
   for(auto id:no_contraction) inst(decorations,spv::OpDecorate,{id,42}); // NoContraction
   size_t insert=5;
   while(insert<m.size() && (m[insert]&65535u)!=spv::OpTypeVoid)insert+=m[insert]>>16u;
+  if(sint_type) {
+    // A signed 32-bit type for the conversion nodes, inserted right after
+    // OpTypeVoid so it stays inside the types section.
+    if(insert>=m.size()) return {};
+    std::vector<uint32_t> t;
+    inst(t,21,{sint_type,32,1}); // OpTypeInt 32 1 (signed)
+    const size_t after_void = insert + (m[insert]>>16u);
+    m.insert(m.begin()+after_void, t.begin(), t.end());
+  }
   m.insert(m.begin()+insert,decorations.begin(),decorations.end());
   return m;
 }
