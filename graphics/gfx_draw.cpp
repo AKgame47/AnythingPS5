@@ -346,15 +346,46 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
       SSharp ss;
       decode_ssharp(sw, &ss);
       if (!validate_ssharp_sample(ss, &why)) return fail(r, "S#: " + why);
-      // Repack pitched rows into a tightly packed RGBA8 image for staging.
-      texels.resize(std::size_t(ts.width) * ts.height * 4);
-      for (std::uint32_t row = 0; row < ts.height; ++row)
-        if (!mem.read(ts.base + std::uint64_t(row) * ts.pitch * 4,
-                      texels.data() + std::size_t(row) * ts.width * 4, ts.width * 4))
-          return fail(r, "T# pixels are not mapped: " + mem.last_error());
+      if (ss.mip_filter != 0 && ts.last_level == 0)
+        return fail(r, "S# mip filtering requested on a single-level texture");
+      // Repack pitched rows into tightly packed RGBA8 levels for staging.
+      // Guest layout: level 0 at the T# pitch, smaller levels tightly
+      // pitched one after another (the layout validate_tsharp_sample bounds).
+      const std::uint32_t levels = ts.last_level + 1;
+      std::uint64_t chain_bytes = 0;
+      for (std::uint32_t l = 0; l < levels; ++l) {
+        const std::uint32_t lw = ts.width >> l ? ts.width >> l : 1;
+        const std::uint32_t lh = ts.height >> l ? ts.height >> l : 1;
+        chain_bytes += std::uint64_t(lw) * lh * 4;
+      }
+      texels.resize(chain_bytes);
+      std::uint64_t off = 0, src = ts.base;
+      for (std::uint32_t l = 0; l < levels; ++l) {
+        const std::uint32_t lw = ts.width >> l ? ts.width >> l : 1;
+        const std::uint32_t lh = ts.height >> l ? ts.height >> l : 1;
+        // Level 0 rows sit at the T# pitch; deeper levels are tight already.
+        const std::uint64_t src_row = std::uint64_t(l == 0 ? ts.pitch : lw) * 4;
+        for (std::uint32_t row = 0; row < lh; ++row)
+          if (!mem.read(src + std::uint64_t(row) * src_row, texels.data() + off + std::size_t(row) * lw * 4, lw * 4))
+            return fail(r, "T# pixels are not mapped: " + mem.last_error());
+        src += src_row * lh;
+        off += std::uint64_t(lw) * lh * 4;
+      }
       tex.rgba = texels.data(); tex.w = ts.width; tex.h = ts.height;
       tex.mag_filter = ss.mag_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
       tex.min_filter = ss.min_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+      // Slice S19: mip chain state. mip_filter none samples only level 0;
+      // point picks one level, linear blends two. T# and S# min_lod combine
+      // by max (the tighter clamp wins); S# max_lod 0 means no clamp.
+      tex.levels = levels;
+      tex.mip_mode = ss.mip_filter == 2 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+      tex.min_lod = float(ts.min_lod > ss.min_lod ? ts.min_lod : ss.min_lod) / 256.0f;
+      if (ss.mip_filter == 0)
+        tex.max_lod = 0.0f;
+      else if (ss.max_lod != 0)
+        tex.max_lod = float(ss.max_lod) / 256.0f < float(ts.last_level) ? float(ss.max_lod) / 256.0f : float(ts.last_level);
+      else
+        tex.max_lod = float(ts.last_level);
       auto addr = [](std::uint32_t cm) -> int32_t {
         switch (cm) {  // GNM ClampMode: 0 wrap, 1 mirror, 2 clamp, 3 mirror-once
           case 0: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
