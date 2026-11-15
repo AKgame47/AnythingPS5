@@ -130,3 +130,21 @@ makes the load fail with a message naming it, and nothing runs.
 - Tests: decode naming, modifier rejection (ABS/CLMP/NEG/OMOD), translation flags, spirv-val acceptance of the fused
   module, on-GPU execution against both CPU references, and the pixel comparison above.
 - Not done: other VOP3 opcodes, source modifiers, SDWA/DPP, 64-bit `v_fma_f64`, output modifiers.
+
+## Slice S3 notes (window presentation)
+- `graphics/window.hpp/.cpp`: a `WindowPresenter` that opens an SDL2 window, enables SDL's Vulkan instance
+  extensions, creates a real `VkSurfaceKHR`, picks a graphics+compute+present queue family, enables
+  `VK_KHR_swapchain` and presents frames through a real swapchain (acquire, layout transitions, copy, present,
+  semaphores). Status: Implemented, Tested under Xvfb.
+- Frames come from the existing offscreen renderers via a host readback + staging upload each frame. Rendering
+  directly into the swapchain image is Planned; nothing about the roundtrip is hidden.
+- BGRA-only surfaces get a real byte swizzle during upload (llvmpipe here presents B8G8R8A8, so that path is the
+  tested one). Fixed-size window: a swapchain resize fails honestly instead of stretching.
+- The backend resolves the KHR surface/swapchain entry points optionally: a headless host without them stays a
+  working compute/offscreen backend and any present attempt names the missing function.
+- `pnr-window-demo` (optional `-DPNR_BUILD_WINDOW=ON` build, needs SDL2 dev files; headless CI does not build it,
+  same policy as `pnr-ui`) spins the cube with clip positions from the slice S2 translated-RDNA fused multiply-add
+  path and presents every frame. `pnr_window_smoke` runs it under Xvfb: 12 presented frames plus a saved PPM.
+  Measured locally: 12/12 (smoke) and 380/380 presented frames, zero present errors.
+- Not done: swapchain resize, frames in flight, direct-to-swapchain rendering, pad input, real display or hardware
+  GPU verification.
