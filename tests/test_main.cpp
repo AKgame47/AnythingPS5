@@ -45,6 +45,7 @@ void pnr_psn_tests(int& pass,int& fail);
 void pnr_pad_tests(int& pass,int& fail);
 void pnr_rdna_alu_tests(int& pass,int& fail);
 void pnr_rdna_post_xform_tests(int& pass,int& fail);
+void pnr_vulkan_enum_check_tests(int& pass,int& fail);
 
 static int g_pass = 0, g_fail = 0;
 
@@ -2073,6 +2074,7 @@ int main() {
   pnr_pad_tests(g_pass,g_fail);
   pnr_rdna_alu_tests(g_pass,g_fail);
   pnr_rdna_post_xform_tests(g_pass,g_fail);
+  pnr_vulkan_enum_check_tests(g_pass,g_fail);
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
