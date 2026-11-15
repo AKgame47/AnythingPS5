@@ -5,7 +5,10 @@
 #include <string>
 #include <vector>
 
+#include "graphics/demo/cliptex_shaders.hpp"
+#include "graphics/demo/tex_shaders.hpp"
 #include "graphics/gfx_draw.hpp"
+#include "graphics/gfx_tsharp.hpp"
 #include "graphics/gfx_vsharp.hpp"
 #include "graphics/rdna_pixel.hpp"
 #include "graphics/gpu_va.hpp"
@@ -302,6 +305,85 @@ struct BatchScene {
     } else {
       b.draw_auto(dc);
     }
+    cmd = b.dwords();
+  }
+  DrawResult run(VulkanBackend& vk) {
+    auto sum = pm4::interpret(cmd.data(), cmd.size());
+    if (sum.draws.size() != 1) { DrawResult r; r.error = "no draw parsed"; return r; }
+    return execute_draw(vk, mem, sum.draws[0]);
+  }
+};
+
+// Slice S17: textured draw. PVS3 clip blob, PPS2 pixel blob, T#/S# in guest
+// memory, full-quad with uv varyings and a white vertex-colour tint.
+struct TexScene {
+  GpuAddressSpace mem;
+  std::vector<std::uint32_t> vs_blob, ps_blob, mat;
+  std::vector<float> vb;
+  std::vector<std::uint8_t> target;
+  std::vector<std::uint32_t> tsharp, ssharp, cmd;
+  std::vector<std::uint8_t> texels;
+  static constexpr std::uint32_t W = 64, H = 64;
+  void make_tdesc(std::uint32_t w[8], std::uint64_t base, std::uint32_t tw, std::uint32_t th,
+                  std::uint32_t pitch, std::uint32_t tiling) {
+    std::uint64_t q0 = (base >> 8) & 0x3FFFFFFFFFull;
+    q0 |= std::uint64_t(10) << 52;  // 8_8_8_8 unorm
+    std::uint64_t q1 = std::uint64_t(tw - 1) | (std::uint64_t(th - 1) << 14);
+    q1 |= std::uint64_t(1) << 35 | std::uint64_t(2) << 38 | std::uint64_t(3) << 41;
+    q1 |= std::uint64_t(tiling & 0x1F) << 52;
+    q1 |= std::uint64_t(9) << 60;  // Color2D
+    std::uint64_t q2 = std::uint64_t(pitch - 1) << 13;
+    w[0] = std::uint32_t(q0); w[1] = std::uint32_t(q0 >> 32);
+    w[2] = std::uint32_t(q1); w[3] = std::uint32_t(q1 >> 32);
+    w[4] = std::uint32_t(q2); w[5] = std::uint32_t(q2 >> 32);
+    w[6] = 0; w[7] = 0;
+  }
+  // uv_scale 1 = uv 0..1 across the quad; 2 = 0..2 (addressing test).
+  void build(float uv_scale, std::uint32_t clamp_x, std::uint32_t mag_filter,
+             std::uint32_t min_filter, std::uint32_t tiling = 31,
+             std::uint32_t tex_side = 4, bool user_data = true) {
+    vs_blob = make_pnr_vs3_blob(true);
+    ps_blob = make_pnr_ps2_blob();
+    mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
+    const float px[6][2] = {{-1,-1},{1,-1},{1,1},{-1,-1},{1,1},{-1,1}};
+    const float pu[6][2] = {{0,0},{1,0},{1,1},{0,0},{1,1},{0,1}};
+    for (int v = 0; v < 6; ++v) {
+      vb.push_back(px[v][0]); vb.push_back(px[v][1]); vb.push_back(0.0f);
+      vb.push_back(1.0f); vb.push_back(1.0f); vb.push_back(1.0f);  // white tint
+      vb.push_back(pu[v][0] * uv_scale); vb.push_back(pu[v][1] * uv_scale);
+    }
+    // checker texels: even texels white, odd black
+    texels.assign(std::size_t(tex_side) * tex_side * 4, 0);
+    for (std::uint32_t y = 0; y < tex_side; ++y)
+      for (std::uint32_t x = 0; x < tex_side; ++x) {
+        std::uint8_t v = ((x + y) & 1) ? 0 : 255;
+        auto* p = &texels[(y * tex_side + x) * 4];
+        p[0] = v; p[1] = v; p[2] = v; p[3] = 255;
+      }
+    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, tex_side, tex_side, tex_side, tiling);
+    tsharp.assign(tw, tw + 8);
+    std::uint64_t sq0 = std::uint64_t(clamp_x & 7) | (std::uint64_t(2) << 3);  // clamp y
+    std::uint64_t sq1 = std::uint64_t(mag_filter) << 20 | std::uint64_t(min_filter) << 22;
+    ssharp = {std::uint32_t(sq0), std::uint32_t(sq0 >> 32), std::uint32_t(sq1), std::uint32_t(sq1 >> 32)};
+    target.assign(W * H * 4, 0xCD);
+    mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
+    mem.map_external(0x200000, ps_blob.data(), ps_blob.size() * 4, "ps");
+    mem.map_external(0x300000, mat.data(), 64, "matrix");
+    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x500000, target.data(), target.size(), "target");
+    mem.map_external(0x700000, texels.data(), texels.size(), "texture");
+    mem.map_external(0x710000, tsharp.data(), tsharp.size() * 4, "tsharp");
+    mem.map_external(0x711000, ssharp.data(), ssharp.size() * 4, "ssharp");
+    pm4::Builder b;
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+    if (user_data)
+      b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_PS_0, {0x710000, 0, 0x711000, 0});
+    b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
+    b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+    b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
+    b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(6);
     cmd = b.dwords();
   }
   DrawResult run(VulkanBackend& vk) {
@@ -1039,5 +1121,80 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       }
     }
   }
+  }
+
+  // Slice S17: textured draws (PPS2 blob, T#/S# in guest memory).
+  {
+    TexScene s; s.build(1.0f, 0, 0, 0);  // uv 0..1, wrap x, point filters
+    auto r = s.run(vk);
+    if (!r.ok) std::printf("  pps2 draw error: %s\n", r.error.c_str());
+    check(r.ok && r.notes.find("PPS2") != std::string::npos, "pps2: textured draw ok, result states the PPS2 pixel stage");
+    if (r.ok) {
+      // 4x4 checker over 64x64 with nearest sampling: exact 16x16 blocks,
+      // row order either direct or flipped by the clip-y chain.
+      std::vector<std::uint8_t> want(64 * 64 * 4), wantf(64 * 64 * 4);
+      for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x) {
+          std::uint8_t v = (((x / 16) + (y / 16)) & 1) ? 0 : 255;
+          std::uint8_t vf = (((x / 16) + ((63 - y) / 16)) & 1) ? 0 : 255;
+          auto* p = &want[(y * 64 + x) * 4]; p[0] = v; p[1] = v; p[2] = v; p[3] = 255;
+          auto* q = &wantf[(y * 64 + x) * 4]; q[0] = vf; q[1] = vf; q[2] = vf; q[3] = 255;
+        }
+      const bool direct = std::memcmp(r.rgba.data(), want.data(), want.size()) == 0;
+      const bool flipped = std::memcmp(r.rgba.data(), wantf.data(), wantf.size()) == 0;
+      check(direct || flipped, "pps2: 4x4 checker byte-exact in 16x16 blocks (nearest)");
+      check(std::memcmp(s.target.data(), r.rgba.data(), r.rgba.size()) == 0, "pps2: target memory holds the textured pixels");
+    }
+    TexScene sw; sw.build(2.0f, 0, 0, 0);  // uv 0..2 with wrap x: checker repeats every 8 px in x
+    auto rw = sw.run(vk);
+    check(rw.ok, "pps2: wrap-addressed draw ok");
+    if (rw.ok) {
+      // uv 0..2 wraps once: 8-pixel texel blocks, full pattern repeats at 32.
+      bool block8 = true, period32 = true, alternate = true;
+      for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x) {
+          const auto* a = &rw.rgba[(y * 64 + x) * 4];
+          if (x % 8 != 7 && a[0] != rw.rgba[(y * 64 + x + 1) * 4]) block8 = false;
+          if (x + 32 < 64 && a[0] != rw.rgba[(y * 64 + x + 32) * 4]) period32 = false;
+          if (x % 16 < 8 && x + 8 < 64 && a[0] == rw.rgba[(y * 64 + x + 8) * 4]) alternate = false;
+        }
+      check(block8, "pps2: wrap draw keeps 8-pixel texel blocks");
+      check(period32 && alternate, "pps2: wrap addressing repeats the checker pattern every 32 pixels in x");
+    }
+    // uv scale puts pixel (8,8) exactly on texel (0,0)'s centre and the
+    // target centre on the four-texel midpoint.
+    TexScene sl; sl.build(16.0f / 8.5f, 0, 1, 1, 31, 2);  // 2x2 checker, bilinear
+    auto rl = sl.run(vk);
+    TexScene sm; sm.build(32.0f / 32.5f, 0, 1, 1, 31, 2);  // pixel (32,32) at uv (0.5,0.5) exactly
+    auto rm = sm.run(vk);
+    if (rm.ok) {
+      const auto* mid = &rm.rgba[(32 * 64 + 32) * 4];
+      check(mid[0] >= 120 && mid[0] <= 135 && mid[1] == mid[0] && mid[2] == mid[0],
+            "pps2: bilinear midpoint is the four-texel average (127/128)");
+    } else check(false, "pps2: bilinear midpoint draw ok");
+    if (rl.ok) {
+      check(rl.ok, "pps2: bilinear draw ok");
+      // Pixel (8,8) lands exactly on texel (0,0)'s centre (either
+      // orientation): the bilinear sample must be that texel exactly.
+      const auto* ctr = &rl.rgba[(8 * 64 + 8) * 4];
+      check(((ctr[0] == 0 && ctr[1] == 0 && ctr[2] == 0) || (ctr[0] == 255 && ctr[1] == 255 && ctr[2] == 255)),
+            "pps2: bilinear keeps texel centres exact");
+    }
+    // Refusals.
+    { TexScene b1; b1.build(1.0f, 0, 0, 0, 31, 4, false);   // no PS user data
+      auto r1 = b1.run(vk);
+      check(!r1.ok && r1.error.find("user data") != std::string::npos, "pps2: missing T#/S# pointers refused"); }
+    { TexScene b2; b2.build(1.0f, 0, 0, 0, 13);              // tiled T#
+      auto r2 = b2.run(vk);
+      check(!r2.ok && r2.error.find("tiling") != std::string::npos, "pps2: tiled texture refused"); }
+    { TexScene b3; b3.build(1.0f, 6, 0, 0);                  // border clamp mode
+      auto r3 = b3.run(vk);
+      check(!r3.ok && r3.error.find("clamp") != std::string::npos, "pps2: border clamp refused"); }
+    { TexScene b4; b4.build(1.0f, 0, 0, 0, 31, 4);
+      b4.vs_blob = make_pnr_vs4_blob();                       // PPS2 + PVS4 not implemented
+      b4.mem.unmap(0x100000);
+      b4.mem.map_external(0x100000, b4.vs_blob.data(), b4.vs_blob.size() * 4, "vs4");
+      auto r4 = b4.run(vk);
+      check(!r4.ok && r4.error.find("not implemented") != std::string::npos, "pps2: PVS4 combination refused"); }
   }
 }
