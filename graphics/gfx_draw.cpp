@@ -47,8 +47,8 @@ std::vector<std::uint32_t> make_pnr_vs3_blob(bool with_post) {
 std::vector<std::uint32_t> make_pnr_vs5_blob(std::uint32_t pos_fmt, std::uint32_t col_fmt,
                                              std::uint32_t pos_stride_words, std::uint32_t col_stride_words) {
   std::vector<std::vector<std::uint32_t>> k;
-  for (std::uint32_t c = 0; c < 3; ++c) k.push_back(rdna_fetch_component_kernel(c, pos_stride_words, kRdnaVertexMax));
-  for (std::uint32_t c = 0; c < 3; ++c) k.push_back(rdna_fetch_component_kernel(c, col_stride_words, kRdnaVertexMax));
+  for (std::uint32_t c = 0; c < 3; ++c) k.push_back(rdna_fetch_component_kernel(c, pos_stride_words, kRdnaVertexMax, pos_fmt));
+  for (std::uint32_t c = 0; c < 3; ++c) k.push_back(rdna_fetch_component_kernel(c, col_stride_words, kRdnaVertexMax, col_fmt));
   for (std::uint32_t c = 0; c < 4; ++c) k.push_back(rdna_vertex_component_kernel(c, kRdnaVertexMax));
   for (std::uint32_t c = 0; c < 3; ++c) k.push_back(rdna_post_ndc_kernel(c, kRdnaVertexMax));
   std::vector<std::uint32_t> blob = {kPnrVs5Magic, 13, pos_fmt, col_fmt, pos_stride_words, col_stride_words};
@@ -331,16 +331,17 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     decode_vsharp(table + 4, &cv);
     std::string why;
     if (!validate_vsharp_fetch(pv, 3, n, hdr[4], &why)) return fail(r, "position V#: " + why);
-    if (!validate_vsharp_fetch(cv, 3, n, hdr[5], &why)) return fail(r, "colour V#: " + why);
+    if (!validate_vsharp_fetch(cv, 3, n, hdr[5], &why, true)) return fail(r, "colour V#: " + why);
     if (pv.data_format != hdr[2]) return fail(r, "position V# data format does not match the fetch blob's compiled layout");
     if (cv.data_format != hdr[3]) return fail(r, "colour V# data format does not match the fetch blob's compiled layout");
     // Only the consumed components are read from guest memory: a strided
     // colour V# pointing into the middle of a record must not run past the
-    // end of the mapped buffer on the last vertex.
+    // end of the mapped buffer on the last vertex. 8_8_8_8 packs the three
+    // fetched components into one dword.
     const std::uint32_t psw = hdr[4], csw = hdr[5];
     std::vector<std::uint32_t> raw[2];
-    raw[0].resize(std::size_t(n - 1) * psw + 3);
-    raw[1].resize(std::size_t(n - 1) * csw + 3);
+    raw[0].resize(std::size_t(n - 1) * psw + (hdr[2] == 10 ? 1 : 3));
+    raw[1].resize(std::size_t(n - 1) * csw + (hdr[3] == 10 ? 1 : 3));
     if (!mem.read(pv.base, raw[0].data(), raw[0].size() * 4)) return fail(r, "position buffer is not mapped: " + mem.last_error());
     if (!mem.read(cv.base, raw[1].data(), raw[1].size() * 4)) return fail(r, "colour buffer is not mapped: " + mem.last_error());
     vb.assign(std::size_t(n) * 6, 0.0f);
@@ -483,8 +484,11 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     r.notes += "; shared frame targets (draws accumulate into the bound colour target)";
   if (blend.enable)
     r.notes += "; target-0 blending on (CB_BLEND0_CONTROL; fragment alpha is 1.0 on this pipeline)";
-  if (pvs5)
-    r.notes += "; vertex fetch via V# descriptors (PVS5; 32-bit float formats, position w ignored)";
+  if (pvs5) {
+    r.notes += "; vertex fetch via V# descriptors (PVS5; 32-bit float formats, position w ignored";
+    if (hdr[3] == 10) r.notes += "; colour converted from 8_8_8_8 unorm in translated RDNA";
+    r.notes += ")";
+  }
   const std::size_t bytes = std::size_t(w) * h * 4;
   if (std::uint8_t* dst = mem.resolve_mut(b.color0.address, bytes)) {
     std::memcpy(dst, r.rgba.data(), bytes);
