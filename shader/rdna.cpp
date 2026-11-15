@@ -217,6 +217,13 @@ const OpName kVop2[] = {
     {0x29, "v_sub_co_ci_u32"},
 };
 
+// VOP3A named subset. Opcode numbers from AMD's public "RDNA 2" ISA
+// (Table 83): only v_fma_f32 (331) is named; everything else stays
+// structural-only with supported=false, never guessed.
+const OpName kVop3[] = {
+    {0x14b, "v_fma_f32"},
+};
+
 const char* lookup(const OpName* table, size_t count, uint32_t op) {
   for (size_t i = 0; i < count; ++i)
     if (table[i].op == op) return table[i].name;
@@ -232,6 +239,7 @@ const char* family_mnemonic(RdnaFamily f, uint32_t op) {
     case RdnaFamily::SOPP: return lookup(kSopp, sizeof(kSopp)/sizeof(*kSopp), op);
     case RdnaFamily::VOP1: return lookup(kVop1, sizeof(kVop1)/sizeof(*kVop1), op);
     case RdnaFamily::VOP2: return lookup(kVop2, sizeof(kVop2)/sizeof(*kVop2), op);
+    case RdnaFamily::VOP3: return lookup(kVop3, sizeof(kVop3)/sizeof(*kVop3), op);
     default: return nullptr;
   }
 }
@@ -243,14 +251,15 @@ bool apply_literal(const std::vector<uint32_t>& code, size_t& wi,
   // A literal word is shared by all literal source selectors in one
   // instruction, not consumed once per operand.
   const bool needed=in.src0.kind==RdnaOperandKind::LiteralConst ||
-                    in.src1.kind==RdnaOperandKind::LiteralConst;
+                    in.src1.kind==RdnaOperandKind::LiteralConst ||
+                    in.src2.kind==RdnaOperandKind::LiteralConst;
   if (!needed) return true;
   if (wi+in.word_count>=code.size()) {
     err="truncated literal constant after pc="+std::to_string(in.pc);
     return false;
   }
   const uint32_t literal=code[wi+in.word_count++];
-  for(RdnaOperand* o:{&in.src0,&in.src1}) if(o->kind==RdnaOperandKind::LiteralConst) {
+  for(RdnaOperand* o:{&in.src0,&in.src1,&in.src2}) if(o->kind==RdnaOperandKind::LiteralConst) {
     o->value=literal; o->signed_value=static_cast<int32_t>(literal);
   }
   return true;
@@ -379,6 +388,8 @@ RdnaDecodeResult rdna_decode(const std::vector<uint32_t>& code) {
         in.dst.reg = word & 0xffu;
         in.src0 = scalar_source(w1 & 0x1ffu);
         in.src1 = scalar_source((w1 >> 9u) & 0x1ffu);
+        in.src2 = scalar_source((w1 >> 18u) & 0x1ffu);
+        if (!apply_literal(code, wi, in, r.error)) return r;
         break;
       }
       default:
