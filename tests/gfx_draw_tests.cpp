@@ -9,6 +9,7 @@
 #include "graphics/demo/tex_shaders.hpp"
 #include "graphics/gfx_draw.hpp"
 #include "graphics/gfx_tsharp.hpp"
+#include "graphics/gfx_swizzle.hpp"
 #include "graphics/gfx_vsharp.hpp"
 #include "graphics/rdna_pixel.hpp"
 #include "graphics/gpu_va.hpp"
@@ -348,7 +349,7 @@ struct TexScene {
   }
   // uv_scale 1 = uv 0..1 across the quad; 2 = 0..2 (addressing test).
   void build(float uv_scale, std::uint32_t clamp_x, std::uint32_t mag_filter,
-             std::uint32_t min_filter, std::uint32_t tiling = 31,
+             std::uint32_t min_filter, std::uint32_t tiling = 0,
              std::uint32_t tex_side = 4, bool user_data = true) {
     vs_blob = make_pnr_vs3_blob(true);
     ps_blob = make_pnr_ps2_blob();
@@ -437,7 +438,7 @@ struct TexScene {
       for (std::uint32_t i = 0; i < nb * nb; ++i)
         bc_solid(&texels[at + i * bb], df, cols[l % 3][0], cols[l % 3][1], cols[l % 3][2], 255);
     }
-    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, side, side, pitch ? pitch : side, 31, last_level, 0, df);
+    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, side, side, pitch ? pitch : side, 0, last_level, 0, df);
     tsharp.assign(tw, tw + 8);
     std::uint64_t sq0 = 0;  // wrap x and y
     std::uint64_t sq1 = std::uint64_t(mag_filter) << 20 | std::uint64_t(min_filter) << 22;
@@ -483,11 +484,79 @@ struct TexScene {
     for (int i = 0; i < 16; ++i) { texels[i * 4 + 1] = 0; texels[i * 4 + 2] = 0; }          // L0 red
     for (int i = 0; i < 4; ++i) { auto* p = &texels[64 + i * 4]; p[0] = 0; p[2] = 0; }        // L1 green
     { auto* p = &texels[80]; p[0] = 0; p[1] = 0; }                                            // L2 blue
-    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, 4, 4, 4, 31, 2, t_min_lod);
+    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, 4, 4, 4, 0, 2, t_min_lod);
     tsharp.assign(tw, tw + 8);
     std::uint64_t sq0 = std::uint64_t(s_min_lod & 0xFFF) << 32 |
                         std::uint64_t(s_max_lod & 0xFFF) << 44;  // wrap x and y
     std::uint64_t sq1 = std::uint64_t(1) << 20 | std::uint64_t(1) << 22;  // bilinear mag/min
+    sq1 |= std::uint64_t(mip_filter & 3) << 26;
+    ssharp = {std::uint32_t(sq0), std::uint32_t(sq0 >> 32), std::uint32_t(sq1), std::uint32_t(sq1 >> 32)};
+    target.assign(W * H * 4, 0xCD);
+    mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
+    mem.map_external(0x200000, ps_blob.data(), ps_blob.size() * 4, "ps");
+    mem.map_external(0x300000, mat.data(), 64, "matrix");
+    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x500000, target.data(), target.size(), "target");
+    mem.map_external(0x700000, texels.data(), texels.size(), "texture");
+    mem.map_external(0x710000, tsharp.data(), tsharp.size() * 4, "tsharp");
+    mem.map_external(0x711000, ssharp.data(), ssharp.size() * 4, "ssharp");
+    pm4::Builder b;
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_PS_0, {0x710000, 0, 0x711000, 0});
+    b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
+    b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+    b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
+    b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(6);
+    cmd = b.dwords();
+  }
+  // Slice S22: thin-tiled (swizzled) texture. df 10 = 8_8_8_8 unorm, df 35 =
+  // BC1. Single level: checker for df 10, solid red for BC. Chain (last_level
+  // > 0, df 10): solid red/green/blue levels like build_mips. The surface is
+  // laid out by the hardware thin block geometry (gfx_swizzle.hpp), including
+  // tail-packed levels.
+  void build_tiled(std::uint32_t mode, std::uint32_t df, std::uint32_t side, std::uint32_t last_level,
+                   float uv_scale, std::uint32_t mip_filter) {
+    vs_blob = make_pnr_vs3_blob(true);
+    ps_blob = make_pnr_ps2_blob();
+    mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
+    const float px[6][2] = {{-1,-1},{1,-1},{1,1},{-1,-1},{1,1},{-1,1}};
+    const float pu[6][2] = {{0,0},{1,0},{1,1},{0,0},{1,1},{0,1}};
+    for (int v = 0; v < 6; ++v) {
+      vb.push_back(px[v][0]); vb.push_back(px[v][1]); vb.push_back(0.0f);
+      vb.push_back(1.0f); vb.push_back(1.0f); vb.push_back(1.0f);  // white tint
+      vb.push_back(pu[v][0] * uv_scale); vb.push_back(pu[v][1] * uv_scale);
+    }
+    const bool bc = df != 10;
+    const std::uint32_t bb = df == 35 || df == 38 ? 8 : df == 10 ? 4 : 16;
+    TiledMip layout[kMaxTiledMips];
+    std::uint64_t guest_bytes = 0;
+    if (!thin_mip_layout(mode, bb, bc ? 4 : 1, bc ? 4 : 1, side, side, last_level + 1,
+                         layout, kMaxTiledMips, guest_bytes)) { cmd.clear(); return; }
+    texels.assign(guest_bytes, 0);
+    for (std::uint32_t l = 0; l <= last_level; ++l) {
+      const std::uint32_t lw = side >> l ? side >> l : 1, lh = lw;
+      const std::uint32_t ew = bc ? (lw + 3) / 4 : lw, eh = bc ? (lh + 3) / 4 : lh;
+      for (std::uint32_t y = 0; y < eh; ++y)
+        for (std::uint32_t x = 0; x < ew; ++x) {
+          const auto off = thin_element_offset(mode, bb, layout[l], x, y, 0);
+          if (!bc) {
+            std::uint8_t r = 255, g = 255, bch = 255;
+            if (last_level == 0) { const std::uint8_t v = ((x + y) & 1) ? 0 : 255; r = g = bch = v; }
+            else if (l == 0) { g = 0; bch = 0; } else if (l == 1) { r = 0; bch = 0; } else { r = 0; g = 0; }
+            texels[off + 0] = r; texels[off + 1] = g; texels[off + 2] = bch; texels[off + 3] = 255;
+          } else {
+            std::uint8_t blk[16]; bc_solid(blk, df, 255, 0, 0, 255);
+            std::memcpy(&texels[off], blk, bb);
+          }
+        }
+    }
+    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, side, side, side, mode, last_level, 0, df);
+    tsharp.assign(tw, tw + 8);
+    std::uint64_t sq0 = 0;  // wrap x and y
+    const std::uint32_t mf = last_level == 0 ? 0 : 1;  // point for single-level, bilinear for chains
+    std::uint64_t sq1 = std::uint64_t(mf) << 20 | std::uint64_t(mf) << 22;
     sq1 |= std::uint64_t(mip_filter & 3) << 26;
     ssharp = {std::uint32_t(sq0), std::uint32_t(sq0 >> 32), std::uint32_t(sq1), std::uint32_t(sq1 >> 32)};
     target.assign(W * H * 4, 0xCD);
@@ -1287,9 +1356,9 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
     }
     // uv scale puts pixel (8,8) exactly on texel (0,0)'s centre and the
     // target centre on the four-texel midpoint.
-    TexScene sl; sl.build(16.0f / 8.5f, 0, 1, 1, 31, 2);  // 2x2 checker, bilinear
+    TexScene sl; sl.build(16.0f / 8.5f, 0, 1, 1, 0, 2);  // 2x2 checker, bilinear
     auto rl = sl.run(vk);
-    TexScene sm; sm.build(32.0f / 32.5f, 0, 1, 1, 31, 2);  // pixel (32,32) at uv (0.5,0.5) exactly
+    TexScene sm; sm.build(32.0f / 32.5f, 0, 1, 1, 0, 2);  // pixel (32,32) at uv (0.5,0.5) exactly
     auto rm = sm.run(vk);
     if (rm.ok) {
       const auto* mid = &rm.rgba[(32 * 64 + 32) * 4];
@@ -1305,21 +1374,54 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
             "pps2: bilinear keeps texel centres exact");
     }
     // Refusals.
-    { TexScene b1; b1.build(1.0f, 0, 0, 0, 31, 4, false);   // no PS user data
+    { TexScene b1; b1.build(1.0f, 0, 0, 0, 0, 4, false);   // no PS user data
       auto r1 = b1.run(vk);
       check(!r1.ok && r1.error.find("user data") != std::string::npos, "pps2: missing T#/S# pointers refused"); }
-    { TexScene b2; b2.build(1.0f, 0, 0, 0, 13);              // tiled T#
+    { TexScene b2; b2.build(1.0f, 0, 0, 0, 13);              // unknown SW_MODE T#
       auto r2 = b2.run(vk);
       check(!r2.ok && r2.error.find("tiling") != std::string::npos, "pps2: tiled texture refused"); }
     { TexScene b3; b3.build(1.0f, 6, 0, 0);                  // border clamp mode
       auto r3 = b3.run(vk);
       check(!r3.ok && r3.error.find("clamp") != std::string::npos, "pps2: border clamp refused"); }
-    { TexScene b4; b4.build(1.0f, 0, 0, 0, 31, 4);
+    { TexScene b4; b4.build(1.0f, 0, 0, 0, 0, 4);
       b4.vs_blob = make_pnr_vs4_blob();                       // PPS2 + PVS4 not implemented
       b4.mem.unmap(0x100000);
       b4.mem.map_external(0x100000, b4.vs_blob.data(), b4.vs_blob.size() * 4, "vs4");
       auto r4 = b4.run(vk);
       check(!r4.ok && r4.error.find("not implemented") != std::string::npos, "pps2: PVS4 combination refused"); }
+  }
+
+  // ---- slice S22: thin-tiled (swizzled) textures, end to end ----
+  {
+    auto px = [&](const std::vector<std::uint8_t>& t, int x, int y) { return &t[(y * 64 + x) * 4]; };
+    // Standard family (SW_64KB_S): checkerboard survives the detile byte-exact.
+    { TexScene s; s.build_tiled(9, 10, 4, 0, 1.0f, 0);
+      auto r = s.run(vk);
+      check(r.ok && px(r.rgba, 8, 8)[0] == 255 && px(r.rgba, 24, 8)[0] == 0 &&
+            px(r.rgba, 24, 24)[0] == 255 && px(r.rgba, 40, 40)[0] == 255,
+            "tiled: SW_64KB_S checkerboard draws byte-exact"); }
+    // XOR equation family (SW_64KB_S_X, mode 25).
+    { TexScene s; s.build_tiled(25, 10, 4, 0, 1.0f, 0);
+      auto r = s.run(vk);
+      check(r.ok && px(r.rgba, 8, 8)[0] == 255 && px(r.rgba, 24, 8)[0] == 0 &&
+            px(r.rgba, 24, 24)[0] == 255 && px(r.rgba, 40, 40)[0] == 255,
+            "tiled: SW_64KB_S_X checkerboard draws byte-exact"); }
+    // Display equation mode (SW_64KB_D, mode 10) with a BC1 solid.
+    { TexScene s; s.build_tiled(10, 35, 8, 0, 1.0f, 0);
+      auto r = s.run(vk);
+      check(r.ok && px(r.rgba, 0, 0)[0] == 255 && px(r.rgba, 0, 0)[1] == 0 &&
+            px(r.rgba, 63, 63)[0] == 255 && px(r.rgba, 63, 63)[3] == 255,
+            "tiled: SW_64KB_D BC1 solid draws red byte-exact"); }
+    // Tail-packed chain (all three levels share one 64KB block): the mip
+    // filter still picks the right level.
+    { TexScene s; s.build_tiled(9, 10, 4, 2, 32.0f, 1);   // point, lod 1
+      auto r = s.run(vk);
+      check(r.ok && px(r.rgba, 32, 32)[1] == 255 && px(r.rgba, 32, 32)[0] == 0,
+            "tiled: point mip filter picks tail-packed level 1 exactly"); }
+    { TexScene s; s.build_tiled(9, 10, 4, 2, 64.0f, 1);   // point, lod 2
+      auto r = s.run(vk);
+      check(r.ok && px(r.rgba, 32, 32)[2] == 255 && px(r.rgba, 32, 32)[0] == 0,
+            "tiled: point mip filter picks tail-packed level 2 exactly"); }
   }
 
   // ---- slice S19: mipmapped textures (mip chains, mip filters, lod clamps) ----
@@ -1364,7 +1466,7 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       auto r = s.run(vk);
       check(r.ok && is(centre(r), 255, 0, 0), "mips: mip filter none keeps level 0 on a chain"); }
     { TexScene s; s.build_mips(32.0f, 1);   // point mip filter on a single-level texture
-      std::uint32_t tw[8]; s.make_tdesc(tw, 0x700000, 4, 4, 4, 31, 0);
+      std::uint32_t tw[8]; s.make_tdesc(tw, 0x700000, 4, 4, 4, 0, 0);
       s.mem.unmap(0x710000);
       s.tsharp.assign(tw, tw + 8);
       s.mem.map_external(0x710000, s.tsharp.data(), s.tsharp.size() * 4, "tsharp1");
