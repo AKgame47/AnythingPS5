@@ -33,10 +33,22 @@ Status VulkanBackend::open() {
   if (!name) return fail("vulkan", std::string("missing entry point: ") + #name);
   PNR_VK_LIST(PNR_VK_RESOLVE)
 #undef PNR_VK_RESOLVE
+  // Presentation entry points are optional: missing ones stay null and any
+  // later present attempt names the missing function instead of faking it.
+#define PNR_VK_RESOLVE_OPT(name) \
+  name = gp(nullptr, #name); \
+  if (!name) name = dlsym(lib_, #name);
+  PNR_VK_LIST_PRESENT(PNR_VK_RESOLVE_OPT)
+#undef PNR_VK_RESOLVE_OPT
   return Status::Ok();
 }
 
 Status VulkanBackend::create_instance(const char* app_name) {
+  return create_instance(app_name, {});
+}
+
+Status VulkanBackend::create_instance(const char* app_name,
+                                      const std::vector<const char*>& extra_extensions) {
   if (!lib_) return fail("vulkan", "open() first");
   VkApplicationInfo app{};
   app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -46,6 +58,10 @@ Status VulkanBackend::create_instance(const char* app_name) {
   VkInstanceCreateInfo ci{};
   ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
   ci.pApplicationInfo = &app;
+  if (!extra_extensions.empty()) {
+    ci.enabledExtensionCount = (uint32_t)extra_extensions.size();
+    ci.ppEnabledExtensionNames = extra_extensions.data();
+  }
   VkResult r = fn<VkResult (*)(const VkInstanceCreateInfo*, void*, VkInstance*)>(
       vkCreateInstance)(&ci, nullptr, &instance_);
   if (r != VK_SUCCESS)
@@ -115,6 +131,63 @@ Status VulkanBackend::create_device(uint32_t physical_index) {
       vkCreateDevice)(phys_, &dci, nullptr, &device_);
   if (r != VK_SUCCESS)
     return fail("vulkan", "vkCreateDevice failed rc=" + std::to_string(r));
+  fn<void (*)(VkDevice, uint32_t, uint32_t, VkQueue*)>(vkGetDeviceQueue)(
+      device_, queue_family_, 0, &queue_);
+  return Status::Ok();
+}
+
+Status VulkanBackend::create_device_for_present(uint32_t physical_index,
+                                                VkSurfaceKHR surface) {
+  if (!vkGetPhysicalDeviceSurfaceSupportKHR)
+    return fail("vulkan", "missing entry point: vkGetPhysicalDeviceSurfaceSupportKHR");
+  if (!vkCreateSwapchainKHR || !vkDestroySwapchainKHR ||
+      !vkGetSwapchainImagesKHR || !vkAcquireNextImageKHR ||
+      !vkQueuePresentKHR || !vkCreateSemaphore || !vkDestroySemaphore)
+    return fail("vulkan", "missing KHR_swapchain entry points");
+  if (physical_index >= phys_handles_.size())
+    return fail("vulkan", "physical device index out of range");
+  phys_ = phys_handles_[physical_index];
+  uint32_t fam_count = 0;
+  fn<void (*)(VkPhysicalDevice, uint32_t*, VkQueueFamilyProperties*)>(
+      vkGetPhysicalDeviceQueueFamilyProperties)(phys_, &fam_count, nullptr);
+  std::vector<VkQueueFamilyProperties> fams(fam_count);
+  fn<void (*)(VkPhysicalDevice, uint32_t*, VkQueueFamilyProperties*)>(
+      vkGetPhysicalDeviceQueueFamilyProperties)(phys_, &fam_count, fams.data());
+  int family = -1;
+  // One family that can render, compute and present keeps the first window
+  // slice single-queue; a split present queue is Planned.
+  for (uint32_t i = 0; i < fam_count; ++i) {
+    if ((fams[i].queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) !=
+        (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) continue;
+    VkBool32 present = 0;
+    fn<VkResult (*)(VkPhysicalDevice, uint32_t, VkSurfaceKHR, VkBool32*)>(
+        vkGetPhysicalDeviceSurfaceSupportKHR)(phys_, i, surface, &present);
+    if (present) { family = (int)i; break; }
+  }
+  if (family < 0)
+    return fail("vulkan", "no graphics+compute+present queue family on " +
+                          device_name() + " for this surface");
+  queue_family_ = (uint32_t)family;
+  queue_flags_ = fams[family].queueFlags;
+  float prio = 1.0f;
+  VkDeviceQueueCreateInfo qci{};
+  qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+  qci.queueFamilyIndex = queue_family_;
+  qci.queueCount = 1;
+  qci.pQueuePriorities = &prio;
+  const char* exts[] = {"VK_KHR_swapchain"};
+  VkDeviceCreateInfo dci{};
+  dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+  dci.queueCreateInfoCount = 1;
+  dci.pQueueCreateInfos = &qci;
+  dci.enabledExtensionCount = 1;
+  dci.ppEnabledExtensionNames = exts;
+  VkResult r = fn<VkResult (*)(VkPhysicalDevice, const VkDeviceCreateInfo*,
+                               void*, VkDevice*)>(
+      vkCreateDevice)(phys_, &dci, nullptr, &device_);
+  if (r != VK_SUCCESS)
+    return fail("vulkan", "vkCreateDevice (swapchain) failed rc=" +
+                          std::to_string(r));
   fn<void (*)(VkDevice, uint32_t, uint32_t, VkQueue*)>(vkGetDeviceQueue)(
       device_, queue_family_, 0, &queue_);
   return Status::Ok();
