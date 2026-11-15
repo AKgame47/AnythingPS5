@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2940/2940 unit tests, 22/22 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2845 unit checks without it; the
+Test state: **3007/3007 unit tests, 22/22 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2912 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -212,6 +212,7 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Mipmapped textures (slice S19): T# mip chains from level 0 (packed guest layout: level 0 at the T# pitch, deeper levels tightly pitched) and S# mip filter none/point/linear plus min/max lod clamps drive the host sampler's mipmap mode and lod range (T# min_lod folds in by max); lod bias, point preclamp, invalid filter 3 and base_level > 0 refused with plain reasons | Experimental, Tested on lavapipe: solid-colour levels are sampled exactly - point picks levels 1 and 2 at footprints 2 and 4, magnification keeps level 0, linear is exact at an integer lod and blends levels 1-2 inside a tolerance band, S# max_lod / min_lod and T# min_lod clamp as specified, mip filter none keeps level 0, mip filtering on a single-level texture refused; sampling is not translated RDNA yet, no arrays/3D, 256x256 level-0 cap, hardware GPU untested |
 | Compressed textures (slice S20): T# data formats BC1 (35) and BC3 (37) unorm (values from public shadPS4 pixel_format.h) decoded to RGBA8 with exact integer arithmetic per the public S3TC/DXT spec - both BC1 colour modes incl. punch-through, both BC3 alpha modes; tight pitch and multiple-of-4 extents required, combines with S19 mip chains; the textured fragment stage now passes sampled alpha to the target | Experimental, Tested on lavapipe: every decode rule byte-exact against hand-computed blocks, BC1 solid/checker and BC3 gradient draws byte-exact, BC mip chains select the right level, loose pitch / non-multiple-of-4 extents / other formats refused with plain reasons; BC6/BC7 not implemented, sampling not translated RDNA, hardware GPU untested |
 | Compressed textures (slice S21): BC2 (explicit 4-bit alpha), BC4 (single channel) and BC5 (two channel) join the S20 decode subset, same rules (linear tiling, tight pitch, multiple-of-4 extents, mip chains) | Experimental, Tested on lavapipe: nibble scaling and both BC4 interpolation modes byte-exact against hand-computed blocks, BC2 alpha ramp / BC4 red-only / BC5 two-channel draws byte-exact; BC6/BC7 not implemented, sampling not translated RDNA, hardware GPU untested |
+| Extended texture formats (slice S23): the sampled T# subset adds plain formats 8 / 16 / 8_8 / 32 / 16_16 / 32_32 / 16_16_16_16 / 32_32_32_32 (unorm or 16/32-bit float per format) and 5_6_5 unorm, all converted exactly to the RGBA8 staging chain (integer unorm16 rounding, IEEE half/float32 decode, RGB565 bit replication), working through the S22 tiled path; sRGB on 8_8_8_8 and BC1-BC3 is converted by the host sampler (SRGB staging image), never approximated on the CPU | Experimental, Tested on lavapipe: every conversion rule byte-exact against hand-computed values (incl. half subnormals and NaN), R8G8 checker / R16G16B16A16 / half / float32 / 5_6_5 / tiled R16G16 draws byte-exact, sRGB 8_8_8_8 and BC1 draws byte-exact through the hardware conversion; snorm/scaled/integer numerics and packed formats (2_10_10_10 etc.) refused with named reasons, BC6/BC7 not implemented, sampling not translated RDNA, hardware GPU untested |
 | Tiled textures - PS5 thin swizzle (slice S22): the T# tiling index now uses the PS5-native SW_MODE vocabulary resolved like AnyPS5's resolveTileMode (linear 0; 256B/4KB/64KB S and D; 64KB "T"; 4KB and 64KB XOR families), ported from AnyPS5 (GPL, attribution headers) - the S17 GCN values 8/31 are refused as PS4 encodings, unknown modes refused; guest tiled surfaces are detiled on the CPU at repack (full 80-equation address table, tile-block geometry, mip chains with tail packing, pipe/bank XOR), then flow through the common RGBA8/BC repack | Experimental, Tested on lavapipe: all nine AnyPS5 addrlib-validated known-answer vector sets byte-exact, SW_64KB_S and SW_64KB_S_X checkerboards and a SW_64KB_D BC1 solid draw byte-exact, tail-packed chains pick the right level; thin (2D single-slice) modes only - no thick/3D/arrays, sampling not translated RDNA, hardware GPU untested |
 | Full64 runtime pointers: scalar add/addc/sub/subb pair arithmetic, carry-aware FLAT offsets, lexicographic bounds/alignment guards | Experimental, Tested (cross-low-word bindings, overflow/borrow/OOB, spirv-val + lavapipe); single invocation, existing bounded SSBO only |
 | Strict counted loop: scalar constant or runtime uniform count 1..64, one uint32 vector accumulator add, decrement/compare/backedge; real SPIR-V LoopMerge/Phi | Experimental, Tested (1/2/8/64 invocations, 1/2/16/64 counts, spirv-val + lavapipe); invalid runtime count rejected before dispatch plus GPU no-op guard; no body memory, nesting or general CFG |
@@ -227,12 +228,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2940/2940 unit tests pass (2845 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
+**3007/3007 unit tests pass (2912 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2845/2845
+not re-run for these counts). ASan+UBSan: 2912/2912
 unit tests pass (the sanitizer build has no `spirv-val`), leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
