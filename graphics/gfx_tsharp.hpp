@@ -15,8 +15,8 @@
 // plus the S23 plain formats (8, 16, 8_8, 32, 16_16, 32_32, 16_16_16_16,
 // 32_32_32_32 unorm or 16/32-bit float, 5_6_5 unorm - gfx_formats.hpp) and
 // sRGB on 8_8_8_8/BC1-BC3 (converted by the host sampler, never on the CPU);
-// linear tiling or a thin swizzle mode, 2D arrays from slice S27 (linear
-// tiling only), mip chains from level 0
+// linear tiling or a thin swizzle mode, 2D arrays from slice S27 and
+// cubemaps from slice S28 (linear tiling only), mip chains from level 0
 // (linear: level 0 at the T# pitch then tightly pitched levels; tiled: the
 // hardware block layout with tail packing). Everything else is refused with
 // a named reason.
@@ -88,8 +88,8 @@ inline bool decode_tsharp(const std::uint32_t w[8], TSharp* t) {
 // for the bounds check on base + mip chain bytes.
 inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, std::string* why) {
   auto no = [&](const char* m) { *why = m; return false; };
-  if (t.type != 9 && t.type != 13)
-    return no("T# image type is not Color2D/Color2DArray (1D/3D/cube/MSAA images are not implemented)");
+  if (t.type != 9 && t.type != 13 && t.type != 11)
+    return no("T# image type is not Color2D/Color2DArray/Cube (1D/3D/MSAA images are not implemented)");
   const bool bc1 = t.data_format == 35, bc2 = t.data_format == 36, bc3 = t.data_format == 37;
   const bool bc4 = t.data_format == 38, bc5 = t.data_format == 39, bc7 = t.data_format == 41;
   const bool bc6 = t.data_format == 40;
@@ -113,6 +113,13 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
     if (t.base_array != 0) return no("T# array base_array is not 0 (non-zero base slices are not implemented)");
     if (t.last_array > 255) return no("T# array has more than 256 slices");
     if (t.tiling_index != kSwLinear) return no("T# tiled texture arrays are not implemented (linear arrays only)");
+  } else if (t.type == 11) {
+    // Slice S28: a single cubemap = exactly 6 faces, square, linear tiling,
+    // base face 0. Faces are laid out like array slices (+X -X +Y -Y +Z -Z).
+    if (t.base_array != 0) return no("T# cubemap base_array is not 0 (non-zero base faces are not implemented)");
+    if (t.last_array != 5) return no("T# cubemap must have exactly 6 faces (cube arrays are not implemented)");
+    if (t.width != t.height) return no("T# cubemap images must be square");
+    if (t.tiling_index != kSwLinear) return no("T# tiled cubemaps are not implemented (linear tiling only)");
   } else if (t.last_array != 0 || t.base_array != 0)
     return no("T# texture arrays need the Color2DArray image type (type 13)");
   if (t.pow2pad) return no("T# pow2pad images are not supported");
@@ -154,7 +161,8 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
   }
   // Slice S27: an array surface holds last_array + 1 slices per mip level,
   // level-major; the bounds cover every slice of every level.
-  if (t.type == 13) bytes *= std::uint64_t(t.last_array) + 1;
+  // Slice S28: a cubemap the same with 6 faces.
+  if (t.type == 13 || t.type == 11) bytes *= std::uint64_t(t.last_array) + 1;
   if (t.base + bytes > guest_bytes) return no("T# pixels lie outside the guest address space");
   return true;
 }
