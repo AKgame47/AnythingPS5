@@ -41,6 +41,8 @@ struct ComputeTranslation {
 // Experimental unmodified VOP2 f32 add/sub/mul bitcasts raw registers to
 // binary32, emits NoContraction, bitcasts result back. Host Vulkan default
 // FP policy only: no PS5 rounding/denorm/NaN payload/signaling guarantee.
+// VOP3A v_fma_f32 (opcode 331, no modifiers) maps to GLSL.std.450 Fma:
+// fused single rounding, closer to RDNA semantics than mul+add.
 // Inline float selectors/SDWA/DPP/VOP3 modifiers remain unsupported.
 // Conditional subset: readfirstlane to SGPR (single invocation only), s_mov_b32,
 // s_cmp_eq_u32, one forward s_cbranch_scc0 over v_mov-only body. Registers
