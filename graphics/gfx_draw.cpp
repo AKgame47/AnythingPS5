@@ -354,7 +354,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
       // Guest layout: level 0 at the T# pitch, smaller levels tightly
       // pitched one after another (the layout validate_tsharp_sample bounds).
       // Compressed formats (BC1/BC3) are decoded block by block into RGBA8.
-      const bool bc = ts.data_format >= 35 && ts.data_format <= 39;
+      const bool bc = (ts.data_format >= 35 && ts.data_format <= 39) || ts.data_format == 41;
       const std::uint32_t bb = ts.data_format == 35 || ts.data_format == 38 ? 8 : bc ? 16 : 4;
       // Slice S23 plain formats: element size from the format table (the
       // descriptor passed validation, so this always succeeds).
