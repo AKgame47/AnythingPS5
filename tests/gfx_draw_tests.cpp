@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "graphics/gfx_draw.hpp"
+#include "graphics/gfx_vsharp.hpp"
 #include "graphics/rdna_pixel.hpp"
 #include "graphics/gpu_va.hpp"
 #include "graphics/pm4.hpp"
@@ -90,6 +91,65 @@ struct IndexedScene {
   }
 };
 // Slice S10: strip/fan topology. Fixed vertex list; indexed (u32) or auto draws.
+// Slice S15: PVS5 scene - vertex data fetched through a two-entry V# table
+// (position + colour) instead of a raw float pointer. The same interleaved
+// floats back both paths so results can be compared byte-for-byte.
+struct VsharpScene {
+  GpuAddressSpace mem;
+  std::vector<std::uint32_t> vs_blob, ps_blob{0xbf810000}, mat, vtable;
+  std::vector<float> vb;
+  std::vector<std::uint8_t> target;
+  std::vector<std::uint32_t> cmd;
+  std::uint32_t pos_fmt = 13, col_fmt = 13;   // Format32_32_32
+  std::uint32_t pos_stride = 24, col_stride = 24;  // bytes (interleaved x,y,z,r,g,b)
+  std::uint64_t pos_base = 0x400000, col_base = 0x40000C;
+  std::uint32_t num_records = 0;              // 0 -> vertex count
+  std::uint32_t pos_w3 = 0, col_w3 = 0;       // overrides (0 -> built from fmt)
+  std::uint32_t vcount = 0;                   // 0 -> floats/6 (interleaved layout)
+  static constexpr std::uint32_t W = 64, H = 64;
+  static std::uint32_t vsel(std::uint32_t fmt) {
+    return 0x688u | (7u << 12) | (fmt << 15);  // identity dst_sel, float
+  }
+  void vsharp(std::uint32_t* w, std::uint64_t base, std::uint32_t stride, std::uint32_t nrec, std::uint32_t w3) {
+    const std::uint64_t w01 = (base & 0xFFFFFFFFFFFull) | (std::uint64_t(stride) << 48);
+    w[0] = std::uint32_t(w01); w[1] = std::uint32_t(w01 >> 32); w[2] = nrec; w[3] = w3;
+  }
+  void build(const std::vector<float>& verts, std::uint32_t prim) {
+    const std::uint32_t nv = vcount ? vcount : std::uint32_t(verts.size() / 6);
+    const std::uint32_t nrec = num_records ? num_records : nv;
+    vs_blob = make_pnr_vs5_blob(pos_fmt, col_fmt,
+                                pos_stride ? pos_stride / 4 : vsharp_components(pos_fmt),
+                                col_stride ? col_stride / 4 : vsharp_components(col_fmt));
+    vb = verts;
+    mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
+    target.assign(W * H * 4, 0xCD);
+    vtable.resize(8);
+    vsharp(&vtable[0], pos_base, pos_stride, nrec, pos_w3 ? pos_w3 : vsel(pos_fmt));
+    vsharp(&vtable[4], col_base, col_stride, nrec, col_w3 ? col_w3 : vsel(col_fmt));
+    mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
+    mem.map_external(0x200000, ps_blob.data(), 4, "ps");
+    mem.map_external(0x300000, mat.data(), 64, "matrix");
+    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x500000, target.data(), target.size(), "target");
+    mem.map_external(0x700000, vtable.data(), vtable.size() * 4, "vtable");
+    pm4::Builder b;
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x700000, 0});
+    b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
+    b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+    b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
+    b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, prim).num_instances(1);
+    b.draw_auto(nv);
+    cmd = b.dwords();
+  }
+  DrawResult run(VulkanBackend& vk) {
+    auto sum = pm4::interpret(cmd.data(), cmd.size());
+    if (sum.draws.size() != 1) { DrawResult r; r.error = "no draw parsed"; return r; }
+    return execute_draw(vk, mem, sum.draws[0]);
+  }
+};
+
 struct TopoScene {
   GpuAddressSpace mem;
   std::vector<std::uint32_t> vs_blob, ps_blob{0xbf810000}, mat;
@@ -850,5 +910,92 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       DrawFrameCache f; auto r = t.run(vk, f);
       check(!r.ok && r.error.find("blend factor not supported") != std::string::npos,
             "blend: dual-source (src1) factor refused"); }
+
+  // Slice S15: vertex fetch through V# descriptors (PVS5). The reference is
+  // the same quad through the raw-pointer blob path; pixels must match.
+  {
+    TopoScene ref; ref.build(red, {}, 4);
+    DrawFrameCache f0; auto rr = ref.run(vk, f0);
+    VsharpScene s; s.build(red, 4);
+    auto rv = s.run(vk);
+    check(rr.ok && rv.ok, "fetch: reference and PVS5 draws run");
+    if (rr.ok && rv.ok) {
+      std::uint32_t diff = 0;
+      for (std::size_t i = 0; i < rr.rgba.size(); ++i) if (rr.rgba[i] != rv.rgba[i]) ++diff;
+      check(diff == 0, "fetch: PVS5 pixels identical to raw-pointer reference");
+      check(rv.notes.find("vertex fetch via V#") != std::string::npos, "fetch: notes state the V# path");
+    }
+    // Packed separate buffers: position packed at the buffer base (stride 0),
+    // colour packed right behind it in a second region.
+    {
+      std::vector<float> joined;
+      for (std::size_t i = 0; i + 5 < red.size(); i += 6)
+        joined.insert(joined.end(), {red[i], red[i + 1], red[i + 2]});
+      const std::size_t pos_floats = joined.size();
+      for (std::size_t i = 0; i + 5 < red.size(); i += 6)
+        joined.insert(joined.end(), {red[i + 3], red[i + 4], red[i + 5]});
+      VsharpScene p;
+      p.pos_stride = 0; p.col_stride = 0;   // packed: stride_words = components
+      p.pos_base = 0x400000; p.col_base = 0x400000 + pos_floats * 4;
+      p.build(joined, 4);
+      auto rp = p.run(vk);
+      check(rp.ok, std::string("fetch: packed separate buffers draw ok") + (rp.ok ? "" : (" - " + rp.error)));
+      if (rp.ok && rr.ok) {
+        std::uint32_t diff = 0;
+        for (std::size_t i = 0; i < rp.rgba.size(); ++i) if (rp.rgba[i] != rr.rgba[i]) ++diff;
+        check(diff == 0, "fetch: packed-buffer pixels identical to reference");
+      }
+    }
+    // Format32_32_32_32 position (w present, ignored) at a wider stride.
+    {
+      std::vector<float> wide;
+      for (std::size_t i = 0; i + 5 < red.size(); i += 6)
+        wide.insert(wide.end(), {red[i], red[i + 1], red[i + 2], 1.0f, red[i + 3], red[i + 4], red[i + 5]});
+      VsharpScene w4;
+      w4.pos_fmt = 14; w4.pos_stride = 28; w4.col_stride = 28; w4.col_base = 0x400000 + 16;
+      w4.vcount = 6;
+      w4.build(wide, 4);
+      auto rw = w4.run(vk);
+      check(rw.ok, std::string("fetch: xyzw position draw ok") + (rw.ok ? "" : (" - " + rw.error)));
+      if (rw.ok && rr.ok) {
+        std::uint32_t diff = 0;
+        for (std::size_t i = 0; i < rw.rgba.size(); ++i) if (rw.rgba[i] != rr.rgba[i]) ++diff;
+        check(diff == 0, "fetch: xyzw-position pixels identical to reference");
+      }
+    }
+    // Refusals.
+    { VsharpScene b1; b1.pos_w3 = VsharpScene::vsel(13) | (1u << 23); b1.build(red, 4);
+      auto r1 = b1.run(vk);
+      check(!r1.ok && r1.error.find("add_tid") != std::string::npos, "fetch: add_tid_enable refused"); }
+    { VsharpScene b2; b2.pos_w3 = 0x688u | (0u << 12) | (13u << 15); b2.build(red, 4);  // unorm
+      auto r2 = b2.run(vk);
+      check(!r2.ok && r2.error.find("number format is not float") != std::string::npos, "fetch: unorm vertex data refused"); }
+    { VsharpScene b3; b3.pos_w3 = VsharpScene::vsel(10); b3.build(red, 4);   // 8_8_8_8
+      auto r3 = b3.run(vk);
+      check(!r3.ok && r3.error.find("data format is not a supported") != std::string::npos, "fetch: packed 8-bit format refused"); }
+    { VsharpScene b4; b4.num_records = 3; b4.build(red, 4);                  // red quad has 6 vertices
+      auto r4 = b4.run(vk);
+      check(!r4.ok && r4.error.find("num_records") != std::string::npos, "fetch: short buffer refused"); }
+    { VsharpScene b5; b5.pos_w3 = (0x688u ^ 7u) | (7u << 12) | (13u << 15); b5.build(red, 4);  // dst_sel x = 7
+      auto r5 = b5.run(vk);
+      check(!r5.ok && r5.error.find("swizzle") != std::string::npos, "fetch: non-identity dst_sel refused"); }
+    // Batched: 66 vertices (22 triangles) crosses two 64-lane fetch dispatches.
+    {
+      std::vector<float> fan;
+      for (int k = 0; k < 22; ++k) {
+        const float x = -0.9f + 0.08f * float(k);
+        fan.insert(fan.end(), {x, -0.5f, 0.5f, 0, 1, 0, x + 0.06f, -0.5f, 0.5f, 0, 1, 0, x + 0.03f, 0.5f, 0.5f, 0, 1, 0});
+      }
+      VsharpScene s66; s66.build(fan, 4);
+      auto r66 = s66.run(vk);
+      check(r66.ok, "fetch: 66-vertex batched draw ok");
+      if (r66.ok) {
+        std::uint32_t green = 0;
+        for (std::size_t i = 0; i + 3 < r66.rgba.size(); i += 4)
+          if (r66.rgba[i + 1] == 255 && r66.rgba[i] == 0) ++green;
+        check(green > 500, "fetch: batched draw covers the screen");
+      }
+    }
+  }
   }
 }
