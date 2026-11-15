@@ -84,6 +84,11 @@ struct MeshInput {
   const TexInput* tex = nullptr;  // sampled at set 0 binding 0 (fragment stage)
   FrameSurface* shared_frame = nullptr;  // slice S13: persistent targets; null = per-draw
   bool depth_write = true;               // DB_DEPTH_CONTROL depth_write_enable
+  // Slice S26 (DB_DEPTH_CONTROL func, bits 4..6): VK_COMPARE_OP_* value. The
+  // AMD CompareFunc encoding 0..7 (never/less/equal/lequal/greater/notequal/
+  // gequal/always) matches the VkCompareOp values exactly (values only, from
+  // public shadPS4 regs_depth.h CompareFunc), so callers pass the field raw.
+  int32_t depth_compare = VK_COMPARE_OP_LESS;
   const BlendState* blend = nullptr;     // slice S14: target 0 blend state; null = no blending
   // Slice S18 (PA_SU_SC_MODE_CNTL): VK_CULL_MODE_* / VK_FRONT_FACE_* values;
   // the NONE/CCW defaults keep the pre-S18 behaviour (no culling).
@@ -185,7 +190,8 @@ public:
                                bool depth_write = true,
                                const BlendState* blend = nullptr,
                                int32_t cull_mode = VK_CULL_MODE_NONE,
-                               int32_t front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE);
+                               int32_t front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+                               int32_t depth_compare = VK_COMPARE_OP_LESS);
 
   // Destroys a FrameSurface's Vulkan objects and zeroes it (slice S13).
   void destroy_frame(FrameSurface& s);
@@ -224,7 +230,8 @@ public:
                                         bool depth_write = true,
                                         const BlendState* blend = nullptr,
                                         int32_t cull_mode = VK_CULL_MODE_NONE,
-                                        int32_t front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE);
+                                        int32_t front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+                                        int32_t depth_compare = VK_COMPARE_OP_LESS);
 
   // Textured variant: float3 position + float3 colour (tint) + float2 uv (8
   // floats), push constants 1..32 words per frame (vertex stage). The fragment
