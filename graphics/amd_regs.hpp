@@ -42,7 +42,15 @@ constexpr std::uint32_t PA_SC_SCREEN_SCISSOR_TL = ctx(0x000c), PA_SC_SCREEN_SCIS
 // (GFX6_3D_REG_INDEX(depth_control) == 0xA200; values only, no code). Field
 // layout (bit 0 stencil enable, bit 1 depth enable, bit 2 depth write
 // enable, bits 4..6 compare func): public shadPS4 regs_depth.h DepthControl.
-                        DB_DEPTH_CONTROL = ctx(0x0200);
+                        DB_DEPTH_CONTROL = ctx(0x0200),
+// Depth buffer binding (slice S13). Addresses (regs.cpp: depth_buffer.z_info
+// == 0xA010 .. depth_slice == 0xA017) and field layout (regs_depth.h
+// DepthBuffer: ZInfo format bits 0..1 [1=Z16, 3=Z32 float], tile surface
+// enable bit 28; DepthSize pitch_tile_max bits 0..10, height_tile_max bits
+// 11..21, pitch/height = (max+1)<<3; bases << 8): public shadPS4, values only.
+                        DB_Z_INFO = ctx(0x0010), DB_STENCIL_INFO = ctx(0x0011),
+                        DB_Z_READ_BASE = ctx(0x0012), DB_Z_WRITE_BASE = ctx(0x0014),
+                        DB_DEPTH_SIZE = ctx(0x0016);
 // UCONFIG (BASE_IDX 1, inside the 0xc000 window).
 constexpr std::uint32_t VGT_PRIMITIVE_TYPE = ctx(0x2242), VGT_INDEX_TYPE = ctx(0x2243), VGT_NUM_INSTANCES = ctx(0x224d);
 
