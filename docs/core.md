@@ -437,6 +437,33 @@ makes the load fail with a message naming it, and nothing runs.
   with nonzero endpoints, independent BC5 channels, and end-to-end draws byte-exact
   (BC2 alpha ramp in the target, BC4 red-only, BC5 two-channel).
 
+## Slice S22 notes (PS5 thin texture tiling)
+- The T# tiling index switches to the PS5-native SW_MODE vocabulary, resolved like
+  AnyPS5's resolveTileMode: 0 linear; 1/2 = 256B S/D; 5/6 = 4KB S/D; 9/10 = 64KB
+  S/D; 17/18 = 64KB S/D "T"; 21/22 = 4KB S/D XOR; 24..27 = 64KB Z/S/D/R XOR. The
+  GCN (PS4) index encodings 8/31 that S17 used for linear are refused with a named
+  reason, as are unknown modes; pitch rules stay linear-only.
+- graphics/gfx_swizzle.hpp is a port of AnyPS5's thin-tiling path (GPL, owner grant,
+  attribution header): the 80-entry swizzle equation table (AMD addrlib GFX10
+  pattern data), tile-block geometry per mode and element size, the mip-chain layout
+  with tail packing (tail block first, then levels smallest to largest through the
+  tail tables), element offsets, and a CPU detiler. XOR modes take a pipe/bank XOR
+  from the guest base's low bits (4KB modes: base & 0xFFF; 64KB modes: base & 0xFFFF)
+  and the base is normalized down before the read.
+- The draw repack (gfx_draw.cpp) reads the whole guest surface once, detiles each
+  level into a linear staging buffer at the hardware layout pitch, then runs the
+  common repack: RGBA8 rows copy at the level pitch, BC levels decode through the
+  S20/S21 path. Sampler filters, mips and addressing apply unchanged.
+- Tests (30 in gfx_swizzle_tests + 6 new/changed in gfx_draw_tests + tiling value
+  updates in gfx_tsharp_tests): mode vocabulary, block extents, all nine AnyPS5
+  addrlib-validated known-answer vector sets (256B D, 4KB D, 64KB S/D/T, 4KB S/D
+  XOR, 64KB Z XOR 8/16-bit) byte-exact at z=0, a byte-exact 64KB D chain detile,
+  pipe/bank XOR rotation; end-to-end SW_64KB_S and SW_64KB_S_X checkerboards and a
+  SW_64KB_D BC1 solid draw byte-exact, tail-packed chains pick levels 1 and 2
+  exactly, GCN 8/31 and unknown modes refused with named reasons.
+- Limits: thin (2D, single-slice) modes only - no thick/3D modes, arrays or depth
+  sampling; sampling is still not translated RDNA; hardware GPU untested.
+
 ## Slice S16 notes (8_8_8_8 unorm vertex colours)
 - The S15 fetch kernels gain a conversion path for data format 10 (8_8_8_8) with unorm
   numerics: all four components share the record's first dword, so the component dword
