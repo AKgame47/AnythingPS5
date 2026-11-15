@@ -1,9 +1,11 @@
-// PNR Graphics - BC1/BC3 (DXT1/DXT5) block decode to RGBA8, GPL-2.0.
+// PNR Graphics - BC1/BC2/BC3/BC4/BC5 (DXT1/DXT3/DXT5/LATC1/LATC2) block
+// decode to RGBA8, GPL-2.0.
 // Experimental. The block bit layout is the public S3TC/DXT specification
 // (two little-endian RGB565 endpoints + 2-bit indices for BC1; an 8-byte
-// alpha block of two endpoints + 3-bit indices for BC3). The T# data format
-// values (Bc1 = 35, Bc3 = 37) follow public shadPS4
-// src/video_core/amdgpu/pixel_format.h (DataFormat) - values only, no code.
+// alpha block of two endpoints + 3-bit indices for BC3/BC4/BC5; explicit
+// 4-bit alphas for BC2). The T# data format values (Bc1 = 35 .. Bc5 = 39)
+// follow public shadPS4 src/video_core/amdgpu/pixel_format.h (DataFormat) -
+// values only, no code.
 // Decode is exact integer arithmetic: no floating point, no rounding modes.
 #pragma once
 #include <cstdint>
@@ -11,7 +13,10 @@
 namespace pnr::graphics {
 
 inline constexpr std::uint32_t kFormatBc1 = 35;
+inline constexpr std::uint32_t kFormatBc2 = 36;
 inline constexpr std::uint32_t kFormatBc3 = 37;
+inline constexpr std::uint32_t kFormatBc4 = 38;
+inline constexpr std::uint32_t kFormatBc5 = 39;
 
 // Expand one RGB565 endpoint to 8-bit channels (bit replication).
 inline void rgb565_to_rgb8(std::uint16_t c, std::uint8_t* rgb) {
@@ -89,20 +94,58 @@ inline void decode_bc3_block(const std::uint8_t* block, std::uint8_t* out) {
   for (int i = 0; i < 16; ++i) out[i * 4 + 3] = a[i];
 }
 
+// Decode one 16-byte BC2 block: explicit 4-bit alphas (scaled by 17), then
+// a BC1-style colour block that always uses the 4-colour ramp.
+inline void decode_bc2_block(const std::uint8_t* block, std::uint8_t* out) {
+  decode_bc1_colour(block + 8, true, out);
+  for (int i = 0; i < 16; ++i) {
+    const std::uint32_t v = (block[i / 2] >> (4 * (i & 1))) & 0xF;
+    out[i * 4 + 3] = std::uint8_t(v * 17);
+  }
+}
+
+// Decode one 8-byte BC4 block (same layout as the BC3 alpha block) into 16
+// single-channel values.
+inline void decode_bc4_values(const std::uint8_t* block, std::uint8_t* v) {
+  decode_bc3_alpha(block, v);
+}
+
+// Decode one 8-byte BC4 block into RGBA8 (r = value, g = b = 0, a = 255).
+inline void decode_bc4_block(const std::uint8_t* block, std::uint8_t* out) {
+  std::uint8_t v[16];
+  decode_bc4_values(block, v);
+  for (int i = 0; i < 16; ++i) {
+    out[i * 4 + 0] = v[i]; out[i * 4 + 1] = 0; out[i * 4 + 2] = 0; out[i * 4 + 3] = 255;
+  }
+}
+
+// Decode one 16-byte BC5 block (two BC4 blocks: red then green).
+inline void decode_bc5_block(const std::uint8_t* block, std::uint8_t* out) {
+  std::uint8_t r[16], g[16];
+  decode_bc4_values(block, r);
+  decode_bc4_values(block + 8, g);
+  for (int i = 0; i < 16; ++i) {
+    out[i * 4 + 0] = r[i]; out[i * 4 + 1] = g[i]; out[i * 4 + 2] = 0; out[i * 4 + 3] = 255;
+  }
+}
+
 // Decode one level of tightly packed blocks into tight RGBA8 rows.
 // w/h in pixels; blocks cover ceil(w/4) x ceil(h/4), edge pixels outside
 // w/h are dropped. src_pitch_bytes = bytes per block row in the source.
 inline void decode_bc_level(std::uint32_t data_format, const std::uint8_t* src,
                             std::uint64_t src_pitch_bytes, std::uint32_t w, std::uint32_t h,
                             std::uint8_t* dst) {
-  const std::uint32_t bb = data_format == kFormatBc1 ? 8 : 16;
+  const std::uint32_t bb = data_format == kFormatBc1 || data_format == kFormatBc4 ? 8 : 16;
   const std::uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
   std::uint8_t block_px[64];
   for (std::uint32_t by = 0; by < bh; ++by)
     for (std::uint32_t bx = 0; bx < bw; ++bx) {
       const std::uint8_t* blk = src + std::uint64_t(by) * src_pitch_bytes + std::uint64_t(bx) * bb;
       if (data_format == kFormatBc1) decode_bc1_block(blk, block_px);
-      else decode_bc3_block(blk, block_px);
+      else if (data_format == kFormatBc2) decode_bc2_block(blk, block_px);
+      else if (data_format == kFormatBc3) decode_bc3_block(blk, block_px);
+      else if (data_format == kFormatBc4) decode_bc4_block(blk, block_px);
+      else decode_bc5_block(blk, block_px);
       for (std::uint32_t py = 0; py < 4 && by * 4 + py < h; ++py)
         for (std::uint32_t px = 0; px < 4 && bx * 4 + px < w; ++px) {
           const std::uint8_t* s = &block_px[(py * 4 + px) * 4];
