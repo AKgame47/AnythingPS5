@@ -260,6 +260,19 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       nodes.push_back({op,a->node,b->node});
       regs[i.dst.reg]=Reg{uint32_t(nodes.size()-1),{}};
       floating=true;
+    } else if (i.family == RdnaFamily::VOP3 && i.opcode_id == 0x14b) {
+      // v_fma_f32 restricted subset (RDNA2 ISA VOP3A opcode 331): vector
+      // destination, no ABS/OPSEL/CLMP (raw0[15:8]) and no OMOD/NEG
+      // (raw1[31:29,28:27]). Fused single-rounding binary32, matching RDNA
+      // semantics more closely than mul+add; still host Vulkan FP policy.
+      if (i.dst.kind != RdnaOperandKind::VectorReg || (i.raw0 & 0xff00u) ||
+          (i.raw1 & 0xf8000000u))
+        return fail("unsupported v_fma_f32 modifiers/destination" + at);
+      auto a = source(i.src0), b = source(i.src1), c = source(i.src2);
+      if (!a || !b || !c) return fail("undefined/unsupported fma source" + at);
+      nodes.push_back({U32Op::FFma, a->node, b->node, c->node});
+      regs[i.dst.reg] = Reg{uint32_t(nodes.size()-1), {}};
+      floating = true;
     } else if (i.family == RdnaFamily::VOP2 &&
                (i.opcode_id == 0x25 || i.opcode_id == 0x26 ||
                 i.opcode_id == 0x1b || i.opcode_id == 0x1c || i.opcode_id == 0x1d)) {
