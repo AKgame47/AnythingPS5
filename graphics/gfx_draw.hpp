@@ -61,10 +61,12 @@ struct DrawResult {
   std::vector<std::uint8_t> rgba;  // width*height*4, top row first
 };
 
-// One triangle-list draw: DRAW_INDEX_AUTO, or DRAW_INDEX_INDX with a 16/32-bit index buffer in
-// guest memory (slice S7). PVS1/PVS2 blobs are built for one specific vertex count (at most 64,
-// one dispatch); a PVS3 blob batches any count up to kDrawMaxVertices (slice S9). Other
-// primitives, instancing beyond 1 and 8-bit indices are refused.
+// One draw: DRAW_INDEX_AUTO, or DRAW_INDEX_INDX with a 16/32-bit index buffer in guest memory
+// (slice S7); triangle lists, strips and fans (strips/fans expand to a list on the host,
+// slice S10). PVS1/PVS2 blobs are built for one specific vertex count (at most 64, one
+// dispatch); a PVS3 blob batches any count up to kDrawMaxVertices (slice S9). Other
+// primitives and instancing beyond 1 are refused. (GNM has no 8-bit index type; nothing
+// is emulated for one.)
 DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::DrawCall& draw);
 
 }  // namespace pnr::graphics
