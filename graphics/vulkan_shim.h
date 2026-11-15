@@ -47,6 +47,8 @@ typedef uint64_t VkImage;
 typedef uint64_t VkImageView;
 typedef uint64_t VkRenderPass;
 typedef uint64_t VkFramebuffer;
+typedef uint64_t VkSurfaceKHR;
+typedef uint64_t VkSwapchainKHR;
 
 enum : VkResult { VK_SUCCESS = 0 };
 enum : VkStructureType {
@@ -84,6 +86,9 @@ enum : VkStructureType {
   VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO = 39,
   VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO = 40,
   VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO = 42,
+  VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO = 9,
+  VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR = 1000001000,
+  VK_STRUCTURE_TYPE_PRESENT_INFO_KHR = 1000001001,
 };
 enum : VkFlags {
   VK_QUEUE_GRAPHICS_BIT = 0x1,
@@ -120,8 +125,17 @@ enum : VkFlags {
   VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT = 0x1,
   VK_FENCE_CREATE_SIGNALED_BIT = 0x1,
 };
+enum : VkResult {
+  VK_SUBOPTIMAL_KHR = 1000001003,
+  VK_ERROR_OUT_OF_DATE_KHR = -1000001004,
+};
 enum : int32_t {
   VK_PHYSICAL_DEVICE_TYPE_CPU = 4,
+  VK_PRESENT_MODE_FIFO_KHR = 1,
+  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR = 1000001002,
+  VK_FORMAT_B8G8R8A8_UNORM = 44,
+  VK_COLOR_SPACE_SRGB_NONLINEAR_KHR = 0,
+  VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR = 1,
   VK_DESCRIPTOR_TYPE_STORAGE_BUFFER = 7,
   VK_PIPELINE_BIND_POINT_COMPUTE = 1,
   VK_COMMAND_BUFFER_LEVEL_PRIMARY = 0,
@@ -428,6 +442,33 @@ typedef struct VkBufferImageCopy {
   VkImageSubresourceLayers imageSubresource; VkOffset3D imageOffset;
   VkExtent3D imageExtent;
 } VkBufferImageCopy;
+typedef struct VkSemaphoreCreateInfo {
+  VkStructureType sType; const void* pNext; VkFlags flags;
+} VkSemaphoreCreateInfo;
+typedef struct VkSurfaceCapabilitiesKHR {
+  uint32_t minImageCount, maxImageCount; VkExtent2D currentExtent;
+  VkExtent2D minImageExtent, maxImageExtent; uint32_t maxImageArrayLayers;
+  VkFlags supportedTransforms, currentTransform, supportedCompositeAlpha,
+          supportedUsageFlags;
+} VkSurfaceCapabilitiesKHR;
+typedef struct VkSurfaceFormatKHR {
+  int32_t format; int32_t colorSpace;
+} VkSurfaceFormatKHR;
+typedef struct VkSwapchainCreateInfoKHR {
+  VkStructureType sType; const void* pNext; VkFlags flags;
+  VkSurfaceKHR surface; uint32_t minImageCount; int32_t imageFormat;
+  int32_t imageColorSpace; VkExtent2D imageExtent; uint32_t imageArrayLayers;
+  VkFlags imageUsage; int32_t imageSharingMode; uint32_t queueFamilyIndexCount;
+  const uint32_t* pQueueFamilyIndices; uint32_t preTransform;
+  uint32_t compositeAlpha; int32_t presentMode; VkBool32 clipped;
+  VkSwapchainKHR oldSwapchain;
+} VkSwapchainCreateInfoKHR;
+typedef struct VkPresentInfoKHR {
+  VkStructureType sType; const void* pNext; uint32_t waitSemaphoreCount;
+  const VkSemaphore* pWaitSemaphores; uint32_t swapchainCount;
+  const VkSwapchainKHR* pSwapchains; const uint32_t* pImageIndices;
+  VkResult* pResults;
+} VkPresentInfoKHR;
 
 }  // extern "C"
 #endif  // PNR_USE_SYSTEM_VULKAN
