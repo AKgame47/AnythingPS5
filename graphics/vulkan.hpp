@@ -74,6 +74,10 @@ struct MeshInput {
   FrameSurface* shared_frame = nullptr;  // slice S13: persistent targets; null = per-draw
   bool depth_write = true;               // DB_DEPTH_CONTROL depth_write_enable
   const BlendState* blend = nullptr;     // slice S14: target 0 blend state; null = no blending
+  // Slice S18 (PA_SU_SC_MODE_CNTL): VK_CULL_MODE_* / VK_FRONT_FACE_* values;
+  // the NONE/CCW defaults keep the pre-S18 behaviour (no culling).
+  int32_t cull_mode = VK_CULL_MODE_NONE;
+  int32_t front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 };
 
 class VulkanBackend {
@@ -168,7 +172,9 @@ public:
                                const float clear[4], std::vector<uint8_t>* image,
                                FrameSurface* shared_frame = nullptr,
                                bool depth_write = true,
-                               const BlendState* blend = nullptr);
+                               const BlendState* blend = nullptr,
+                               int32_t cull_mode = VK_CULL_MODE_NONE,
+                               int32_t front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE);
 
   // Destroys a FrameSurface's Vulkan objects and zeroes it (slice S13).
   void destroy_frame(FrameSurface& s);
@@ -205,7 +211,9 @@ public:
                                         const float clear[4], std::vector<uint8_t>* image,
                                         FrameSurface* shared_frame = nullptr,
                                         bool depth_write = true,
-                                        const BlendState* blend = nullptr);
+                                        const BlendState* blend = nullptr,
+                                        int32_t cull_mode = VK_CULL_MODE_NONE,
+                                        int32_t front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE);
 
   // Textured variant: float3 position + float3 colour (tint) + float2 uv (8
   // floats), push constants 1..32 words per frame (vertex stage). The fragment
