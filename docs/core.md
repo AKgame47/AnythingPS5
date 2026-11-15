@@ -468,6 +468,30 @@ makes the load fail with a message naming it, and nothing runs.
 - Limits: thin (2D, single-slice) modes only - no thick/3D modes, arrays or depth
   sampling; sampling is still not translated RDNA; hardware GPU untested.
 
+## Slice S28 notes (cubemaps)
+- Cube T# images (type 11, value from public shadPS4 resource.h ImageType)
+  are accepted: a single cubemap = exactly 6 faces, square extent, linear
+  tiling, base face 0; tiled cubes, cube arrays, non-square extents and a
+  non-zero base face are refused with named reasons. The bounds check covers
+  all 6 faces of every mip level.
+- Faces are laid out exactly like S27 array slices (level-major, 6 per
+  level; order +X -X +Y -Y +Z -Z, the Vulkan layer order), so the repack
+  and upload path are the S27 one with nslices = 6.
+- A PPS2 blob version word of 2 ({magic, 2}) marks a cubemap draw: the T#
+  must be type 11 and the 9-float vertex record carries the sampling
+  direction (xyz rgb dir3). Blob/T# type mismatches are refused.
+- Host side: TexInput.cube, VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT on the
+  image, a CUBE view; new texcube.frag (samplerCube) with the S27
+  cliptex3.vert. Also fixes the S27 view-type enum: VK_IMAGE_VIEW_TYPE_2D_ARRAY
+  is 5 and CUBE is 3 (S27 shipped 2 and 8, which lavapipe tolerated; the
+  S27 array tests still pass byte-exact with the corrected values).
+- Tests (gfx_tsharp_tests + gfx_draw_tests): validation (6-face accept,
+  bounds across faces, face-count/non-square/tiled/base-face refusals);
+  end to end byte-exact draws - all six faces by direction, mip level 1 of
+  a cube, three blob/type mismatch refusals and a tiled-cube refusal.
+- Limits: single cube only (no cube arrays), linear tiling, square faces,
+  no cube RDNA sampling translation (host rasterizer), hardware GPU untested.
+
 ## Slice S27 notes (2D texture arrays)
 - Color2DArray T# images (type 13, value from public shadPS4 resource.h
   ImageType) are accepted: linear tiling only, base_array 0, up to 256
