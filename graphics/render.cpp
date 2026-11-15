@@ -49,7 +49,7 @@ Status VulkanBackend::render_clip_mesh_rgba(
     uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
     const std::vector<uint32_t>& fs, const std::vector<float>& vertices,
     const std::vector<uint32_t>& indices, bool depth, const float clear[4],
-    std::vector<uint8_t>* image) {
+    std::vector<uint8_t>* image, FrameSurface* shared_frame, bool depth_write) {
   if (!image) return Status::Fail(100, "vulkan", "clip mesh render needs an output image");
   if (vertices.empty() || vertices.size() % 7 || vertices.size() / 7 > 65536)
     return Status::Fail(100, "vulkan", "clip mesh vertices must be float4 clip position + float3 colour (multiple of 7 floats, max 65536 vertices)");
@@ -60,6 +60,7 @@ Status VulkanBackend::render_clip_mesh_rgba(
       return Status::Fail(100, "vulkan", "mesh index out of range of the vertex array");
   MeshInput m;
   m.vertices = &vertices; m.pos_floats = 4; m.indices = &indices; m.depth = depth;
+  m.shared_frame = shared_frame; m.depth_write = depth_write;
   std::vector<std::vector<uint8_t>> frames;
   auto st = render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, nullptr, clear, &frames);
   if (!st) return st;
@@ -189,6 +190,110 @@ Status VulkanBackend::render_mesh_frames_rgba(
   return render_core(w, h, vs, fs, (uint32_t)indices.size(), &m, &fp, clear, frames);
 }
 
+void VulkanBackend::destroy_frame(FrameSurface& s) {
+  if (device_) {
+    if (s.color_view != 0)
+      fn<void (*)(VkDevice, VkImageView, void*)>(vkDestroyImageView)(device_, s.color_view, nullptr);
+    if (s.color_image != 0)
+      fn<void (*)(VkDevice, VkImage, void*)>(vkDestroyImage)(device_, s.color_image, nullptr);
+    if (s.color_memory != 0)
+      fn<void (*)(VkDevice, VkDeviceMemory, void*)>(vkFreeMemory)(device_, s.color_memory, nullptr);
+    if (s.depth_view != 0)
+      fn<void (*)(VkDevice, VkImageView, void*)>(vkDestroyImageView)(device_, s.depth_view, nullptr);
+    if (s.depth_image != 0)
+      fn<void (*)(VkDevice, VkImage, void*)>(vkDestroyImage)(device_, s.depth_image, nullptr);
+    if (s.depth_memory != 0)
+      fn<void (*)(VkDevice, VkDeviceMemory, void*)>(vkFreeMemory)(device_, s.depth_memory, nullptr);
+  }
+  s = FrameSurface{};
+}
+
+// Creates the colour (+ optional D32 depth) targets of a shared frame.
+// Cleans up the whole frame on any failure.
+Status VulkanBackend::create_frame_targets(uint32_t w, uint32_t h, bool with_depth, FrameSurface& s) {
+  VkPhysicalDeviceMemoryProperties mem{};
+  fn<void (*)(VkPhysicalDevice, VkPhysicalDeviceMemoryProperties*)>(
+      vkGetPhysicalDeviceMemoryProperties)(phys_, &mem);
+  auto pick = [&](uint32_t bits, VkFlags want) -> int {
+    for (uint32_t i = 0; i < mem.memoryTypeCount; ++i)
+      if ((bits & (1u << i)) && (mem.memoryTypes[i].propertyFlags & want) == want)
+        return (int)i;
+    return -1;
+  };
+  auto fail = [&](const char* what, VkResult r) -> Status {
+    destroy_frame(s);
+    return vkfail(what, r);
+  };
+  VkImageCreateInfo ici{};
+  ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+  ici.imageType = VK_IMAGE_TYPE_2D;
+  ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ici.extent = {w, h, 1};
+  ici.mipLevels = 1; ici.arrayLayers = 1;
+  ici.samples = VK_SAMPLE_COUNT_1_BIT;
+  ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+  ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkResult r = fn<VkResult (*)(VkDevice, const VkImageCreateInfo*, void*, VkImage*)>(
+      vkCreateImage)(device_, &ici, nullptr, &s.color_image);
+  if (r != VK_SUCCESS) return fail("vkCreateImage (shared colour)", r);
+  VkMemoryRequirements req{};
+  fn<void (*)(VkDevice, VkImage, VkMemoryRequirements*)>(vkGetImageMemoryRequirements)(device_, s.color_image, &req);
+  int t = pick(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  if (t < 0) t = pick(req.memoryTypeBits, 0);
+  if (t < 0) { destroy_frame(s); return Status::Fail(100, "vulkan", "no memory type for the shared colour image"); }
+  VkMemoryAllocateInfo mai{};
+  mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  mai.allocationSize = req.size; mai.memoryTypeIndex = (uint32_t)t;
+  r = fn<VkResult (*)(VkDevice, const VkMemoryAllocateInfo*, void*, VkDeviceMemory*)>(
+      vkAllocateMemory)(device_, &mai, nullptr, &s.color_memory);
+  if (r != VK_SUCCESS) return fail("vkAllocateMemory (shared colour)", r);
+  r = fn<VkResult (*)(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize)>(vkBindImageMemory)(
+      device_, s.color_image, s.color_memory, 0);
+  if (r != VK_SUCCESS) return fail("vkBindImageMemory (shared colour)", r);
+  VkImageViewCreateInfo vci{};
+  vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  vci.image = s.color_image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+  vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  r = fn<VkResult (*)(VkDevice, const VkImageViewCreateInfo*, void*, VkImageView*)>(
+      vkCreateImageView)(device_, &vci, nullptr, &s.color_view);
+  if (r != VK_SUCCESS) return fail("vkCreateImageView (shared colour)", r);
+  if (with_depth) {
+    VkFormatProperties fprops{};
+    fn<void (*)(VkPhysicalDevice, int32_t, VkFormatProperties*)>(vkGetPhysicalDeviceFormatProperties)(
+        phys_, (int32_t)VK_FORMAT_D32_SFLOAT, &fprops);
+    if (!(fprops.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+      destroy_frame(s);
+      return Status::Fail(100, "vulkan", "D32_SFLOAT depth attachment unsupported on this device; depth rendering Blocked");
+    }
+    ici.format = VK_FORMAT_D32_SFLOAT;
+    ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    r = fn<VkResult (*)(VkDevice, const VkImageCreateInfo*, void*, VkImage*)>(
+        vkCreateImage)(device_, &ici, nullptr, &s.depth_image);
+    if (r != VK_SUCCESS) return fail("vkCreateImage (shared depth)", r);
+    fn<void (*)(VkDevice, VkImage, VkMemoryRequirements*)>(vkGetImageMemoryRequirements)(device_, s.depth_image, &req);
+    t = pick(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (t < 0) t = pick(req.memoryTypeBits, 0);
+    if (t < 0) { destroy_frame(s); return Status::Fail(100, "vulkan", "no memory type for the shared depth image"); }
+    mai.allocationSize = req.size; mai.memoryTypeIndex = (uint32_t)t;
+    r = fn<VkResult (*)(VkDevice, const VkMemoryAllocateInfo*, void*, VkDeviceMemory*)>(
+        vkAllocateMemory)(device_, &mai, nullptr, &s.depth_memory);
+    if (r != VK_SUCCESS) return fail("vkAllocateMemory (shared depth)", r);
+    r = fn<VkResult (*)(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize)>(vkBindImageMemory)(
+        device_, s.depth_image, s.depth_memory, 0);
+    if (r != VK_SUCCESS) return fail("vkBindImageMemory (shared depth)", r);
+    vci.image = s.depth_image; vci.format = VK_FORMAT_D32_SFLOAT;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    r = fn<VkResult (*)(VkDevice, const VkImageViewCreateInfo*, void*, VkImageView*)>(
+        vkCreateImageView)(device_, &vci, nullptr, &s.depth_view);
+    if (r != VK_SUCCESS) return fail("vkCreateImageView (shared depth)", r);
+  }
+  s.width = w; s.height = h;
+  return Status::Ok();
+}
+
 Status VulkanBackend::render_core(
     uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
     const std::vector<uint32_t>& fs, uint32_t vertex_count,
@@ -229,6 +334,26 @@ Status VulkanBackend::render_core(
     return -1;
   };
 
+  // --- frame-persistent targets (slice S13) ---
+  FrameSurface* shared = mesh ? mesh->shared_frame : nullptr;
+  if (shared && nframes != 1)
+    return Status::Fail(100, "vulkan", "a shared frame surface supports single-frame renders only");
+  if (shared && shared->color_image != 0 && (shared->width != w || shared->height != h))
+    destroy_frame(*shared);
+  bool made_frame = false;
+  if (shared) {
+    if (shared->color_image == 0) {
+      auto st = create_frame_targets(w, h, depth, *shared);
+      if (!st) return st;
+      made_frame = true;
+    } else if (depth && shared->depth_image == 0) {
+      return Status::Fail(100, "vulkan",
+                          "shared frame has no depth surface; bind the depth buffer before the frame's first draw");
+    }
+  }
+  const bool fresh_color = !shared || made_frame;
+  const bool fresh_depth = fresh_color;
+
   // --- colour image (device local if possible) ---
   VkImageCreateInfo ici{};
   ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -242,7 +367,15 @@ Status VulkanBackend::render_core(
   ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   VkImage image = 0;
-  VkResult r = fn<VkResult (*)(VkDevice, const VkImageCreateInfo*, void*, VkImage*)>(
+  VkDeviceMemory imem = 0;
+  VkImageView view = 0;
+  VkResult r = VK_SUCCESS;
+  VkMemoryAllocateInfo mai{};
+  VkImageViewCreateInfo vci{};
+  if (shared) {
+    image = shared->color_image; imem = shared->color_memory; view = shared->color_view;
+  } else {
+  r = fn<VkResult (*)(VkDevice, const VkImageCreateInfo*, void*, VkImage*)>(
       vkCreateImage)(device_, &ici, nullptr, &image);
   if (r != VK_SUCCESS) return vkfail("vkCreateImage (RGBA8 color attachment)", r);
   undo.push_back([&, image] { fn<void (*)(VkDevice, VkImage, void*)>(vkDestroyImage)(device_, image, nullptr); });
@@ -251,10 +384,8 @@ Status VulkanBackend::render_core(
   int it = pick(ireq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   if (it < 0) it = pick(ireq.memoryTypeBits, 0);
   if (it < 0) return Status::Fail(100, "vulkan", "no memory type for the render image");
-  VkMemoryAllocateInfo mai{};
   mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   mai.allocationSize = ireq.size; mai.memoryTypeIndex = (uint32_t)it;
-  VkDeviceMemory imem = 0;
   r = fn<VkResult (*)(VkDevice, const VkMemoryAllocateInfo*, void*, VkDeviceMemory*)>(
       vkAllocateMemory)(device_, &mai, nullptr, &imem);
   if (r != VK_SUCCESS) return vkfail("vkAllocateMemory (image)", r);
@@ -262,21 +393,22 @@ Status VulkanBackend::render_core(
   r = fn<VkResult (*)(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize)>(vkBindImageMemory)(device_, image, imem, 0);
   if (r != VK_SUCCESS) return vkfail("vkBindImageMemory", r);
 
-  VkImageViewCreateInfo vci{};
   vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
   vci.image = image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
   vci.format = VK_FORMAT_R8G8B8A8_UNORM;
   vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-  VkImageView view = 0;
   r = fn<VkResult (*)(VkDevice, const VkImageViewCreateInfo*, void*, VkImageView*)>(
       vkCreateImageView)(device_, &vci, nullptr, &view);
   if (r != VK_SUCCESS) return vkfail("vkCreateImageView", r);
   undo.push_back([&, view] { fn<void (*)(VkDevice, VkImageView, void*)>(vkDestroyImageView)(device_, view, nullptr); });
+  }
 
   // --- optional depth image (D32_SFLOAT) ---
   VkImageView dview = 0;
   VkImage dimage = 0;
-  if (depth) {
+  if (depth && shared) {
+    dimage = shared->depth_image; dview = shared->depth_view;
+  } else if (depth) {
     VkFormatProperties fprops{};
     fn<void (*)(VkPhysicalDevice, int32_t, VkFormatProperties*)>(vkGetPhysicalDeviceFormatProperties)(
         phys_, (int32_t)VK_FORMAT_D32_SFLOAT, &fprops);
@@ -470,10 +602,11 @@ Status VulkanBackend::render_core(
   // --- render pass: clear on load, store, end in TRANSFER_SRC ---
   VkAttachmentDescription att[2]{};
   att[0].format = VK_FORMAT_R8G8B8A8_UNORM; att[0].samples = VK_SAMPLE_COUNT_1_BIT;
-  att[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; att[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  att[0].loadOp = fresh_color ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+  att[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
   att[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
   att[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-  att[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  att[0].initialLayout = fresh_color ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   att[0].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
   VkSubpassDescription sub{};
@@ -481,10 +614,11 @@ Status VulkanBackend::render_core(
   VkAttachmentReference dref{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
   if (depth) {
     att[1].format = VK_FORMAT_D32_SFLOAT; att[1].samples = VK_SAMPLE_COUNT_1_BIT;
-    att[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; att[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att[1].loadOp = fresh_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+    att[1].storeOp = shared ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
     att[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     att[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    att[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    att[1].initialLayout = fresh_depth ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     att[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     sub.pDepthStencilAttachment = &dref;
   }
@@ -586,7 +720,8 @@ Status VulkanBackend::render_core(
   cb.attachmentCount = 1; cb.pAttachments = &cba;
   VkPipelineDepthStencilStateCreateInfo dss{};
   dss.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-  dss.depthTestEnable = 1; dss.depthWriteEnable = 1;
+  dss.depthTestEnable = 1;
+  dss.depthWriteEnable = (mesh && mesh->depth_write) ? 1 : 0;
   dss.depthCompareOp = VK_COMPARE_OP_LESS; dss.maxDepthBounds = 1.0f;
   VkGraphicsPipelineCreateInfo gpci{};
   gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
