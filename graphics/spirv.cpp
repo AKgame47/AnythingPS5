@@ -156,6 +156,22 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
     inst(m,spv::OpConstant,{6,loop_index,loop_count_uniform});
     inst(m,spv::OpConstant,{6,loop_max,64});
   }
+  // Fused multiply-add needs the GLSL.std.450 import (Fma = 50). The import
+  // belongs before OpMemoryModel in the logical layout; only emitted when an
+  // FFma node exists so other modules stay byte-identical.
+  uint32_t ext_id = 0;
+  for (const auto& n : nodes) if (n.op == U32Op::FFma) { ext_id = next++; break; }
+  if (ext_id) {
+    std::vector<uint32_t> imp;
+    imp.push_back(ext_id);
+    spirv_pack_string(imp, "GLSL.std.450");
+    size_t at = 5;
+    while (at < m.size() && (m[at] & 0xffffu) != 14u) at += m[at] >> 16u;
+    if (at >= m.size()) return {};
+    m.insert(m.begin() + at, imp.size() + 1, 0);
+    m[at] = (uint32_t(imp.size() + 1) << 16u) | 11; // OpExtInstImport
+    for (size_t j = 0; j < imp.size(); ++j) m[at + 1 + j] = imp[j];
+  }
   std::vector<uint32_t> no_contraction;
   std::vector<uint32_t> ids(nodes.size(), 0), indices(nodes.size(), 0);
   std::vector<std::array<uint32_t,5>> copy_constants(nodes.size());
@@ -381,6 +397,16 @@ std::vector<uint32_t> SpirvModule::compute_u32(const std::vector<U32Node>& nodes
     if (n.a >= i || !ids[n.a]) return {};
     if (n.op == U32Op::Store) { inst(m, spv::OpStore, {access, ids[n.a]}); continue; }
     if (n.b >= i || !ids[n.b]) return {};
+    if(n.op==U32Op::FFma) {
+      if (n.c >= i || !ids[n.c] || !ext_id) return {};
+      const uint32_t a=next++, b=next++, c=next++, result=next++;
+      inst(m,124,{26,a,ids[n.a]}); // raw bits -> f32
+      inst(m,124,{26,b,ids[n.b]});
+      inst(m,124,{26,c,ids[n.c]});
+      inst(m,12,{26,result,ext_id,50,a,b,c}); // OpExtInst GLSL.std.450 Fma
+      ids[i]=next++;inst(m,124,{6,ids[i],result});
+      continue;
+    }
     if(n.op==U32Op::FAdd || n.op==U32Op::FSub || n.op==U32Op::FMul) {
       const uint32_t a=next++, b=next++, result=next++;
       inst(m,124,{26,a,ids[n.a]}); // raw bits -> f32, not numeric conversion
