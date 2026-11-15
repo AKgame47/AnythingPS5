@@ -61,7 +61,17 @@ bool read_u64(const ShaderBinding& s, int slot, std::uint64_t* out) {
 }
 }  // namespace
 
+DrawFrameCache::~DrawFrameCache() {
+  if (vk && surface.color_image != 0) vk->destroy_frame(surface);
+}
+
 DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::DrawCall& draw) {
+  DrawFrameCache frame;  // empty: every draw starts a fresh frame (per-draw depth)
+  return execute_draw(vk, mem, draw, frame);
+}
+
+DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::DrawCall& draw,
+                        DrawFrameCache& frame) {
   DrawResult r;
   if (draw.kind != pm4::DrawKind::Auto && draw.kind != pm4::DrawKind::Indexed)
     return fail(r, "only DRAW_INDEX_AUTO and DRAW_INDEX_INDX are supported");
@@ -83,11 +93,33 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   // depth readback, and DB_DEPTH_CLEAR/compare selection beyond LESS are not
   // tracked yet (the host clears to 1.0).
   bool use_depth = false;
+  bool depth_write = true;
+  std::uint64_t z_base = 0;
   if (b.depth_control_set) {
     if (b.depth_control & 1) return fail(r, "stencil testing is not supported");
     if (b.depth_control & 2) {
       if (((b.depth_control >> 4) & 7) != 1) return fail(r, "only the LESS depth compare function is supported");
       use_depth = true;
+      depth_write = (b.depth_control & 4) != 0;
+    }
+  }
+  // Slice S13: a bound DB depth buffer (DB_Z_INFO + bases + size) turns the
+  // depth attachment into a frame-persistent surface shared with the colour
+  // target via the caller's DrawFrameCache. Only a linear Z32_FLOAT surface
+  // is supported; tiled/HTILE, Z16, stencil and separate read/write bases
+  // are refused. Without a valid binding the draw keeps the slice-S12
+  // per-draw depth surface. The surface clears when the binding or size
+  // changes; DB render-control clears and DB_DEPTH_CLEAR are not tracked.
+  if (use_depth && b.depth_buffer_set) {
+    const std::uint32_t zfmt = b.db_z_info & 3;
+    if (zfmt == 1) return fail(r, "16-bit depth surfaces are not supported (Z32 float only)");
+    if (zfmt == 2) return fail(r, "reserved depth buffer format");
+    if ((b.db_z_info >> 28) & 1) return fail(r, "tiled depth surfaces (HTILE) are not supported; linear only");
+    if (b.db_stencil_info & 1) return fail(r, "stencil testing is not supported");
+    if (zfmt == 3 && b.db_z_read_base != 0) {
+      if (depth_write && b.db_z_write_base != 0 && b.db_z_write_base != b.db_z_read_base)
+        return fail(r, "separate depth read/write bases are not supported");
+      z_base = b.db_z_read_base;
     }
   }
   // Slice S7: indexed draws fetch the index buffer from guest memory. The
@@ -297,7 +329,19 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (!indices.empty()) idx = indices;
   const float clear[4] = {0, 0, 0, 1};
   std::vector<std::uint32_t> vsp(std::begin(clip_vert), std::end(clip_vert)), fsp(std::begin(spin_frag), std::end(spin_frag));
-  auto st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, use_depth, clear, &r.rgba);
+  // Slice S13: hand the caller's frame cache to the renderer when a depth
+  // buffer is bound; a changed colour/depth binding or size restarts the
+  // frame (fresh clear). The colour target always comes from the cache so
+  // consecutive draws accumulate; depth joins the surface when bound.
+  const std::uint64_t color_base = b.color0.address;
+  const bool frame_changed = frame.color_base != color_base || frame.z_base != z_base ||
+                             frame.width != w || frame.height != h;
+  frame.vk = &vk;
+  frame.color_base = color_base; frame.z_base = z_base; frame.width = w; frame.height = h;
+  (void)frame_changed;  // the renderer restarts the frame on size change; binding change is below
+  if (frame.surface.color_image != 0 && frame_changed) vk.destroy_frame(frame.surface);
+  auto st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, use_depth, clear, &r.rgba,
+                                     &frame.surface, depth_write);
   if (!st) return fail(r, "Vulkan draw failed: " + st.error.message);
   r.notes = pvs4 ? "PVS4 blob: clip and Gouraud shade varyings are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices); the rasterizer interpolates the shade"
                  : pvs3 ? (with_post ? "PVS3 blob: clip and perspective divide are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices), w = 1 fed to the rasterizer"
@@ -309,7 +353,12 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (draw.kind == pm4::DrawKind::Indexed) r.notes += "; indexed draw: index buffer fetched from guest memory";
   if (tristrip) r.notes += "; triangle strip expanded to a list on the host (winding corrected)";
   if (trifan) r.notes += "; triangle fan expanded to a list on the host";
-  if (use_depth) r.notes += "; depth testing on (LESS, per-draw depth surface, no cross-draw depth or readback)";
+  if (use_depth && z_base)
+    r.notes += "; depth testing on (LESS, frame-persistent depth surface, no readback)";
+  else if (use_depth)
+    r.notes += "; depth testing on (LESS, per-draw depth surface, no cross-draw depth or readback)";
+  if (frame.surface.color_image != 0)
+    r.notes += "; shared frame targets (draws accumulate into the bound colour target)";
   const std::size_t bytes = std::size_t(w) * h * 4;
   if (std::uint8_t* dst = mem.resolve_mut(b.color0.address, bytes)) {
     std::memcpy(dst, r.rgba.data(), bytes);
