@@ -80,7 +80,7 @@ inline bool plain_format_info(std::uint32_t data_format, std::uint32_t num_forma
 // sRGB-encoded RGBA8, so the same image covers them.
 inline bool format_uses_srgb_image(std::uint32_t data_format, std::uint32_t num_format) {
   if (num_format != kNumSrgb) return false;
-  return data_format == 10 || (data_format >= 35 && data_format <= 37);
+  return data_format == 10 || (data_format >= 35 && data_format <= 37) || data_format == 41;
 }
 
 // Exact 16-bit unorm to 8-bit: round(v * 255 / 65535), integer only.
