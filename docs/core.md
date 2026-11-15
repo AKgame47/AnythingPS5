@@ -231,3 +231,20 @@ makes the load fail with a message naming it, and nothing runs.
   about 4% of the square area, and the three refusals above.
 - Not done: 8-bit indices, primitive restart, strips/fans, instancing beyond 1, indirect draws,
   vertex counts past 24, real GNM fetch shaders.
+
+## Slice S8 notes (translated pixel stage)
+- `graphics/rdna_pixel.hpp`: a "PPS1" pixel blob (magic 0x31535050, 4 kernels - one store per
+  kernel) computing a CONSTANT draw colour from pixel user data 0..7: base rgba, intensity,
+  ambient, clamp bounds; colour_c = clamp(base_c * (intensity + ambient), lo, hi) in translated
+  RDNA (v_add/v_mul/v_min/v_max). Status: Experimental, Tested. PNR TEST ABI: no interpolation,
+  no export targets, no parameter cache.
+- `execute_draw` translates and runs the blob when the pixel-stage address holds one (missing
+  pixel user data 0..7 is refused); the computed colour replaces the per-vertex colours for that
+  draw. Any other pixel-stage content keeps the fixed pass-through colour, and the result note
+  says which path ran.
+- Tests (gfx_draw_tests.cpp): the translated colour is bitwise equal to a CPU float reference
+  over 3 parameter sets (including a clamp case), a PPS1 draw is byte-identical (0 of 16384
+  bytes) to the same constant colour drawn per-vertex, the centre pixel is the translated colour,
+  and missing user data is refused.
+- Not done: varyings/interpolation from translated code, texture sampling, multiple render
+  targets, per-pixel execution (real PS waves), discard/depth export, hardware GPU verification.
