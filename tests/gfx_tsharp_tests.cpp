@@ -1,4 +1,4 @@
-// Slice S17 tests: T#/S# descriptor decode + validation. Pure host-side
+// Slice S19 tests: T#/S# descriptor decode + validation. Pure host-side
 // rules, no Vulkan device needed. Descriptor field layout values follow
 // public shadPS4 src/video_core/amdgpu/resource.h (values only).
 #include <cstdint>
@@ -61,8 +61,23 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   make_tsharp(w, 0x100000, 64, 32, 64, 31);
   w[3] = (w[3] & 0xFFF0FFFFu) | (1u << 16);  // last_level = 1, q1 bits 48-51
   decode_tsharp(w, &t);
-  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("mip") != std::string::npos,
-        "tsharp: mip chains are refused");
+  check(t.base_level == 0 && t.last_level == 1, "tsharp: mip chain fields decode");
+  check(validate_tsharp_sample(t, 0x2000000, &why),
+        "tsharp: a mip chain from level 0 validates (S19)");
+  w[3] = (w[3] & 0xFFF00FFFu) | (1u << 12) | (1u << 16);  // base_level = 1, last_level = 1
+  decode_tsharp(w, &t);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("base_level") != std::string::npos,
+        "tsharp: chains starting above level 0 are refused");
+  make_tsharp(w, 0x100000, 4, 4, 4, 31);
+  w[3] = (w[3] & 0xFFF0FFFFu) | (3u << 16);  // last_level = 3 on a 4x4 (only 3 levels exist)
+  decode_tsharp(w, &t);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("last_level") != std::string::npos,
+        "tsharp: last_level beyond the extent's levels is refused");
+  make_tsharp(w, 0x100000, 64, 32, 64, 31);
+  w[3] = (w[3] & 0xFFF0FFFFu) | (1u << 16);  // chain of 2 levels
+  decode_tsharp(w, &t);
+  check(!validate_tsharp_sample(t, 0x100000 + 64ull * 32 * 4 + 32ull * 16 * 4 - 1, &why) && why.find("outside") != std::string::npos,
+        "tsharp: a mip chain outside the guest address space is refused");
   make_tsharp(w, 0x100000, 64, 32, 64, 31);
   decode_tsharp(w, &t);
   check(!validate_tsharp_sample(t, 0x100000 + 64ull * 32 * 4 - 1, &why) && why.find("outside") != std::string::npos,
@@ -80,9 +95,37 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   check(validate_ssharp_sample(s, &why), "ssharp: wrap/clamp point/bilinear sampler validates");
   sw[2] |= (1u << 26);  // mip_filter = point
   decode_ssharp(sw, &s);
-  check(!validate_ssharp_sample(s, &why) && why.find("mip") != std::string::npos,
-        "ssharp: mip filtering is refused");
+  check(validate_ssharp_sample(s, &why) && s.mip_filter == 1,
+        "ssharp: point mip filtering validates (S19)");
+  sw[2] = (sw[2] & ~(3u << 26)) | (2u << 26);  // mip_filter = linear
+  decode_ssharp(sw, &s);
+  check(validate_ssharp_sample(s, &why) && s.mip_filter == 2,
+        "ssharp: linear mip filtering validates (S19)");
+  sw[1] |= (0x180u);  // min_lod = 1.5 (4.8 fixed), q0 bits 32-43
+  sw[1] |= (0x280ull << 12 >> 0) & 0xFFF000u;  // max_lod = 2.5, q0 bits 44-55
+  decode_ssharp(sw, &s);
+  check(validate_ssharp_sample(s, &why) && s.min_lod == 0x180 && s.max_lod == 0x280,
+        "ssharp: min/max lod decode and validate (S19)");
+  sw[1] = (sw[1] & 0xFF000FFFu) | (0x100u << 12);  // max_lod = 1.0 < min_lod 1.5
+  decode_ssharp(sw, &s);
+  check(!validate_ssharp_sample(s, &why) && why.find("max_lod") != std::string::npos,
+        "ssharp: max_lod below min_lod is refused");
+  sw[1] = 0;
+  sw[2] = (sw[2] & ~(3u << 26)) | (3u << 26);  // mip_filter = 3
+  decode_ssharp(sw, &s);
+  check(!validate_ssharp_sample(s, &why) && why.find("invalid") != std::string::npos,
+        "ssharp: mip filter value 3 is refused");
   sw[2] &= ~(3u << 26);
+  sw[0] |= (1u << 28);  // mip_point_preclamp
+  decode_ssharp(sw, &s);
+  check(!validate_ssharp_sample(s, &why) && why.find("preclamp") != std::string::npos,
+        "ssharp: mip point preclamp is refused");
+  sw[0] &= ~(1u << 28);
+  sw[2] |= 0x80;  // lod_bias = 0.5 (6.8 fixed)
+  decode_ssharp(sw, &s);
+  check(!validate_ssharp_sample(s, &why) && why.find("lod bias") != std::string::npos,
+        "ssharp: lod bias is refused");
+  sw[2] &= ~0x3FFFu;
   sw[0] |= 6;  // clamp_x = ClampBorder
   decode_ssharp(sw, &s);
   check(!validate_ssharp_sample(s, &why) && why.find("clamp") != std::string::npos,
