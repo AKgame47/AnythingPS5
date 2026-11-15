@@ -332,10 +332,11 @@ struct TexScene {
   static constexpr std::uint32_t W = 64, H = 64;
   void make_tdesc(std::uint32_t w[8], std::uint64_t base, std::uint32_t tw, std::uint32_t th,
                   std::uint32_t pitch, std::uint32_t tiling, std::uint32_t last_level = 0,
-                  std::uint32_t min_lod = 0, std::uint32_t df = 10) {
+                  std::uint32_t min_lod = 0, std::uint32_t df = 10, std::uint32_t nf = 0) {
     std::uint64_t q0 = (base >> 8) & 0x3FFFFFFFFFull;
     q0 |= std::uint64_t(min_lod & 0xFFF) << 40;
     q0 |= std::uint64_t(df & 0x3F) << 52;  // data format (10 = 8_8_8_8, 35 = BC1, 37 = BC3)
+    q0 |= std::uint64_t(nf & 0xF) << 58;   // number format (0 unorm, 7 float, 9 srgb)
     std::uint64_t q1 = std::uint64_t(tw - 1) | (std::uint64_t(th - 1) << 14);
     q1 |= std::uint64_t(1) << 35 | std::uint64_t(2) << 38 | std::uint64_t(3) << 41;
     q1 |= std::uint64_t(last_level & 0xF) << 48;
@@ -517,7 +518,7 @@ struct TexScene {
   // laid out by the hardware thin block geometry (gfx_swizzle.hpp), including
   // tail-packed levels.
   void build_tiled(std::uint32_t mode, std::uint32_t df, std::uint32_t side, std::uint32_t last_level,
-                   float uv_scale, std::uint32_t mip_filter) {
+                   float uv_scale, std::uint32_t mip_filter, std::uint32_t nf = 0) {
     vs_blob = make_pnr_vs3_blob(true);
     ps_blob = make_pnr_ps2_blob();
     mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
@@ -528,8 +529,10 @@ struct TexScene {
       vb.push_back(1.0f); vb.push_back(1.0f); vb.push_back(1.0f);  // white tint
       vb.push_back(pu[v][0] * uv_scale); vb.push_back(pu[v][1] * uv_scale);
     }
-    const bool bc = df != 10;
-    const std::uint32_t bb = df == 35 || df == 38 ? 8 : df == 10 ? 4 : 16;
+    const bool bc = df >= 35 && df <= 39;
+    PlainFormat pf{};
+    if (!bc) plain_format_info(df, nf, pf);
+    const std::uint32_t bb = bc ? (df == 35 || df == 38 ? 8 : 16) : pf.element_bytes;
     TiledMip layout[kMaxTiledMips];
     std::uint64_t guest_bytes = 0;
     if (!thin_mip_layout(mode, bb, bc ? 4 : 1, bc ? 4 : 1, side, side, last_level + 1,
@@ -541,7 +544,19 @@ struct TexScene {
       for (std::uint32_t y = 0; y < eh; ++y)
         for (std::uint32_t x = 0; x < ew; ++x) {
           const auto off = thin_element_offset(mode, bb, layout[l], x, y, 0);
-          if (!bc) {
+          if (!bc && df != 10) {
+            // S23 plain formats: every channel gets on/off max values so the
+            // converted RGBA8 is a checker of (255..,0,255) vs (0..,0,255).
+            const bool on = ((x + y) & 1) == 0;
+            for (std::uint32_t c = 0; c < pf.channels; ++c) {
+              if (pf.element_bytes / pf.channels == 2) {
+                const std::uint16_t w = on ? (pf.is_float ? 0x3C00 : 0xFFFF) : 0;
+                texels[off + c * 2] = std::uint8_t(w); texels[off + c * 2 + 1] = std::uint8_t(w >> 8);
+              } else {
+                texels[off + c] = on ? 255 : 0;
+              }
+            }
+          } else if (!bc) {
             std::uint8_t r = 255, g = 255, bch = 255;
             if (last_level == 0) { const std::uint8_t v = ((x + y) & 1) ? 0 : 255; r = g = bch = v; }
             else if (l == 0) { g = 0; bch = 0; } else if (l == 1) { r = 0; bch = 0; } else { r = 0; g = 0; }
@@ -552,12 +567,51 @@ struct TexScene {
           }
         }
     }
-    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, side, side, side, mode, last_level, 0, df);
+    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, side, side, side, mode, last_level, 0, df, nf);
     tsharp.assign(tw, tw + 8);
     std::uint64_t sq0 = 0;  // wrap x and y
     const std::uint32_t mf = last_level == 0 ? 0 : 1;  // point for single-level, bilinear for chains
     std::uint64_t sq1 = std::uint64_t(mf) << 20 | std::uint64_t(mf) << 22;
     sq1 |= std::uint64_t(mip_filter & 3) << 26;
+    ssharp = {std::uint32_t(sq0), std::uint32_t(sq0 >> 32), std::uint32_t(sq1), std::uint32_t(sq1 >> 32)};
+    target.assign(W * H * 4, 0xCD);
+    mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
+    mem.map_external(0x200000, ps_blob.data(), ps_blob.size() * 4, "ps");
+    mem.map_external(0x300000, mat.data(), 64, "matrix");
+    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x500000, target.data(), target.size(), "target");
+    mem.map_external(0x700000, texels.data(), texels.size(), "texture");
+    mem.map_external(0x710000, tsharp.data(), tsharp.size() * 4, "tsharp");
+    mem.map_external(0x711000, ssharp.data(), ssharp.size() * 4, "ssharp");
+    pm4::Builder b;
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_PS_0, {0x710000, 0, 0x711000, 0});
+    b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
+    b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+    b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
+    b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(6);
+    cmd = b.dwords();
+  }
+  // Slice S23: single-level linear plain-format texture from raw guest bytes.
+  void build_plain(std::uint32_t df, std::uint32_t nf, std::uint32_t side,
+                   const std::vector<std::uint8_t>& bytes) {
+    vs_blob = make_pnr_vs3_blob(true);
+    ps_blob = make_pnr_ps2_blob();
+    mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
+    const float pxv[6][2] = {{-1,-1},{1,-1},{1,1},{-1,-1},{1,1},{-1,1}};
+    const float pu[6][2] = {{0,0},{1,0},{1,1},{0,0},{1,1},{0,1}};
+    for (int v = 0; v < 6; ++v) {
+      vb.push_back(pxv[v][0]); vb.push_back(pxv[v][1]); vb.push_back(0.0f);
+      vb.push_back(1.0f); vb.push_back(1.0f); vb.push_back(1.0f);  // white tint
+      vb.push_back(pu[v][0]); vb.push_back(pu[v][1]);
+    }
+    texels = bytes;
+    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, side, side, side, 0, 0, 0, df, nf);
+    tsharp.assign(tw, tw + 8);
+    std::uint64_t sq0 = 0;  // wrap x and y
+    std::uint64_t sq1 = 0;  // point mag/min, mip filter none
     ssharp = {std::uint32_t(sq0), std::uint32_t(sq0 >> 32), std::uint32_t(sq1), std::uint32_t(sq1 >> 32)};
     target.assign(W * H * 4, 0xCD);
     mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
@@ -1422,6 +1476,76 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       auto r = s.run(vk);
       check(r.ok && px(r.rgba, 32, 32)[2] == 255 && px(r.rgba, 32, 32)[0] == 0,
             "tiled: point mip filter picks tail-packed level 2 exactly"); }
+  }
+
+  // ---- slice S23: extended plain formats + sRGB ----
+  {
+    auto px = [](const DrawResult& r, int x, int y) { return &r.rgba[(y * 64 + x) * 4]; };
+    // R8G8 unorm checker: red and green channels carry the checker, blue pads 0.
+    { TexScene s; std::vector<std::uint8_t> b(4 * 4 * 2);
+      for (int y = 0; y < 4; ++y) for (int x = 0; x < 4; ++x) {
+        const std::uint8_t v = ((x + y) & 1) ? 0 : 255;
+        b[(y * 4 + x) * 2] = v; b[(y * 4 + x) * 2 + 1] = v;
+      }
+      s.build_plain(3, 0, 4, b);
+      auto r = s.run(vk);
+      check(r.ok && px(r, 8, 8)[0] == 255 && px(r, 8, 8)[1] == 255 && px(r, 8, 8)[2] == 0 &&
+            px(r, 24, 8)[0] == 0 && px(r, 24, 24)[0] == 255,
+            "plain: 8_8 unorm checker draws byte-exact"); }
+    // R16G16B16A16 unorm solid: 0xFFFF, 0x8080, 0, 0xFFFF -> (255,128,0,255).
+    { TexScene s; std::vector<std::uint8_t> b(16 * 16 * 8);
+      for (int i = 0; i < 16 * 16; ++i) {
+        b[i*8+0]=0xFF; b[i*8+1]=0xFF; b[i*8+2]=0x80; b[i*8+3]=0x80;
+        b[i*8+4]=0; b[i*8+5]=0; b[i*8+6]=0xFF; b[i*8+7]=0xFF;
+      }
+      s.build_plain(12, 0, 16, b);
+      auto r = s.run(vk);
+      check(r.ok && px(r, 0, 0)[0] == 255 && px(r, 0, 0)[1] == 128 && px(r, 0, 0)[2] == 0 &&
+            px(r, 63, 63)[0] == 255 && px(r, 63, 63)[3] == 255,
+            "plain: 16_16_16_16 unorm solid draws byte-exact"); }
+    // R16 half float solid: 0.5 -> 128.
+    { TexScene s; std::vector<std::uint8_t> b(16 * 16 * 2);
+      for (int i = 0; i < 16 * 16; ++i) { b[i*2] = 0x00; b[i*2+1] = 0x38; }
+      s.build_plain(2, 7, 16, b);
+      auto r = s.run(vk);
+      check(r.ok && px(r, 32, 32)[0] == 128 && px(r, 32, 32)[1] == 0 && px(r, 32, 32)[3] == 255,
+            "plain: 16 half float solid draws byte-exact"); }
+    // R32G32B32A32 float solid: 1.0, 0.5, 0.25, 1.0 -> (255,128,64,255).
+    { TexScene s; std::vector<std::uint8_t> b(8 * 8 * 16);
+      const std::uint32_t f[4] = {0x3F800000, 0x3F000000, 0x3E800000, 0x3F800000};
+      for (int i = 0; i < 8 * 8; ++i) std::memcpy(&b[i * 16], f, 16);
+      s.build_plain(14, 7, 8, b);
+      auto r = s.run(vk);
+      check(r.ok && px(r, 32, 32)[0] == 255 && px(r, 32, 32)[1] == 128 && px(r, 32, 32)[2] == 64 &&
+            px(r, 32, 32)[3] == 255, "plain: 32_32_32_32 float solid draws byte-exact"); }
+    // 5_6_5 unorm solid red.
+    { TexScene s; std::vector<std::uint8_t> b(16 * 16 * 2);
+      for (int i = 0; i < 16 * 16; ++i) { b[i*2] = 0x00; b[i*2+1] = 0xF8; }
+      s.build_plain(16, 0, 16, b);
+      auto r = s.run(vk);
+      check(r.ok && px(r, 32, 32)[0] == 255 && px(r, 32, 32)[1] == 0 && px(r, 32, 32)[3] == 255,
+            "plain: 5_6_5 solid red draws byte-exact"); }
+    // 8_8_8_8 sRGB solid (55,188,255): the host sampler converts to linear;
+    // the spec formula gives 10, 128, 255.
+    { TexScene s; std::vector<std::uint8_t> b(16 * 16 * 4);
+      for (int i = 0; i < 16 * 16; ++i) { b[i*4] = 55; b[i*4+1] = 188; b[i*4+2] = 255; b[i*4+3] = 255; }
+      s.build_plain(10, 9, 16, b);
+      auto r = s.run(vk);
+      check(r.ok && px(r, 32, 32)[0] == 10 && px(r, 32, 32)[1] == 128 && px(r, 32, 32)[2] == 255,
+            "plain: 8_8_8_8 sRGB converts through the host sampler byte-exact"); }
+    // BC1 sRGB solid: a 57-red block; sRGB(57) -> 10 through the host sampler.
+    { TexScene s; std::vector<std::uint8_t> b(8);
+      s.bc_solid(b.data(), 35, 57, 0, 0, 255);
+      s.build_plain(35, 9, 4, b);
+      auto r = s.run(vk);
+      check(r.ok && px(r, 32, 32)[0] == 10 && px(r, 32, 32)[1] == 0 && px(r, 32, 32)[3] == 255,
+            "bc: BC1 sRGB solid converts through the host sampler byte-exact"); }
+    // Tiled R16G16 unorm checker (SW_64KB_S, mode 9).
+    { TexScene s; s.build_tiled(9, 5, 4, 0, 1.0f, 0);
+      auto r = s.run(vk);
+      check(r.ok && px(r, 8, 8)[0] == 255 && px(r, 8, 8)[1] == 255 &&
+            px(r, 24, 8)[0] == 0 && px(r, 24, 24)[0] == 255,
+            "tiled: SW_64KB_S 16_16 unorm checker draws byte-exact"); }
   }
 
   // ---- slice S19: mipmapped textures (mip chains, mip filters, lod clamps) ----
