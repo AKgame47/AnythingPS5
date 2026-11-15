@@ -250,14 +250,52 @@ ComputeTranslation translate_compute_words(const std::vector<uint32_t>& code,
       if (!v) return fail("undefined VGPR or unsupported v_mov source" + at);
       if(merge_active) assigned[i.dst.reg]=true;
       regs[i.dst.reg] = *v; // SSA alias: later overwrites do not change this value
+    } else if (i.family == RdnaFamily::VOP1 &&
+               (i.opcode_id == 0x2a || i.opcode_id == 0x33 ||
+                i.opcode_id == 0x05 || i.opcode_id == 0x08)) {
+      // Slice S5 VOP1 subset (opcode numbers from AMD's public RDNA2 ISA
+      // VOP1 table): v_rcp_f32 (42), v_sqrt_f32 (51), v_cvt_f32_i32 (5,
+      // truncate toward zero), v_cvt_i32_f32 (8). v_rcp_f32 is emitted as a
+      // correctly-rounded 1.0f/x division - RDNA's own rcp is approximate,
+      // so this is deliberately not bit-identical to hardware (Experimental).
+      const auto v = source(i.src0);
+      if (!v) return fail("undefined VGPR or unsupported unary float source" + at);
+      const U32Op op = i.opcode_id==0x2a ? U32Op::FRcp : i.opcode_id==0x33 ? U32Op::FSqrt
+                     : i.opcode_id==0x05 ? U32Op::CvtFToI : U32Op::CvtIToF;
+      nodes.push_back({op, v->node});
+      regs[i.dst.reg] = Reg{uint32_t(nodes.size()-1), {}};
+      floating = true;
     } else if (i.family==RdnaFamily::VOP2 &&
-               (i.opcode_id==3 || i.opcode_id==4 || i.opcode_id==8)) {
+               (i.opcode_id==3 || i.opcode_id==4 || i.opcode_id==8 ||
+                i.opcode_id==5 || i.opcode_id==0x0f || i.opcode_id==0x10)) {
       // Raw uint register storage, IEEE binary32 arithmetic under Vulkan's
       // host policy. No SDWA/DPP, source modifiers, denorm/rounding modes.
+      // Slice S5 adds v_subrev_f32 (5: dst = src1 - src0), v_min_f32 (15)
+      // and v_max_f32 (16). Min/max NaN behaviour follows the host
+      // GLSL.std.450 op, not RDNA's operand-pick rule (documented).
       auto a=source(i.src0), b=source(i.src1);
       if(!a || !b) return fail("undefined/unsupported float source"+at);
-      const auto op=i.opcode_id==3?U32Op::FAdd:i.opcode_id==4?U32Op::FSub:U32Op::FMul;
-      nodes.push_back({op,a->node,b->node});
+      U32Op op=U32Op::FAdd;
+      switch (i.opcode_id) {
+        case 3: op=U32Op::FAdd; break;
+        case 4: case 5: op=U32Op::FSub; break;
+        case 8: op=U32Op::FMul; break;
+        case 0x0f: op=U32Op::FMin; break;
+        default: op=U32Op::FMax; break;
+      }
+      if (i.opcode_id==5) nodes.push_back({op,b->node,a->node});  // subrev swaps operands
+      else nodes.push_back({op,a->node,b->node});
+      regs[i.dst.reg]=Reg{uint32_t(nodes.size()-1),{}};
+      floating=true;
+    } else if (i.family==RdnaFamily::VOP2 && i.opcode_id==0x1f) {
+      // Slice S5: v_mac_f32 (31): dst = src0*src1 + dst. NOT fused - the
+      // multiply rounds to binary32 first, then the add rounds again (RDNA
+      // semantics; the fused single-rounding form is v_fma_f32, slice S2).
+      auto a=source(i.src0), b=source(i.src1);
+      if(!a || !b) return fail("undefined/unsupported mac source"+at);
+      if(!regs[i.dst.reg]) return fail("v_mac_f32 with undefined destination accumulator"+at);
+      nodes.push_back({U32Op::FMul,a->node,b->node});
+      nodes.push_back({U32Op::FAdd,uint32_t(nodes.size()-1),regs[i.dst.reg]->node});
       regs[i.dst.reg]=Reg{uint32_t(nodes.size()-1),{}};
       floating=true;
     } else if (i.family == RdnaFamily::VOP3 && i.opcode_id == 0x14b) {
