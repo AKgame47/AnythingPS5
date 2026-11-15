@@ -34,6 +34,16 @@ struct TexInput {
   bool repeat = false;
 };
 
+// Colour blend state for one target (slice S14), decoded from GNM
+// CB_BLEND0_CONTROL. Fields hold VK_BLEND_FACTOR_*/VK_BLEND_OP_* values.
+struct BlendState {
+  bool enable = false;
+  int32_t src_color = VK_BLEND_FACTOR_ONE, dst_color = VK_BLEND_FACTOR_ZERO;
+  int32_t color_op = VK_BLEND_OP_ADD;
+  int32_t src_alpha = VK_BLEND_FACTOR_ONE, dst_alpha = VK_BLEND_FACTOR_ZERO;
+  int32_t alpha_op = VK_BLEND_OP_ADD;
+};
+
 // Frame-persistent render targets (slice S13): a colour + depth attachment
 // pair kept across draws so consecutive draws accumulate into one frame and
 // test against earlier depth, the way GNM games bind CB_COLOR0_* and DB_Z_*
@@ -59,6 +69,7 @@ struct MeshInput {
   const TexInput* tex = nullptr;  // sampled at set 0 binding 0 (fragment stage)
   FrameSurface* shared_frame = nullptr;  // slice S13: persistent targets; null = per-draw
   bool depth_write = true;               // DB_DEPTH_CONTROL depth_write_enable
+  const BlendState* blend = nullptr;     // slice S14: target 0 blend state; null = no blending
 };
 
 class VulkanBackend {
@@ -152,7 +163,8 @@ public:
                                const std::vector<uint32_t>& indices, bool depth,
                                const float clear[4], std::vector<uint8_t>* image,
                                FrameSurface* shared_frame = nullptr,
-                               bool depth_write = true);
+                               bool depth_write = true,
+                               const BlendState* blend = nullptr);
 
   // Destroys a FrameSurface's Vulkan objects and zeroes it (slice S13).
   void destroy_frame(FrameSurface& s);
