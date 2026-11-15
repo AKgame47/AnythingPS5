@@ -169,6 +169,8 @@ struct TopoScene {
   std::uint32_t stencil_info = 0;    // DB_STENCIL_INFO value when nonzero
   std::uint64_t z_write_base = 0;    // separate write base when nonzero
   std::uint32_t blend0 = 0;          // CB_BLEND0_CONTROL value when nonzero (slice S14)
+  bool mode_cntl_set = false;        // write PA_SU_SC_MODE_CNTL (slice S18)
+  std::uint32_t mode_cntl = 0;       // raw PolygonControl value
   static constexpr std::uint32_t W = 64, H = 64;
   void build(const std::vector<float>& verts, const std::vector<std::uint32_t>& indices, std::uint32_t prim) {
     const std::uint32_t nv = std::uint32_t(verts.size() / 6);
@@ -198,6 +200,7 @@ struct TopoScene {
       if (stencil_info) b.set_context(amd::DB_STENCIL_INFO, stencil_info);
     }
     if (blend0) b.set_context(amd::CB_BLEND0_CONTROL, blend0);
+    if (mode_cntl_set) b.set_context(amd::PA_SU_SC_MODE_CNTL, mode_cntl);
     b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, prim).num_instances(1);
     if (ib.empty()) {
       b.draw_auto(nv);
@@ -323,6 +326,8 @@ struct TexScene {
   std::vector<std::uint8_t> target;
   std::vector<std::uint32_t> tsharp, ssharp, cmd;
   std::vector<std::uint8_t> texels;
+  bool mode_cntl_set = false;        // write PA_SU_SC_MODE_CNTL (slice S18)
+  std::uint32_t mode_cntl = 0;
   static constexpr std::uint32_t W = 64, H = 64;
   void make_tdesc(std::uint32_t w[8], std::uint64_t base, std::uint32_t tw, std::uint32_t th,
                   std::uint32_t pitch, std::uint32_t tiling) {
@@ -383,6 +388,7 @@ struct TexScene {
     b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
     b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
     b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
+    if (mode_cntl_set) b.set_context(amd::PA_SU_SC_MODE_CNTL, mode_cntl);
     b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(6);
     cmd = b.dwords();
   }
@@ -1196,5 +1202,98 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       b4.mem.map_external(0x100000, b4.vs_blob.data(), b4.vs_blob.size() * 4, "vs4");
       auto r4 = b4.run(vk);
       check(!r4.ok && r4.error.find("not implemented") != std::string::npos, "pps2: PVS4 combination refused"); }
+  }
+
+  // ---- slice S18: face culling + front face (PA_SU_SC_MODE_CNTL) ----
+  // Two triangles side by side: LEFT faces front when FACE=CCW, RIGHT faces
+  // back. Front for FACE=CCW is a negative signed area in our framebuffer
+  // (Vulkan's area convention negates the usual formula); that matches the
+  // guest's GNM window-space facing because the guest viewport's y-flip
+  // (yscale=-H/2) cancels that negation. The fan below covers three wedges
+  // (top-right, top-left, bottom-left); its bottom-right quadrant is empty
+  // by construction.
+  {
+    const std::vector<float> two = {
+        -0.8f, -0.5f, 0.5f, 1, 0, 0,   // left: front when FACE=CCW
+        -0.5f,  0.5f, 0.5f, 1, 0, 0,
+        -0.2f, -0.5f, 0.5f, 1, 0, 0,
+         0.2f, -0.5f, 0.5f, 0, 1, 0,   // right: back when FACE=CCW
+         0.8f, -0.5f, 0.5f, 0, 1, 0,
+         0.5f,  0.5f, 0.5f, 0, 1, 0,
+    };
+    auto lit = [](const DrawResult& r, std::uint32_t x, std::uint32_t y) {
+      const auto* p = &r.rgba[(y * 64 + x) * 4];
+      return p[0] > 16 || p[1] > 16 || p[2] > 16;   // clear is black
+    };
+    { TopoScene s; s.build(two, {}, 4);              // register never written
+      auto r = s.run(vk);
+      check(r.ok && lit(r, 16, 37) && lit(r, 48, 37), "cull: no PA_SU_SC_MODE_CNTL keeps both faces"); }
+    { TopoScene s; s.mode_cntl_set = true; s.mode_cntl = 0; s.build(two, {}, 4);
+      auto r = s.run(vk);
+      check(r.ok && lit(r, 16, 37) && lit(r, 48, 37), "cull: PA_SU_SC_MODE_CNTL 0 keeps both faces"); }
+    { TopoScene s; s.mode_cntl_set = true; s.mode_cntl = 2; s.build(two, {}, 4);   // cull back, CCW front
+      auto r = s.run(vk);
+      check(r.ok && lit(r, 16, 37) && !lit(r, 48, 37), "cull: cull-back drops the back-face (CW-wound) triangle"); }
+    { TopoScene s; s.mode_cntl_set = true; s.mode_cntl = 1; s.build(two, {}, 4);   // cull front, CCW front
+      auto r = s.run(vk);
+      check(r.ok && !lit(r, 16, 37) && lit(r, 48, 37), "cull: cull-front drops the front-face (CCW-wound) triangle"); }
+    { TopoScene s; s.mode_cntl_set = true; s.mode_cntl = 2 | 4; s.build(two, {}, 4);  // cull back, CW front
+      auto r = s.run(vk);
+      check(r.ok && !lit(r, 16, 37) && lit(r, 48, 37), "cull: CW front face flips the culled side"); }
+    { TopoScene s; s.mode_cntl_set = true; s.mode_cntl = 3; s.build(two, {}, 4);   // cull front+back
+      auto r = s.run(vk);
+      check(r.ok && !lit(r, 16, 37) && !lit(r, 48, 37), "cull: front+back culls every triangle"); }
+    { TopoScene s; s.mode_cntl_set = true; s.mode_cntl = (1u << 19); s.build(two, {}, 4);  // provoking vertex bit
+      auto r = s.run(vk);
+      check(r.ok && lit(r, 16, 37) && lit(r, 48, 37), "cull: provoking-vertex bit has no effect in this subset"); }
+    { TopoScene s; s.mode_cntl_set = true; s.mode_cntl = 2; s.depth_control = 0x16;   // cull + depth LESS
+      s.build(two, {}, 4);
+      auto r = s.run(vk);
+      check(r.ok && lit(r, 16, 37) && !lit(r, 48, 37), "cull: culling composes with depth testing"); }
+    // Strips and fans: the S10 host expansion corrects the winding, so with
+    // cull-back every expanded triangle still faces front.
+    const std::vector<float> quad = {
+        -0.9f, -0.5f, 0.5f, 1, 1, 1,
+        -0.9f,  0.5f, 0.5f, 1, 1, 1,
+         0.9f, -0.5f, 0.5f, 1, 1, 1,
+         0.9f,  0.5f, 0.5f, 1, 1, 1,
+    };
+    { TopoScene s; s.mode_cntl_set = true; s.mode_cntl = 2; s.build(quad, {}, 6);   // strip + cull back
+      auto r = s.run(vk);
+      check(r.ok && lit(r, 8, 32) && lit(r, 56, 32), "cull: strip triangles all face front after expansion"); }
+    const std::vector<float> fan = {
+         0.0f,  0.0f, 0.5f, 1, 1, 1,   // fan: rim ordered so all three fan
+         0.8f,  0.0f, 0.5f, 1, 1, 1,   // triangles wind the same (front) way;
+         0.0f, -0.8f, 0.5f, 1, 1, 1,   // fans keep one consistent winding
+        -0.8f,  0.0f, 0.5f, 1, 1, 1,
+         0.0f,  0.8f, 0.5f, 1, 1, 1,
+    };
+    { TopoScene s; s.mode_cntl_set = true; s.mode_cntl = 2; s.build(fan, {}, 5);    // fan + cull back
+      auto r = s.run(vk);
+      check(r.ok && lit(r, 40, 24) && lit(r, 24, 24) && lit(r, 24, 40),
+            "cull: fan triangles all face front after expansion"); }
+    { TopoScene s; s.mode_cntl_set = true; s.mode_cntl = 2; s.build(two, {0, 1, 2, 3, 4, 5}, 4);  // indexed
+      auto r = s.run(vk);
+      check(r.ok && lit(r, 16, 37) && !lit(r, 48, 37), "cull: indexed draws honour the cull state"); }
+    // Textured path: the S17 full-screen quad winds screen-CW, so cull-front
+    // keeps it and cull-back removes it.
+    { TexScene t; t.mode_cntl_set = true; t.mode_cntl = 1; t.build(1.0f, 0, 0, 0);
+      auto r = t.run(vk);
+      check(r.ok && lit(r, 32, 32), "cull: textured quad survives cull-front"); }
+    { TexScene t; t.mode_cntl_set = true; t.mode_cntl = 2; t.build(1.0f, 0, 0, 0);
+      auto r = t.run(vk);
+      check(r.ok && !lit(r, 32, 32), "cull: textured quad is removed by cull-back"); }
+    // Refusals: named reasons for the unsupported PolygonControl fields.
+    auto refused = [&](std::uint32_t mc, const char* what, const std::string& l) {
+      TopoScene s; s.mode_cntl_set = true; s.mode_cntl = mc; s.build(two, {}, 4);
+      auto r = s.run(vk);
+      check(!r.ok && r.error.find(what) != std::string::npos, l);
+    };
+    refused((1u << 3) | (1u << 5), "polygon mode", "cull: line polygon mode refused");
+    refused((1u << 3) | (2u << 5) | (1u << 8), "polygon mode", "cull: non-fill back polygon mode refused");
+    refused(1u << 11, "polygon offset", "cull: polygon offset refused");
+    refused(1u << 16, "window offset", "cull: window offset refused");
+    refused(1u << 20, "perspective", "cull: perspective-correct disable refused");
+    refused(1u << 21, "multi-primitive", "cull: multi-primitive index buffer refused");
   }
 }
