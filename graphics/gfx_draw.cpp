@@ -21,6 +21,16 @@ std::vector<std::uint32_t> make_pnr_vs_blob(std::uint32_t n) {
   return blob;
 }
 
+std::vector<std::uint32_t> make_pnr_vs2_blob(std::uint32_t n) {
+  std::vector<std::vector<std::uint32_t>> k;
+  for (std::uint32_t c = 0; c < 4; ++c) k.push_back(rdna_vertex_component_kernel(c, n));
+  for (std::uint32_t c = 0; c < 3; ++c) k.push_back(rdna_post_ndc_kernel(c, n));
+  std::vector<std::uint32_t> blob = {kPnrVs2Magic, 7};
+  for (auto& v : k) blob.push_back(static_cast<std::uint32_t>(v.size()));
+  for (auto& v : k) blob.insert(blob.end(), v.begin(), v.end());
+  return blob;
+}
+
 namespace {
 DrawResult fail(DrawResult r, const std::string& why) { r.ok = false; r.error = why; return r; }
 bool read_u64(const ShaderBinding& s, int slot, std::uint64_t* out) {
@@ -51,15 +61,18 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (!mem.resolve(b.ps.address, 4)) return fail(r, "pixel shader address is not mapped: " + mem.last_error());
 
   // Vertex-stage blob.
-  std::uint32_t hdr[6];
+  std::uint32_t hdr[9];
   if (!mem.read(vs->address, hdr, sizeof hdr)) return fail(r, "vertex shader address is not mapped: " + mem.last_error());
-  if (hdr[0] != kPnrVsMagic || hdr[1] != 4) return fail(r, "vertex shader memory is not a PNR PVS1 blob (a real GCN/RDNA program is not accepted here)");
-  std::vector<std::vector<std::uint32_t>> kern(4);
-  std::uint64_t off = sizeof hdr;
-  for (int c = 0; c < 4; ++c) {
-    if (hdr[2 + c] == 0 || hdr[2 + c] > 4096) return fail(r, "PVS1 kernel length is out of range");
+  const bool pvs2 = hdr[0] == kPnrVs2Magic && hdr[1] == 7;
+  if (!(hdr[0] == kPnrVsMagic && hdr[1] == 4) && !pvs2)
+    return fail(r, "vertex shader memory is not a PNR PVS1/PVS2 blob (a real GCN/RDNA program is not accepted here)");
+  const uint32_t nk = pvs2 ? 7 : 4;
+  std::vector<std::vector<std::uint32_t>> kern(nk);
+  std::uint64_t off = (2 + nk) * 4;
+  for (uint32_t c = 0; c < nk; ++c) {
+    if (hdr[2 + c] == 0 || hdr[2 + c] > 4096) return fail(r, "PVS blob kernel length is out of range");
     kern[c].resize(hdr[2 + c]);
-    if (!mem.read(vs->address + off, kern[c].data(), kern[c].size() * 4)) return fail(r, "PVS1 kernel runs past its mapping: " + mem.last_error());
+    if (!mem.read(vs->address + off, kern[c].data(), kern[c].size() * 4)) return fail(r, "PVS blob kernel runs past its mapping: " + mem.last_error());
     off += kern[c].size() * 4;
   }
   std::uint64_t mat_va = 0, vb_va = 0;
@@ -81,6 +94,23 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     if (!st) return fail(r, "translated vertex shader did not run: " + st.error.message);
     for (std::uint32_t i = 0; i < n; ++i) std::memcpy(&clip[i * 4 + c], &io[3 * n + i], 4);
   }
+  // Slice S6 (PVS2): the perspective divide runs in translated RDNA code,
+  // one ndc component per kernel (the subset allows one store per kernel).
+  // The rasterizer receives ndc with w = 1; viewport scale/offset on screen
+  // stays host fixed-function.
+  if (pvs2) {
+    for (std::uint32_t c = 0; c < 3; ++c) {
+      auto t = shader::translate_compute_words(kern[4 + c], kRdnaVertexBase, n * 5, n, 0);
+      if (!t.ok) return fail(r, "RDNA post-transform translation failed: " + t.error);
+      std::vector<std::uint32_t> io(std::size_t(n) * 5, 0);
+      for (std::uint32_t i = 0; i < n; ++i)
+        for (std::uint32_t k = 0; k < 4; ++k) std::memcpy(&io[k * n + i], &clip[i * 4 + k], 4);
+      auto st = shader::run_translated_compute(vk, t, &io, {});
+      if (!st) return fail(r, "translated post-transform did not run: " + st.error.message);
+      for (std::uint32_t i = 0; i < n; ++i) std::memcpy(&clip[i * 4 + c], &io[4 * n + i], 4);
+    }
+    for (std::uint32_t i = 0; i < n; ++i) clip[i * 4 + 3] = 1.0f;
+  }
   std::vector<float> verts;
   std::vector<std::uint32_t> idx;
   for (std::uint32_t i = 0; i < n; ++i) {
@@ -92,7 +122,8 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   std::vector<std::uint32_t> vsp(std::begin(clip_vert), std::end(clip_vert)), fsp(std::begin(spin_frag), std::end(spin_frag));
   auto st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, false, clear, &r.rgba);
   if (!st) return fail(r, "Vulkan draw failed: " + st.error.message);
-  r.notes = "pixel shader not translated: fixed pass-through colour used; vertex shader is a PNR PVS1 test blob";
+  r.notes = pvs2 ? "pixel shader not translated: fixed pass-through colour used; PVS2 blob: clip and perspective divide are translated RDNA, w = 1 fed to the rasterizer"
+                 : "pixel shader not translated: fixed pass-through colour used; vertex shader is a PNR PVS1 test blob";
   const std::size_t bytes = std::size_t(w) * h * 4;
   if (std::uint8_t* dst = mem.resolve_mut(b.color0.address, bytes)) {
     std::memcpy(dst, r.rgba.data(), bytes);
