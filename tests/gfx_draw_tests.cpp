@@ -330,11 +330,14 @@ struct TexScene {
   std::uint32_t mode_cntl = 0;
   static constexpr std::uint32_t W = 64, H = 64;
   void make_tdesc(std::uint32_t w[8], std::uint64_t base, std::uint32_t tw, std::uint32_t th,
-                  std::uint32_t pitch, std::uint32_t tiling) {
+                  std::uint32_t pitch, std::uint32_t tiling, std::uint32_t last_level = 0,
+                  std::uint32_t min_lod = 0) {
     std::uint64_t q0 = (base >> 8) & 0x3FFFFFFFFFull;
+    q0 |= std::uint64_t(min_lod & 0xFFF) << 40;
     q0 |= std::uint64_t(10) << 52;  // 8_8_8_8 unorm
     std::uint64_t q1 = std::uint64_t(tw - 1) | (std::uint64_t(th - 1) << 14);
     q1 |= std::uint64_t(1) << 35 | std::uint64_t(2) << 38 | std::uint64_t(3) << 41;
+    q1 |= std::uint64_t(last_level & 0xF) << 48;
     q1 |= std::uint64_t(tiling & 0x1F) << 52;
     q1 |= std::uint64_t(9) << 60;  // Color2D
     std::uint64_t q2 = std::uint64_t(pitch - 1) << 13;
@@ -389,6 +392,53 @@ struct TexScene {
     b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
     b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
     if (mode_cntl_set) b.set_context(amd::PA_SU_SC_MODE_CNTL, mode_cntl);
+    b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(6);
+    cmd = b.dwords();
+  }
+  // Slice S19: a mip chain of solid colours - L0 4x4 red, L1 2x2 green,
+  // L2 1x1 blue, packed per the S19 guest layout (level 0 at the T# pitch,
+  // deeper levels tightly pitched one after another).
+  void build_mips(float uv_scale, std::uint32_t mip_filter,
+                  std::uint32_t s_min_lod = 0, std::uint32_t s_max_lod = 0,
+                  std::uint32_t t_min_lod = 0) {
+    vs_blob = make_pnr_vs3_blob(true);
+    ps_blob = make_pnr_ps2_blob();
+    mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
+    const float px[6][2] = {{-1,-1},{1,-1},{1,1},{-1,-1},{1,1},{-1,1}};
+    const float pu[6][2] = {{0,0},{1,0},{1,1},{0,0},{1,1},{0,1}};
+    for (int v = 0; v < 6; ++v) {
+      vb.push_back(px[v][0]); vb.push_back(px[v][1]); vb.push_back(0.0f);
+      vb.push_back(1.0f); vb.push_back(1.0f); vb.push_back(1.0f);  // white tint
+      vb.push_back(pu[v][0] * uv_scale); vb.push_back(pu[v][1] * uv_scale);
+    }
+    texels.assign(4 * 4 * 4 + 2 * 2 * 4 + 4, 255);
+    for (int i = 0; i < 16; ++i) { texels[i * 4 + 1] = 0; texels[i * 4 + 2] = 0; }          // L0 red
+    for (int i = 0; i < 4; ++i) { auto* p = &texels[64 + i * 4]; p[0] = 0; p[2] = 0; }        // L1 green
+    { auto* p = &texels[80]; p[0] = 0; p[1] = 0; }                                            // L2 blue
+    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, 4, 4, 4, 31, 2, t_min_lod);
+    tsharp.assign(tw, tw + 8);
+    std::uint64_t sq0 = std::uint64_t(s_min_lod & 0xFFF) << 32 |
+                        std::uint64_t(s_max_lod & 0xFFF) << 44;  // wrap x and y
+    std::uint64_t sq1 = std::uint64_t(1) << 20 | std::uint64_t(1) << 22;  // bilinear mag/min
+    sq1 |= std::uint64_t(mip_filter & 3) << 26;
+    ssharp = {std::uint32_t(sq0), std::uint32_t(sq0 >> 32), std::uint32_t(sq1), std::uint32_t(sq1 >> 32)};
+    target.assign(W * H * 4, 0xCD);
+    mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
+    mem.map_external(0x200000, ps_blob.data(), ps_blob.size() * 4, "ps");
+    mem.map_external(0x300000, mat.data(), 64, "matrix");
+    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x500000, target.data(), target.size(), "target");
+    mem.map_external(0x700000, texels.data(), texels.size(), "texture");
+    mem.map_external(0x710000, tsharp.data(), tsharp.size() * 4, "tsharp");
+    mem.map_external(0x711000, ssharp.data(), ssharp.size() * 4, "ssharp");
+    pm4::Builder b;
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_PS_0, {0x710000, 0, 0x711000, 0});
+    b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
+    b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+    b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
     b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(6);
     cmd = b.dwords();
   }
@@ -1202,6 +1252,57 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       b4.mem.map_external(0x100000, b4.vs_blob.data(), b4.vs_blob.size() * 4, "vs4");
       auto r4 = b4.run(vk);
       check(!r4.ok && r4.error.find("not implemented") != std::string::npos, "pps2: PVS4 combination refused"); }
+  }
+
+  // ---- slice S19: mipmapped textures (mip chains, mip filters, lod clamps) ----
+  // Solid-colour levels (L0 red, L1 green, L2 blue) make sampled colours
+  // exact under both point and linear filtering. uv scale s over the 64x64
+  // target gives a texel footprint of 4*s/64 per pixel: s=32 -> lod 1,
+  // s=64 -> lod 2, s=48 -> lod ~1.585, s=1 -> magnification (lod 0).
+  {
+    auto centre = [](const DrawResult& r) -> const std::uint8_t* {
+      return &r.rgba[(32 * 64 + 32) * 4];
+    };
+    auto is = [](const std::uint8_t* p, std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+      return p[0] == r && p[1] == g && p[2] == b;
+    };
+    { TexScene s; s.build_mips(32.0f, 1);   // point, lod 1
+      auto r = s.run(vk);
+      check(r.ok && is(centre(r), 0, 255, 0), "mips: point mip filter picks level 1 exactly"); }
+    { TexScene s; s.build_mips(64.0f, 1);   // point, lod 2
+      auto r = s.run(vk);
+      check(r.ok && is(centre(r), 0, 0, 255), "mips: point mip filter picks level 2 exactly"); }
+    { TexScene s; s.build_mips(1.0f, 1);    // magnification, lod 0
+      auto r = s.run(vk);
+      check(r.ok && is(centre(r), 255, 0, 0), "mips: magnification samples level 0"); }
+    { TexScene s; s.build_mips(32.0f, 2);   // linear, lod exactly 1
+      auto r = s.run(vk);
+      check(r.ok && is(centre(r), 0, 255, 0), "mips: linear mip filter is exact at an integer lod"); }
+    { TexScene s; s.build_mips(48.0f, 2);   // linear, lod ~1.585: green/blue mix
+      auto r = s.run(vk);
+      const std::uint8_t* p = r.ok ? centre(r) : nullptr;
+      check(r.ok && p[0] < 16 && p[2] > p[1] && p[2] > 120 && p[2] < 180 && p[1] > 70 && p[1] < 135,
+            "mips: linear mip filter blends levels 1 and 2 inside the tolerance band"); }
+    { TexScene s; s.build_mips(64.0f, 1, 0, 256);   // S# max_lod 1.0 clamps lod 2 -> 1
+      auto r = s.run(vk);
+      check(r.ok && is(centre(r), 0, 255, 0), "mips: S# max_lod clamps the sampled level"); }
+    { TexScene s; s.build_mips(1.0f, 1, 256);       // S# min_lod 1.0 clamps lod 0 -> 1
+      auto r = s.run(vk);
+      check(r.ok && is(centre(r), 0, 255, 0), "mips: S# min_lod clamps the sampled level"); }
+    { TexScene s; s.build_mips(32.0f, 1, 0, 0, 512);  // T# min_lod 2.0 clamps lod 1 -> 2
+      auto r = s.run(vk);
+      check(r.ok && is(centre(r), 0, 0, 255), "mips: T# min_lod folds into the lod clamp"); }
+    { TexScene s; s.build_mips(64.0f, 0);   // mip_filter none: only level 0
+      auto r = s.run(vk);
+      check(r.ok && is(centre(r), 255, 0, 0), "mips: mip filter none keeps level 0 on a chain"); }
+    { TexScene s; s.build_mips(32.0f, 1);   // point mip filter on a single-level texture
+      std::uint32_t tw[8]; s.make_tdesc(tw, 0x700000, 4, 4, 4, 31, 0);
+      s.mem.unmap(0x710000);
+      s.tsharp.assign(tw, tw + 8);
+      s.mem.map_external(0x710000, s.tsharp.data(), s.tsharp.size() * 4, "tsharp1");
+      auto r = s.run(vk);
+      check(!r.ok && r.error.find("single-level") != std::string::npos,
+            "mips: mip filtering on a single-level texture is refused"); }
   }
 
   // ---- slice S18: face culling + front face (PA_SU_SC_MODE_CNTL) ----
