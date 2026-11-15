@@ -67,6 +67,9 @@ inline std::vector<uint32_t> make_pnr_ps_blob() {
 // it in the host rasterizer's fragment stage with vertex uv varyings.
 // Sampling itself is not translated RDNA in this slice, stated in the notes.
 inline std::vector<uint32_t> make_pnr_ps2_blob() { return {kPnrPs2Magic, 0}; }
+// Slice S27: blob v1 - the T# is a Color2DArray; the vertex record carries a
+// slice index after the uv pair (9 floats per vertex).
+inline std::vector<uint32_t> make_pnr_ps2_array_blob() { return {kPnrPs2Magic, 1}; }
 
 // Runs the four component kernels; uniforms8 = s0..s7 as float bit patterns.
 inline Status rdna_pixel_colour(VulkanBackend& vk, const std::vector<uint32_t>& uniforms8,
