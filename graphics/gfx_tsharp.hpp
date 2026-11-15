@@ -11,7 +11,10 @@
 // grant with attribution; geometry in gfx_swizzle.hpp). The GCN tiling-index
 // encodings PNR accepted before S22 (8/31 for linear) are PS4 values and are
 // refused here.
-// This slice accepts a narrow honest subset: Color2D, 8_8_8_8/BC1-BC5 unorm,
+// This slice accepts a narrow honest subset: Color2D; 8_8_8_8/BC1-BC5 unorm
+// plus the S23 plain formats (8, 16, 8_8, 32, 16_16, 32_32, 16_16_16_16,
+// 32_32_32_32 unorm or 16/32-bit float, 5_6_5 unorm - gfx_formats.hpp) and
+// sRGB on 8_8_8_8/BC1-BC3 (converted by the host sampler, never on the CPU);
 // linear tiling or a thin swizzle mode, no arrays, mip chains from level 0
 // (linear: level 0 at the T# pitch then tightly pitched levels; tiled: the
 // hardware block layout with tail packing). Everything else is refused with
@@ -20,6 +23,7 @@
 #include <cstdint>
 #include <string>
 
+#include "graphics/gfx_formats.hpp"
 #include "graphics/gfx_swizzle.hpp"
 
 namespace pnr::graphics {
@@ -87,8 +91,11 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
   const bool bc1 = t.data_format == 35, bc2 = t.data_format == 36, bc3 = t.data_format == 37;
   const bool bc4 = t.data_format == 38, bc5 = t.data_format == 39;  // shadPS4 DataFormat values
   const bool bc = bc1 || bc2 || bc3 || bc4 || bc5;
-  if (!(t.data_format == 10 || bc) || t.num_format != 0)
-    return no("T# format is not 8_8_8_8/BC1-BC5 unorm (other texture formats are not implemented)");
+  PlainFormat pf{};
+  const bool plain = plain_format_info(t.data_format, t.num_format, pf);
+  const bool bc_ok = bc && (t.num_format == kNumUnorm || format_uses_srgb_image(t.data_format, t.num_format));
+  if (!plain && !bc_ok)
+    return no("T# format is outside the sampled subset (plain unorm/float, 5_6_5, BC1-BC5, or sRGB on 8_8_8_8/BC1-BC3; other formats are not implemented)");
   if (t.tiling_index == 8 || t.tiling_index == 31)
     return no("T# tiling uses a GCN (PS4) index encoding, not a PS5-native SW_MODE value");
   if (!swizzle_mode_known(t.tiling_index))
