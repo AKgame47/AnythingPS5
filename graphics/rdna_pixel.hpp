@@ -18,7 +18,8 @@
 
 namespace pnr::graphics {
 
-inline constexpr uint32_t kPnrPsMagic = 0x31535050u;  // "PPS1"
+inline constexpr uint32_t kPnrPsMagic = 0x31535050u;   // "PPS1"
+inline constexpr uint32_t kPnrPs2Magic = 0x32535050u;  // "PPS2"
 inline constexpr uint64_t kRdnaPixelBase = 0x1200002000ull;
 
 namespace detail {
@@ -59,6 +60,13 @@ inline std::vector<uint32_t> make_pnr_ps_blob() {
   for (auto& v : k) blob.insert(blob.end(), v.begin(), v.end());
   return blob;
 }
+
+// Slice S17: a "PPS2" blob marks the textured pixel stage. It carries no
+// kernels yet - {magic, 0} - and tells the draw to bind the T#/S# pair
+// addressed by pixel user data 0..3 (T# at 0..1, S# at 2..3) and to sample
+// it in the host rasterizer's fragment stage with vertex uv varyings.
+// Sampling itself is not translated RDNA in this slice, stated in the notes.
+inline std::vector<uint32_t> make_pnr_ps2_blob() { return {kPnrPs2Magic, 0}; }
 
 // Runs the four component kernels; uniforms8 = s0..s7 as float bit patterns.
 inline Status rdna_pixel_colour(VulkanBackend& vk, const std::vector<uint32_t>& uniforms8,
