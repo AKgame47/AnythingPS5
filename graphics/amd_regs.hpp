@@ -50,7 +50,13 @@ constexpr std::uint32_t PA_SC_SCREEN_SCISSOR_TL = ctx(0x000c), PA_SC_SCREEN_SCIS
 // 11..21, pitch/height = (max+1)<<3; bases << 8): public shadPS4, values only.
                         DB_Z_INFO = ctx(0x0010), DB_STENCIL_INFO = ctx(0x0011),
                         DB_Z_READ_BASE = ctx(0x0012), DB_Z_WRITE_BASE = ctx(0x0014),
-                        DB_DEPTH_SIZE = ctx(0x0016);
+                        DB_DEPTH_SIZE = ctx(0x0016),
+// CB_BLEND0_CONTROL (slice S14). Address (regs.cpp: blend_control == 0xA1E0)
+// and layout (regs_color.h BlendControl: color src factor bits 0..4, color
+// func 5..7, color dst factor 8..12, alpha src factor 16..20, alpha func
+// 21..23, alpha dst factor 24..28, separate alpha bit 29, enable bit 30):
+// public shadPS4, values only. Factors 0..9 match the Vulkan blend factors.
+                        CB_BLEND0_CONTROL = ctx(0x01e0);
 // UCONFIG (BASE_IDX 1, inside the 0xc000 window).
 constexpr std::uint32_t VGT_PRIMITIVE_TYPE = ctx(0x2242), VGT_INDEX_TYPE = ctx(0x2243), VGT_NUM_INSTANCES = ctx(0x224d);
 
