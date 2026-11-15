@@ -464,6 +464,40 @@ makes the load fail with a message naming it, and nothing runs.
 - Limits: thin (2D, single-slice) modes only - no thick/3D modes, arrays or depth
   sampling; sampling is still not translated RDNA; hardware GPU untested.
 
+## Slice S23 notes (extended plain texture formats + sRGB)
+- The sampled T# subset grows past 8_8_8_8 unorm (graphics/gfx_formats.hpp;
+  data/number format values from public shadPS4 pixel_format.h, values only):
+  df 1 (8), 2 (16), 3 (8_8), 4 (32), 5 (16_16), 11 (32_32), 12 (16_16_16_16),
+  14 (32_32_32_32) and 16 (5_6_5). Unorm covers every channel width; IEEE
+  float (half and single) covers the 16/32-bit formats; 8_8_8_8 and BC1-BC3
+  gain sRGB numerics. Snorm/scaled/integer numerics, sRGB on other formats
+  and packed formats like 2_10_10_10 stay refused with named reasons.
+- Conversion to the RGBA8 staging chain is exact: 16-bit unorm rounds by
+  (v*255 + 32767)/65535 in integers, half decodes bit-exactly (subnormals,
+  infinities, NaNs - NaN clamps to 0), float32 clamps and rounds to nearest,
+  5_6_5 reuses the BC endpoint bit replication. Missing channels pad to
+  (0,0,1), the BC4/BC5 convention. Formats are not silently approximated:
+  the staged bytes equal the mathematically correct 8-bit result, and the
+  unorm staging round-trips them exactly.
+- sRGB is never converted on the CPU: TexInput gains an srgb flag and the
+  staging image/view become VK_FORMAT_R8G8B8A8_SRGB, so the host sampler
+  applies the specification's piecewise conversion. BC1-BC3 sRGB decode to
+  sRGB-encoded RGBA8 and take the same path.
+- Plain formats flow through the S22 tiled path unchanged: the element size
+  parameterizes the swizzle block geometry (a tiled R16G16 checker detiles
+  and draws byte-exact).
+- Tests (38 in gfx_format_tests + 21 in gfx_tsharp_tests + 8 in
+  gfx_draw_tests): the full accept/refuse matrix, scalar conversions against
+  hand-computed values (unorm16 midpoints, half bit patterns, float clamps),
+  row conversions with channel padding, and end-to-end draws - R8G8 checker,
+  R16G16B16A16 unorm, half float, float32, 5_6_5 solids, a tiled R16G16
+  checker, and sRGB 8_8_8_8 / BC1 solids where lavapipe's hardware sRGB
+  conversion lands exactly on the specification values (10, 128, 255 for
+  guest bytes 55, 188, 255).
+- Limits: integer/sampled-as-float targets still land in an 8-bit unorm
+  frame; snorm would clamp there and is refused instead; no BC6/BC7, arrays,
+  3D or cubes; sampling is still not translated RDNA; hardware GPU untested.
+
 ## Slice S16 notes (8_8_8_8 unorm vertex colours)
 - The S15 fetch kernels gain a conversion path for data format 10 (8_8_8_8) with unorm
   numerics: all four components share the record's first dword, so the component dword
