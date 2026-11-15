@@ -376,6 +376,33 @@ makes the load fail with a message naming it, and nothing runs.
   centre samples that texel exactly; refusals: missing T#/S# pointers, tiled image,
   border clamp, PPS2+PVS4.
 
+## Slice S19 notes (mipmapped textures)
+- T# mip chains: base_level must be 0 and last_level may reach the extent's level count
+  (each level's width/height shrinks by half, floored at 1). The accepted guest layout
+  is level 0 at the T# pitch, then every smaller level tightly pitched (pitch = level
+  width) one after another; validate_tsharp_sample bounds the whole chain inside the
+  guest address space. Chains starting above level 0 and levels beyond the extent are
+  refused with named reasons.
+- S# gains min_lod / max_lod (12-bit 4.8 fixed), mip_point_preclamp and lod_bias
+  fields (layout from public shadPS4 resource.h, values only). mip_filter none / point
+  / linear map to the host sampler's mipmap mode (none and point both NEAREST, with
+  none clamping maxLod to level 0); mip filter value 3, preclamp and any lod bias are
+  refused. T# and S# min_lod combine by max (the tighter clamp wins); S# max_lod 0
+  means no clamp, otherwise it clamps and is itself capped at last_level. max_lod
+  below min_lod is refused. mip filtering on a single-level texture is refused.
+- The host side (render.cpp) creates the image with mipLevels = chain length, uploads
+  every level in one staging pass (one VkBufferImageCopy per level, tight packing), and
+  sets the sampler's mipmapMode / minLod / maxLod from the mapped state. TexInput
+  carries the chain as packed levels with the same tight layout.
+- Sampling still runs in the host rasterizer's fragment stage (not translated RDNA),
+  same honesty note as S17.
+- Tests (10 in gfx_draw_tests + 10 new descriptor checks in gfx_tsharp_tests): solid
+  colour levels L0 red / L1 green / L2 blue - point picks levels 1 and 2 exactly at
+  footprints 2 and 4, magnification keeps level 0, linear is exact at an integer lod
+  and blends levels 1 and 2 inside a tolerance band at lod ~1.585, S# max_lod / min_lod
+  and T# min_lod clamp the sampled level, mip filter none keeps level 0 on a chain,
+  and the refusal cases above all name their reason.
+
 ## Slice S16 notes (8_8_8_8 unorm vertex colours)
 - The S15 fetch kernels gain a conversion path for data format 10 (8_8_8_8) with unorm
   numerics: all four components share the record's first dword, so the component dword
