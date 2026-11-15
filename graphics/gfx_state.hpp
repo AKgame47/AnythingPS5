@@ -36,6 +36,13 @@ struct DrawBindings {
   bool depth_control_set = false;      // DB_DEPTH_CONTROL was written (slice S12)
   std::uint32_t depth_control = 0;     // raw value: bit 0 stencil, bit 1 depth enable,
                                        // bit 2 depth write enable, bits 4..6 compare func
+  bool depth_buffer_set = false;       // DB_Z_INFO was written (slice S13)
+  std::uint32_t db_z_info = 0;         // bits 0..1 z format (1=Z16, 3=Z32 float), bit 28 tiled
+  std::uint32_t db_stencil_info = 0;   // bit 0 stencil format (1 = stencil8)
+  std::uint64_t db_z_read_base = 0;    // DB_Z_READ_BASE << 8
+  std::uint64_t db_z_write_base = 0;   // DB_Z_WRITE_BASE << 8
+  std::uint32_t db_depth_size = 0;     // pitch_tile_max bits 0..10, height_tile_max bits 11..21
+  bool db_depth_size_set = false;
   // What a minimal draw would need but is missing, in plain words.
   std::string missing;
   const ShaderBinding* vertex_stage() const { return vs.present ? &vs : (gs.present ? &gs : nullptr); }
