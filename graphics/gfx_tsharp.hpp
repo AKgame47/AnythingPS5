@@ -4,9 +4,11 @@
 // (clamp modes, filters, lod) follow public shadPS4
 // src/video_core/amdgpu/resource.h (Image/Sampler), pixel_format.h
 // (DataFormat/NumberFormat) and tiling.h (TileMode) - values only, no code.
-// This slice (S17) accepts a narrow honest subset: Color2D, 8_8_8_8 unorm,
-// linear tiling (DisplayLinearAligned / DisplayLinearGeneral), one mip
-// level, no arrays. Everything else is refused with a named reason.
+// This slice (S19) accepts a narrow honest subset: Color2D, 8_8_8_8 unorm,
+// linear tiling (DisplayLinearAligned / DisplayLinearGeneral), no arrays,
+// and a mip chain from level 0 packed as level 0 (T# pitch) followed by
+// tightly pitched smaller levels. Everything else is refused with a named
+// reason.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -35,6 +37,9 @@ struct SSharp {
   std::uint32_t filter_mode = 0;      // 0 = blend (normal filtering)
   std::uint32_t mag_filter = 0, min_filter = 0;  // Filter: 0 point, 1 bilinear
   std::uint32_t mip_filter = 0;       // 0 none, 1 point, 2 linear
+  std::uint32_t min_lod = 0, max_lod = 0;  // 12 bits, 4.8 fixed point
+  std::uint32_t lod_bias = 0;         // 14 bits, signed 6.8 fixed point
+  bool mip_point_preclamp = false;
   bool force_unnormalized = false;
 };
 
@@ -65,8 +70,8 @@ inline bool decode_tsharp(const std::uint32_t w[8], TSharp* t) {
   return (t->type & 0x8u) != 0;
 }
 
-// Slice S17 sampling rules. guest_bytes = size of the guest address space
-// for the bounds check on base + pitch*height*4.
+// Slice S19 sampling rules. guest_bytes = size of the guest address space
+// for the bounds check on base + mip chain bytes.
 inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, std::string* why) {
   auto no = [&](const char* m) { *why = m; return false; };
   if (t.type != 9) return no("T# image type is not Color2D (1D/3D/cube/array/MSAA images are not implemented)");
@@ -74,17 +79,26 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
     return no("T# format is not 8_8_8_8 unorm (other texture formats are not implemented)");
   if (t.tiling_index != 8 && t.tiling_index != 31)
     return no("T# tiling is not linear (tiled/swizzled textures are not implemented)");
-  if (t.last_level != 0 || t.base_level != 0)
-    return no("T# mip chains are not implemented (base_level and last_level must be 0)");
+  if (t.base_level != 0)
+    return no("T# base_level is not 0 (mip chains starting above level 0 are not implemented)");
   if (t.last_array != 0 || t.base_array != 0)
     return no("T# texture arrays are not implemented");
   if (t.pow2pad) return no("T# pow2pad images are not supported");
   if (t.width < 1 || t.width > 4096 || t.height < 1 || t.height > 4096)
     return no("T# extent is outside 1..4096");
   if (t.pitch < t.width) return no("T# pitch is smaller than the width");
+  if (t.last_level >= 9 || (t.width >> t.last_level) == 0 || (t.height >> t.last_level) == 0)
+    return no("T# last_level exceeds the number of levels the extent supports");
   if (t.dst_sel[0] != 0 || t.dst_sel[1] != 1 || t.dst_sel[2] != 2 || t.dst_sel[3] != 3)
     return no("T# component swizzle is not the identity (dst_sel remapping is not implemented)");
-  const std::uint64_t bytes = std::uint64_t(t.pitch) * t.height * 4;
+  // Guest layout: level 0 at base with the T# pitch, then each smaller
+  // level tightly pitched (pitch = level width) one after another.
+  std::uint64_t bytes = std::uint64_t(t.pitch) * t.height * 4;
+  for (std::uint32_t l = 1; l <= t.last_level; ++l) {
+    const std::uint32_t lw = t.width >> l ? t.width >> l : 1;
+    const std::uint32_t lh = t.height >> l ? t.height >> l : 1;
+    bytes += std::uint64_t(lw) * lh * 4;
+  }
   if (t.base + bytes > guest_bytes) return no("T# pixels lie outside the guest address space");
   return true;
 }
@@ -98,15 +112,20 @@ inline bool decode_ssharp(const std::uint32_t w[4], SSharp* s) {
   s->clamp_z = std::uint32_t((q0 >> 6) & 7);
   s->depth_compare = std::uint32_t((q0 >> 12) & 7);
   s->force_unnormalized = ((q0 >> 15) & 1) != 0;
+  s->mip_point_preclamp = ((q0 >> 28) & 1) != 0;
   s->filter_mode = std::uint32_t((q0 >> 29) & 3);
+  s->min_lod = std::uint32_t((q0 >> 32) & 0xFFFu);
+  s->max_lod = std::uint32_t((q0 >> 44) & 0xFFFu);
+  s->lod_bias = std::uint32_t(q1 & 0x3FFFu);
   s->mag_filter = std::uint32_t((q1 >> 20) & 3);
   s->min_filter = std::uint32_t((q1 >> 22) & 3);
   s->mip_filter = std::uint32_t((q1 >> 26) & 3);
   return true;
 }
 
-// Slice S17 sampler rules: wrap/mirror/clamp addressing, point or bilinear
-// filters, no depth compare, no min/max filter mode, no mip filtering.
+// Slice S19 sampler rules: wrap/mirror/clamp addressing, point or bilinear
+// filters, mip filtering none/point/linear, min/max lod clamps; no depth
+// compare, no min/max filter mode, no lod bias or point preclamp.
 inline bool validate_ssharp_sample(const SSharp& s, std::string* why) {
   auto no = [&](const char* m) { *why = m; return false; };
   auto clamp_ok = [](std::uint32_t c) { return c <= 3; };
@@ -117,7 +136,11 @@ inline bool validate_ssharp_sample(const SSharp& s, std::string* why) {
   if (s.filter_mode != 0) return no("S# min/max filter mode is not implemented");
   if (s.mag_filter > 1 || s.min_filter > 1)
     return no("S# anisotropic filtering is not implemented");
-  if (s.mip_filter != 0) return no("S# mip filtering is not implemented (no mip chains yet)");
+  if (s.mip_filter > 2) return no("S# mip filter value 3 is invalid");
+  if (s.mip_point_preclamp) return no("S# mip point preclamp is not implemented");
+  if (s.lod_bias != 0) return no("S# lod bias is not implemented");
+  if (s.max_lod != 0 && s.max_lod < s.min_lod)
+    return no("S# max_lod is smaller than min_lod");
   return true;
 }
 
