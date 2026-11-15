@@ -24,10 +24,18 @@
 
 namespace pnr::graphics {
 
-inline constexpr std::uint32_t kPnrVsMagic = 0x31535650u;  // "PVS1"
+inline constexpr std::uint32_t kPnrVsMagic = 0x31535650u;   // "PVS1"
+inline constexpr std::uint32_t kPnrVs2Magic = 0x32535650u;  // "PVS2"
 
 // Builds the PVS1 blob for n vertices (1..kRdnaVertexMax).
 std::vector<std::uint32_t> make_pnr_vs_blob(std::uint32_t n);
+
+// PVS2: the four PVS1 clip kernels plus a fifth post-transform kernel
+// (slice S6: translated perspective divide + viewport transform). The draw
+// path feeds the rasterizer ndc positions with w = 1; the divide itself is
+// done by translated RDNA code. Window/depth outputs are computed for
+// verification; viewport scale/offset on screen stays host fixed-function.
+std::vector<std::uint32_t> make_pnr_vs2_blob(std::uint32_t n);
 
 struct DrawResult {
   bool ok = false;
