@@ -133,6 +133,43 @@ struct TopoScene {
     return execute_draw(vk, mem, sum.draws[0]);
   }
 };
+// Slice S11: PVS4 Gouraud shade. Vertex layout is 9 floats (x y z r g b nx ny nz).
+struct ShadeScene {
+  GpuAddressSpace mem;
+  std::vector<std::uint32_t> vs_blob, ps_blob{0xbf810000}, mat;
+  std::vector<float> vb;
+  std::vector<std::uint8_t> target;
+  std::vector<std::uint32_t> cmd;
+  static constexpr std::uint32_t W = 64, H = 64;
+  void build(const std::vector<float>& verts9, const float lp[6], bool with_params = true) {
+    const std::uint32_t nv = std::uint32_t(verts9.size() / 9);
+    vs_blob = make_pnr_vs4_blob();
+    vb = verts9;
+    mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
+    target.assign(W * H * 4, 0xCD);
+    mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
+    mem.map_external(0x200000, ps_blob.data(), 4, "ps");
+    mem.map_external(0x300000, mat.data(), 64, "matrix");
+    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x500000, target.data(), target.size(), "target");
+    pm4::Builder b;
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+    std::vector<std::uint32_t> ud = {0x300000, 0, 0x400000, 0};
+    if (with_params) for (int k = 0; k < 6; ++k) ud.push_back(f2u(lp[k]));
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, ud);
+    b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
+    b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+    b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
+    b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(nv);
+    cmd = b.dwords();
+  }
+  DrawResult run(VulkanBackend& vk) {
+    auto sum = pm4::interpret(cmd.data(), cmd.size());
+    if (sum.draws.size() != 1) { DrawResult r; r.error = "no draw parsed"; return r; }
+    return execute_draw(vk, mem, sum.draws[0]);
+  }
+};
 // Slice S9: PVS3 batched draws. nverts/3 triangles, all red at the standard
 // position except the LAST triangle, green and mirrored (apex down).
 struct BatchScene {
@@ -525,5 +562,71 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
     { TopoScene t; t.build(quad, {}, 1);
       auto r = t.run(vk);
       check(!r.ok && r.error.find("strips and fans") != std::string::npos, "topo: point list refused"); }
+  }
+
+  // ---- slice S11: translated per-vertex varying (PVS4 Gouraud shade) ----
+  {
+    const float lp[6] = {0, 0, 1, 0, 0, 1};   // light +z, ambient 0, clamp 0..1
+    // One triangle, colours all white, normals nz = 0, 0.5, 1: the translated
+    // shade gives per-vertex greys 0, 0.5, 1, interpolated by the rasterizer.
+    const std::vector<float> tri9 = {
+      -0.8f, -0.8f, 0, 1, 1, 1, 0, 0, 0.0f,
+       0.8f, -0.8f, 0, 1, 1, 1, 0, 0, 0.5f,
+       0.0f,  0.8f, 0, 1, 1, 1, 0, 0, 1.0f };
+    ShadeScene s; s.build(tri9, lp);
+    auto rs = s.run(vk);
+    if (!rs.ok) std::printf("  pvs4 error: %s\n", rs.error.c_str());
+    check(rs.ok && rs.notes.find("PVS4") != std::string::npos, "pvs4: shade draw ok, translated varying stated");
+    if (rs.ok) {
+      auto lum = [&](int x, int y) { return int(rs.rgba[(y * 64 + x) * 4]); };
+      const int centre = lum(32, 32), end_a = lum(32, 8), end_b = lum(32, 56);
+      const int bright = std::max(end_a, end_b), dim = std::min(end_a, end_b);
+      // barycentric at the centre: 0.25*0 + 0.25*0.5 + 0.5*1 = 0.625 -> byte 159
+      std::printf("  pvs4: centre luminance %d (expect about 159), bright end %d, dim end %d\n", centre, bright, dim);
+      check(centre > 150 && centre < 168, "pvs4: centre pixel is the interpolated shade (about 159)");
+      check(bright > dim + 100, "pvs4: luminance rises from the dark normal to the bright normal (gradient)");
+      check(dim < 90 && bright > 230, "pvs4: gradient endpoints near the vertex shades 0.28 and 0.98");
+    }
+    // Constant normal everywhere: shade is a uniform scale, so the draw is
+    // byte-identical to a PVS1 draw with the colours pre-scaled on the CPU.
+    const std::vector<float> flat9 = {
+      -0.8f, -0.8f, 0, 1, 1, 1, 0, 0, 0.5f,
+       0.8f, -0.8f, 0, 1, 1, 1, 0, 0, 0.5f,
+       0.0f,  0.8f, 0, 1, 1, 1, 0, 0, 0.5f };
+    ShadeScene f9; f9.build(flat9, lp);
+    auto rf = f9.run(vk);
+    Scene pref; pref.build();
+    for (int v = 0; v < 3; ++v) for (int c = 0; c < 3; ++c) pref.vb[v * 6 + 3 + c] = 0.5f;
+    auto sump = pm4::interpret(pref.cmd.data(), pref.cmd.size());
+    auto rp = execute_draw(vk, pref.mem, sump.draws[0]);
+    if (!rf.ok) std::printf("  pvs4-flat error: %s\n", rf.error.c_str());
+    if (!rp.ok) std::printf("  pvs4-ref error: %s\n", rp.error.c_str());
+    if (rf.ok && rp.ok) {
+      std::uint32_t d = 0;
+      for (size_t p = 0; p < size_t(64) * 64 * 4; ++p) d += rf.rgba[p] != rp.rgba[p];
+      check(d == 0, "pvs4: constant-shade draw byte-identical to the CPU pre-scaled reference");
+    } else check(false, "pvs4: constant-shade draws ok");
+    // Batched: 66 vertices (2 dispatches) through the PVS4 path.
+    {
+      std::vector<float> big;
+      for (int t = 0; t < 22; ++t)
+        for (int v = 0; v < 3; ++v) {
+          const float pos[3] = {-0.8f, -0.8f, 0};
+          const float px2[3] = {0.8f, -0.8f, 0};
+          const float py2[3] = {0.0f, 0.8f, 0};
+          const float* p = (v == 0) ? pos : (v == 1) ? px2 : py2;
+          big.insert(big.end(), {p[0], p[1], p[2], 1, 1, 1, 0, 0, 1.0f});
+        }
+      ShadeScene b66; b66.build(big, lp);
+      auto rb = b66.run(vk);
+      if (!rb.ok) std::printf("  pvs4-66 error: %s\n", rb.error.c_str());
+      check(rb.ok && rb.vertices == 66 && rb.notes.find("2 for 66 vertices") != std::string::npos,
+            "pvs4: 66-vertex shade draw batched (2 dispatches)");
+      if (rb.ok) check(rb.rgba[(32 * 64 + 32) * 4] == 255, "pvs4: batched draw centre pixel fully lit (nz = 1)");
+    }
+    // Missing light/ambient/clamp parameters are refused.
+    { ShadeScene m; m.build(tri9, lp, false);
+      auto rm = m.run(vk);
+      check(!rm.ok && rm.error.find("user data 4..9") != std::string::npos, "pvs4: missing shade parameters refused"); }
   }
 }
