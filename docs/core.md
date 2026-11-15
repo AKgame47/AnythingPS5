@@ -328,6 +328,36 @@ makes the load fail with a message naming it, and nothing runs.
   bytes); the same red-first order with depth off lets the last-drawn green quad win
   (control); stencil and GREATER draws refused.
 
+## Slice S15 notes (vertex fetch: V# buffer descriptors)
+- V# decode (graphics/gfx_vsharp.hpp): the 128-bit buffer resource (base 44 bits, stride 14,
+  num_records; dst_sel x..w, num_format, data_format, element_size, index_stride,
+  add_tid_enable, type) from public shadPS4 src/video_core/amdgpu/resource.h (Buffer); the
+  DataFormat/NumberFormat values (Format32=4, Format32_32=11, Format32_32_32=13,
+  Format32_32_32_32=14; Float=7) from its pixel_format.h. Values only, no code.
+- Fetch kernels (graphics/rdna_fetch.hpp): restricted RDNA code, one component per dispatch -
+  lane*stride addressing (doublings + adds, the subset has no integer multiply), a flat dword
+  load from the raw record region and a store into a gathered float region. Like GNM fetch
+  shaders, the code is specialized per vertex layout (component and stride baked in).
+- "PVS5" blob (make_pnr_vs5_blob): {magic, 13, pos_fmt, col_fmt, pos_stride_words,
+  col_stride_words, 13 kernel lengths}; kernels 0..5 fetch (pos xyz, colour rgb), 6..12 are
+  the PVS3 batched clip + post-NDC kernels. Vertex user data 2..3 addresses a two-entry V#
+  table (position, colour) in guest memory; the matrix stays at slots 0..1.
+- Draw path (gfx_draw.cpp): both descriptors are decoded and validated against the blob's
+  compiled layout (stride, data format, num_records >= vertex count, identity dst_sel, no
+  add_tid/swizzle/tiling, float number format). Only the consumed components are read from
+  guest memory, so a strided colour V# inside a record never runs past the buffer end. The
+  fetched floats feed the existing clip path unchanged; indexed draws fetch max index + 1
+  vertices as before.
+- Limits (stated in the draw notes): 32-bit float formats only - unorm/snorm/integer vertex
+  data is Planned (needs v_lshr + v_cvt_f32_u32 in the translator subset); a Format32_32_32_32
+  position's w is fetched but ignored (w_in = 1.0); component swizzles beyond identity are
+  refused; no fetch of texture/other attribute semantics yet.
+- Tests (gfx_draw_tests.cpp): interleaved/strided, packed (stride 0) and Format32_32_32_32
+  vertex data all render byte-identical to the raw-pointer reference draw; a 66-vertex draw
+  crosses two 64-lane fetch dispatches; refusals: add_tid, swizzled buffers, unorm number
+  format, packed 8-bit formats, non-identity dst_sel, num_records short of the draw, and a V#
+  layout that does not match the blob.
+
 ## Slice S14 notes (target-0 blending: CB_BLEND0_CONTROL)
 - Register (graphics/amd_regs.hpp): CB_BLEND0_CONTROL ctx 0x1E0. Field layout (colour src
   factor bits 0..4, colour function bits 5..7, colour dst factor bits 8..12, alpha src factor
