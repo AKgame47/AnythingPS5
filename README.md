@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **2765/2765 unit tests, 22/22 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (2670 unit checks without it; the
+Test state: **2779/2779 unit tests, 22/22 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (2684 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
@@ -203,6 +203,7 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Triangle strips and fans (slice S10): VGT_PRIMITIVE_TYPE TriangleStrip/TriangleFan accepted for auto and indexed draws; the source sequence expands to a triangle list on the host (strip winding swap on odd triangles, fan (0,i+1,i+2)) before rasterization | Experimental, Tested on lavapipe: strip quad and fan draws pixel-identical (0 of 16384 bytes) to their expanded lists, auto vs indexed strips identical, missing fan wedge stays clear; 2-vertex strip and point/line primitives refused; the multiple-of-3 rule applies to lists only; the rasterizer does not cull yet, so the winding swap is a pre-step; primitive restart and instancing Planned |
 | Translated per-vertex varying - Gouraud shade (slice S11): "PVS4" blob adds 3 shade kernels (one per channel) to the batched 64-lane clip kernels; each computes col_c * clamp(dot(n, light) + ambient, lo, hi) in translated RDNA (fma chain) from 9-float vertices (xyz rgb + normal) and light/ambient/clamp user data; the rasterizer interpolates the shaded rgb | Experimental, Tested on lavapipe: gradient triangle interpolates (centre luminance 162 vs 159 ideal), constant-shade draw byte-identical to a CPU pre-scaled reference, 66-vertex batched draw, missing parameters refused; one directional light, no specular/textures, per-pixel translated varyings Planned, hardware GPU untested |
 | Depth testing (slice S12): `DB_DEPTH_CONTROL` (ctx 0x200) tracked in the draw bindings; depth enable + LESS compare render through the host depth attachment (clear 1.0); register layout from public shadPS4 regs.cpp/regs_depth.h (values only) | Experimental, Tested on lavapipe: two overlapping quads in one draw - the near quad wins in BOTH draw orders (byte-identical pixels, 0 differing bytes), the same order with depth off lets the last-drawn quad win (control), stencil enable and non-LESS compares refused with plain reasons; per-draw depth surface only (no cross-draw depth, no readback, depth-write-enable not separated), hardware GPU untested |
+| Frame-persistent render targets (slice S13): DB depth buffer binding (`DB_Z_INFO`/`DB_Z_READ_BASE`/`DB_Z_WRITE_BASE`/`DB_DEPTH_SIZE`; layout from public shadPS4 regs.cpp/regs_depth.h, values only); draws into one caller-shared frame accumulate into the bound colour target and test against earlier draws' depth; depth write-enable honoured; the frame restarts (fresh clear) on a binding or size change | Experimental, Tested on lavapipe: two draws one frame - far quad then near quad keeps far pixels outside and near inside (accumulation + cross-draw depth), reversed order blocks the far draw over the near one, no-cache control repaints (per-draw), write-off leaves depth untouched, new z_base clears; Z16/tiled/stencil/separate-base bindings refused; linear D32 only, no readback, DB clears untracked (frame boundaries not modelled), hardware GPU untested |
 | Full64 runtime pointers: scalar add/addc/sub/subb pair arithmetic, carry-aware FLAT offsets, lexicographic bounds/alignment guards | Experimental, Tested (cross-low-word bindings, overflow/borrow/OOB, spirv-val + lavapipe); single invocation, existing bounded SSBO only |
 | Strict counted loop: scalar constant or runtime uniform count 1..64, one uint32 vector accumulator add, decrement/compare/backedge; real SPIR-V LoopMerge/Phi | Experimental, Tested (1/2/8/64 invocations, 1/2/16/64 counts, spirv-val + lavapipe); invalid runtime count rejected before dispatch plus GPU no-op guard; no body memory, nesting or general CFG |
 | Proof-checked copy loop: guarded dword load/store, two affine pointer increments, constant/runtime uniform count; exact lane x iteration collision/alias proof | Experimental, Tested (spirv-val + lavapipe, tiled/transposed maps, offsets, invalid-count no-op); no in-place updates, full64 loop pointers or broader body/control flow |
@@ -217,12 +218,12 @@ compiles but runs no games at all (see [docs/platforms.md](docs/platforms.md)).
 | Any commercial PS5 software support | Blocked (proprietary formats, authorization, DRM — see docs) |
 
 Latest measured test result on Linux x86-64 (g++ 11.4, CMake 3.22):
-**2765/2765 unit tests pass (2670 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
+**2779/2779 unit tests pass (2684 without `spirv-val`), 22/22 CTest suites pass** (unit, end-to-end native
 launch, full package workflow: build -> import -> list -> run imported
 game, the cube/mesh/lit/texture/lit-texture `pnr run` demos, plus the headless launcher journeys, compact
 shader fixtures/mutation diagnostics) on a fresh Release `-Werror` build
 (the build against the official Vulkan headers was measured in an earlier slice and
-not re-run for these counts). ASan+UBSan: 2670/2670
+not re-run for these counts). ASan+UBSan: 2684/2684
 unit tests pass (the sanitizer build has no `spirv-val`), leak detection disabled (no leak-check claim); under
 ASan, `pnr_psgame_workflow` still fails on one known exact-count assertion
 (a documented sanitizer artifact, not fixed). No benchmarks exist yet; none
