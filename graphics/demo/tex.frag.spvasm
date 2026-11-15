@@ -1,6 +1,6 @@
 ; PNR hand-authored textured fragment shader: rgb = texture(set 0 binding 0, uv).rgb
-; * colour, alpha 1. Filtering and addressing come from the sampler the host
-; created (nearest/linear, repeat/clamp). No mipmaps, no LOD bias. GPL-2.0.
+; * colour, alpha = sampled alpha (slice S20). Filtering and addressing come from the sampler the host
+; created (nearest/linear, repeat/clamp, mip state). GPL-2.0.
                OpCapability Shader
                OpMemoryModel Logical GLSL450
                OpEntryPoint Fragment %main "main" %inCol %inUV %outCol
@@ -42,7 +42,8 @@
           %r = OpFMul %float %t0 %c0
           %g = OpFMul %float %t1 %c1
           %b = OpFMul %float %t2 %c2
-        %out = OpCompositeConstruct %v4 %r %g %b %f1
+         %t3 = OpCompositeExtract %float %t 3
+        %out = OpCompositeConstruct %v4 %r %g %b %t3
                OpStore %outCol %out
                OpReturn
                OpFunctionEnd
