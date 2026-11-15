@@ -171,3 +171,24 @@ makes the load fail with a message naming it, and nothing runs.
 - Not done: physical-pad verification, controller-database mapping, multiple pads, hotplug during play,
   hat-to-dpad naming beyond hat 0 (extra hats report as zeroed axes), feeding the C5 guest pad model from the
   live source inside a `pnr run` game loop.
+
+## Slice S5 notes (wider RDNA float ALU coverage)
+- The translator's float subset grows by eight instructions, opcode numbers from AMD's public "RDNA 2" ISA
+  (VOP1/VOP2 tables): `v_subrev_f32` (VOP2 5), `v_min_f32` (15), `v_max_f32` (16), `v_mac_f32` (31),
+  `v_rcp_f32` (VOP1 42), `v_sqrt_f32` (51), `v_cvt_f32_i32` (5, truncation toward zero) and
+  `v_cvt_i32_f32` (8). Status: Experimental, Tested.
+- `v_mac_f32` is emitted as multiply-then-add (two roundings), matching RDNA semantics; the fused
+  single-rounding form stays with `v_fma_f32` (slice S2). A `v_mac_f32` with an undefined destination
+  accumulator is rejected.
+- `v_rcp_f32` is emitted as a correctly-rounded `1.0f/x` (OpFDiv). RDNA's own rcp is approximate, so this
+  deliberately is NOT bit-identical to hardware - documented, not hidden.
+- Min/max NaN handling follows the host GLSL.std.450 FMin/FMax, not RDNA's operand-pick rule; the conversion
+  ops introduce a signed 32-bit SPIR-V type only in modules that use them (all other modules stay
+  byte-identical).
+- `tests/rdna_alu_tests.cpp`: synthetic 24-lane kernels on the slice S2 vertex layout, executed on the real
+  Vulkan backend with host readback against a CPU float reference. Measured: sub/subrev/min/max/mac exact
+  (0 ulp), rcp exact division (0 ulp), sqrt (0 ulp), both conversions exact; spirv-val accepts a mixed
+  min/rcp/cvt module. Three earlier "outside subset" rejection checks were flipped to acceptance with the
+  documented caveats.
+- Not done: SDWA/DPP/source modifiers remain rejected, denorm/rounding modes stay host policy, wave/EXEC
+  semantics unchanged, hardware GPU untested, min/max signed-zero and NaN picks not matched to RDNA.
