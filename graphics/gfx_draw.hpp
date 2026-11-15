@@ -80,7 +80,9 @@ struct DrawResult {
 // slice S10). PVS1/PVS2 blobs are built for one specific vertex count (at most 64, one
 // dispatch); a PVS3 blob batches any count up to kDrawMaxVertices (slice S9). Other
 // primitives and instancing beyond 1 are refused. (GNM has no 8-bit index type; nothing
-// is emulated for one.)
+// is emulated for one.) DB_DEPTH_CONTROL switches on depth testing (slice S12): only the
+// LESS compare, no stencil, and the depth surface is per-draw (no cross-draw depth or
+// readback; the host clears to 1.0).
 DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::DrawCall& draw);
 
 }  // namespace pnr::graphics
