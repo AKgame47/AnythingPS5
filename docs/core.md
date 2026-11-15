@@ -492,6 +492,42 @@ makes the load fail with a message naming it, and nothing runs.
 - Limits: single cube only (no cube arrays), linear tiling, square faces,
   no cube RDNA sampling translation (host rasterizer), hardware GPU untested.
 
+### Vulkan enum audit (S28 follow-up)
+The S27 view-type bug proved that byte-exact lavapipe images do not prove
+API-valid configuration: the software rasterizer accepts wrong-but-plausible
+enum values and still renders. So every VK_* constant the shim re-declares
+(134 names) was compared by script against the Khronos Vulkan-Headers
+vulkan_core.h (VK_HEADER_VERSION 204, Vulkan 1.3.204, Apache-2.0, values
+only). The audit found two more wrong values beyond the S27 pair:
+VK_PRESENT_MODE_FIFO_KHR was 1 (MAILBOX; real FIFO = 2) and
+VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT was 8 (MUTABLE_FORMAT; real = 16). All
+four shipped values were silently tolerated by lavapipe; the first three are
+invalid usage a validation layer would flag, and a cube view without
+CUBE_COMPATIBLE is undefined on strict drivers. All four are fixed.
+Regression protection: tests/vulkan_enum_ref.h (generated, verbatim Khronos
+values, PNR-local names) plus 133 static_asserts in
+tests/vulkan_enum_check_tests.cpp - the build fails the moment a shim
+constant drifts. Regenerate after adding shim constants:
+
+    python3 - <<'EOF'
+    import re
+    ref = {}
+    for line in open('<vulkan_core.h path>'):
+        m = re.match(r'\s+(VK_[A-Z0-9_]+)\s*=\s*([0-9xXa-fA-F]+)[UuLl]*\s*,', line)
+        if m: ref[m.group(1)] = int(m.group(2), 0)
+    # then rewrite tests/vulkan_enum_ref.h and the static_assert block in
+    # tests/vulkan_enum_check_tests.cpp from the shim's VK_* names (values
+    # must match ref; VK_COLOR_COMPONENT_RGBA is shim-invented, skip it)
+    EOF
+
+Remaining gap (tracked, not yet closed): no Vulkan validation layer runs in
+tests today - none is installed locally or in CI (ci.yml installs only
+libvulkan1 + mesa-vulkan-drivers), so tolerated-invalid configuration still
+isn't caught at runtime. A follow-up slice should add a CI job that installs
+vulkan-validationlayers and runs the suite with
+VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation, treating layer errors as
+failures, before more texture features land on the shim.
+
 ## Slice S27 notes (2D texture arrays)
 - Color2DArray T# images (type 13, value from public shadPS4 resource.h
   ImageType) are accepted: linear tiling only, base_array 0, up to 256
