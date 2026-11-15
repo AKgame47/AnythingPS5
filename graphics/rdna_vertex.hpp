@@ -157,4 +157,121 @@ inline Status rdna_light_dots(VulkanBackend& vk, const std::vector<float>& norma
   return Status::Ok();
 }
 
+
+// ---- slice S6: translated perspective divide + viewport transform ----
+namespace detail {
+// Generalised prelude: address pairs for nregions n-word regions (pair k in
+// v[3+2k], v[4+2k]) and nloads FLAT dword loads of the first regions into
+// first_load_reg+k. Same lane addressing as rdna_prelude (v0 = lane index).
+inline void rdna_prelude_multi(std::vector<uint32_t>& w, uint32_t n,
+                               uint32_t nregions, uint32_t nloads,
+                               uint32_t first_load_reg) {
+  auto lit = [&](uint32_t d, uint32_t value) {
+    w.push_back(0x7e0002ffu | (d << 17u)); w.push_back(value);
+  };
+  const uint32_t lo = uint32_t(kRdnaVertexBase);
+  const uint32_t hi = uint32_t(kRdnaVertexBase >> 32u);
+  w.push_back(rdna_vop2(0x25, 1, 0, 256));  // v1 = v0 + v0   (lane*2)
+  w.push_back(rdna_vop2(0x25, 2, 1, 257));  // v2 = v1 + v1   (lane*4)
+  for (uint32_t k = 0; k < nregions; ++k) {
+    const uint32_t a = 3 + 2 * k;
+    lit(a, lo + n * 4 * k);
+    w.push_back(rdna_vop2(0x25, a, 2, 256 + a));  // lo += lane*4
+    lit(a + 1, hi);
+  }
+  for (uint32_t k = 0; k < nloads; ++k) {
+    w.push_back(0xdc300000u);
+    w.push_back(0x007f0000u | ((first_load_reg + k) << 24u) | (3 + 2 * k));
+  }
+}
+// FLAT dword store of data_vgpr through address pair addr_pair_lo/+1.
+inline void rdna_store(std::vector<uint32_t>& w, uint32_t data_vgpr, uint32_t addr_pair_lo) {
+  w.push_back(0xdc700000u);
+  w.push_back(0x007f0000u | (data_vgpr << 8u) | addr_pair_lo);
+}
+// The translated subset allows one store per kernel, so the post-transform
+// is one kernel per output component over the same 5-region layout:
+// in clip x[n], y[n], z[n], w[n]; out region 4.
+inline std::vector<uint32_t> post_body_ndc(uint32_t n, uint32_t c) {
+  std::vector<uint32_t> w;
+  rdna_prelude_multi(w, n, 5, 4, 50);          // v50=x v51=y v52=z v53=w
+  w.push_back(0x7e000000u | (0x2au << 9u) | (54u << 17u) | (256u + 53u));  // v54 = rcp(w)
+  w.push_back(rdna_vop2(8, 55, 50 + c, 256 + 54));                        // v55 = clip_c * inv_w
+  rdna_store(w, 55, 3 + 2 * 4);
+  w.push_back(0xbf810000u);
+  return w;
+}
+inline std::vector<uint32_t> post_body_win(uint32_t n, uint32_t c) {
+  std::vector<uint32_t> w = post_body_ndc(n, c);
+  w.pop_back();  // drop end
+  w.pop_back();  // drop store word 2
+  w.pop_back();  // drop store word 1
+  // v55 = ndc_c; win = fma(ndc_c, s[2c], s[2c+1]); depth clamps to [s6, s7].
+  rdna_fma_f32(w, 55, 256 + 55, 2 * c, 2 * c + 1);
+  if (c == 2) {
+    w.push_back(rdna_vop2(0x10, 55, 55, 6));   // v55 = max(s6, v55)
+    w.push_back(rdna_vop2(0x0f, 55, 55, 7));   // v55 = min(s7, v55)
+  }
+  rdna_store(w, 55, 3 + 2 * 4);
+  w.push_back(0xbf810000u);
+  return w;
+}
+}  // namespace detail
+
+// ndc component c (0=x,1=y,2=z) of the post-transform: inv_w = rcp(w) (slice
+// S5: correctly-rounded 1.0f/w, NOT RDNA's approximate rcp), ndc_c = clip_c *
+// inv_w. w = 0 gives IEEE inf/NaN propagation: no guard, documented.
+inline std::vector<uint32_t> rdna_post_ndc_kernel(uint32_t c, uint32_t n) {
+  return detail::post_body_ndc(n, c);
+}
+
+// Window component c of the post-transform: win_c = fma(ndc_c, s[2c],
+// s[2c+1]); the depth component (c = 2) is clamped to [s6, s7] with host
+// FMin/FMax NaN semantics. Uniform ABI (8 words): s0=xscale s1=xoffset
+// s2=yscale s3=yoffset s4=zscale s5=zoffset s6=zmin s7=zmax.
+inline std::vector<uint32_t> rdna_post_win_kernel(uint32_t c, uint32_t n) {
+  return detail::post_body_win(n, c);
+}
+
+// Runs the post-transform over n clip-space vertices (clip = 4n interleaved
+// x,y,z,w). vp8 = 8 viewport words (xscale, xoffset, yscale, yoffset, zscale,
+// zoffset, zmin, zmax) as float bit patterns. Fills ndc[3n] and win[3n]
+// (window x, y, clamped depth). Six dispatches (one store per kernel).
+inline Status rdna_post_transform_clip(VulkanBackend& vk, const std::vector<float>& clip,
+                                       const std::vector<uint32_t>& vp8,
+                                       std::vector<float>* ndc, std::vector<float>* win) {
+  if (!ndc || !win) return Status::Fail(100, "rdna-vertex", "output vectors required");
+  if (clip.empty() || clip.size() % 4 || clip.size() / 4 > kRdnaVertexMax)
+    return Status::Fail(100, "rdna-vertex", "clip must be xyzw quads, 1..24");
+  if (vp8.size() != 8) return Status::Fail(100, "rdna-vertex", "viewport must be 8 words");
+  const uint32_t n = uint32_t(clip.size() / 4);
+  ndc->assign(size_t(n) * 3, 0.0f);
+  win->assign(size_t(n) * 3, 0.0f);
+  for (uint32_t c = 0; c < 3; ++c) {
+    auto io = [&]() {
+      std::vector<uint32_t> v(size_t(n) * 5, 0);
+      for (uint32_t i = 0; i < n; ++i)
+        for (uint32_t k = 0; k < 4; ++k) std::memcpy(&v[k * n + i], &clip[i * 4 + k], 4);
+      return v;
+    };
+    {
+      auto t = shader::translate_compute_words(rdna_post_ndc_kernel(c, n), kRdnaVertexBase, n * 5, n, 0);
+      if (!t.ok) return Status::Fail(100, "rdna-vertex", "translate: " + t.error);
+      std::vector<uint32_t> buf = io();
+      auto st = shader::run_translated_compute(vk, t, &buf, {});
+      if (!st) return st;
+      for (uint32_t i = 0; i < n; ++i) std::memcpy(&(*ndc)[i * 3 + c], &buf[4 * n + i], 4);
+    }
+    {
+      auto t = shader::translate_compute_words(rdna_post_win_kernel(c, n), kRdnaVertexBase, n * 5, n, 8);
+      if (!t.ok) return Status::Fail(100, "rdna-vertex", "translate: " + t.error);
+      std::vector<uint32_t> buf = io();
+      auto st = shader::run_translated_compute(vk, t, &buf, vp8);
+      if (!st) return st;
+      for (uint32_t i = 0; i < n; ++i) std::memcpy(&(*win)[i * 3 + c], &buf[4 * n + i], 4);
+    }
+  }
+  return Status::Ok();
+}
+
 }  // namespace pnr::graphics
