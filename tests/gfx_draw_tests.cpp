@@ -331,10 +331,10 @@ struct TexScene {
   static constexpr std::uint32_t W = 64, H = 64;
   void make_tdesc(std::uint32_t w[8], std::uint64_t base, std::uint32_t tw, std::uint32_t th,
                   std::uint32_t pitch, std::uint32_t tiling, std::uint32_t last_level = 0,
-                  std::uint32_t min_lod = 0) {
+                  std::uint32_t min_lod = 0, std::uint32_t df = 10) {
     std::uint64_t q0 = (base >> 8) & 0x3FFFFFFFFFull;
     q0 |= std::uint64_t(min_lod & 0xFFF) << 40;
-    q0 |= std::uint64_t(10) << 52;  // 8_8_8_8 unorm
+    q0 |= std::uint64_t(df & 0x3F) << 52;  // data format (10 = 8_8_8_8, 35 = BC1, 37 = BC3)
     std::uint64_t q1 = std::uint64_t(tw - 1) | (std::uint64_t(th - 1) << 14);
     q1 |= std::uint64_t(1) << 35 | std::uint64_t(2) << 38 | std::uint64_t(3) << 41;
     q1 |= std::uint64_t(last_level & 0xF) << 48;
@@ -392,6 +392,68 @@ struct TexScene {
     b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
     b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
     if (mode_cntl_set) b.set_context(amd::PA_SU_SC_MODE_CNTL, mode_cntl);
+    b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(6);
+    cmd = b.dwords();
+  }
+  // Slice S20: compressed texture (BC1/BC3). side = level-0 side (multiple
+  // of 4); each level is solid red, green, then blue cyclically. pitch 0 =
+  // tight (pitch = side), as the S20 subset requires.
+  static std::uint16_t rgb565(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+    return std::uint16_t(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+  }
+  void bc_solid(std::uint8_t* blk, std::uint32_t df, std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a) {
+    if (df == 37) { blk[0] = a; blk[1] = a; for (int i = 2; i < 8; ++i) blk[i] = 0; blk += 8; }
+    const std::uint16_t c = rgb565(r, g, b);
+    blk[0] = std::uint8_t(c); blk[1] = std::uint8_t(c >> 8);
+    blk[2] = std::uint8_t(c); blk[3] = std::uint8_t(c >> 8);
+    for (int i = 4; i < 8; ++i) blk[i] = 0;
+  }
+  void build_bc(std::uint32_t df, float uv_scale, std::uint32_t side, std::uint32_t last_level,
+                std::uint32_t mip_filter, std::uint32_t pitch = 0,
+                std::uint32_t mag_filter = 1, std::uint32_t min_filter = 1) {
+    vs_blob = make_pnr_vs3_blob(true);
+    ps_blob = make_pnr_ps2_blob();
+    mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
+    const float px[6][2] = {{-1,-1},{1,-1},{1,1},{-1,-1},{1,1},{-1,1}};
+    const float pu[6][2] = {{0,0},{1,0},{1,1},{0,0},{1,1},{0,1}};
+    for (int v = 0; v < 6; ++v) {
+      vb.push_back(px[v][0]); vb.push_back(px[v][1]); vb.push_back(0.0f);
+      vb.push_back(1.0f); vb.push_back(1.0f); vb.push_back(1.0f);  // white tint
+      vb.push_back(pu[v][0] * uv_scale); vb.push_back(pu[v][1] * uv_scale);
+    }
+    const std::uint8_t cols[3][3] = {{255,0,0},{0,255,0},{0,0,255}};
+    const std::uint32_t bb = df == 35 ? 8 : 16;
+    for (std::uint32_t l = 0; l <= last_level; ++l) {
+      const std::uint32_t lw = side >> l ? side >> l : 1;
+      const std::uint32_t nb = (lw + 3) / 4;
+      const size_t at = texels.size();
+      texels.resize(at + std::size_t(nb) * nb * bb);
+      for (std::uint32_t i = 0; i < nb * nb; ++i)
+        bc_solid(&texels[at + i * bb], df, cols[l % 3][0], cols[l % 3][1], cols[l % 3][2], 255);
+    }
+    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, side, side, pitch ? pitch : side, 31, last_level, 0, df);
+    tsharp.assign(tw, tw + 8);
+    std::uint64_t sq0 = 0;  // wrap x and y
+    std::uint64_t sq1 = std::uint64_t(mag_filter) << 20 | std::uint64_t(min_filter) << 22;
+    sq1 |= std::uint64_t(mip_filter & 3) << 26;
+    ssharp = {std::uint32_t(sq0), std::uint32_t(sq0 >> 32), std::uint32_t(sq1), std::uint32_t(sq1 >> 32)};
+    target.assign(W * H * 4, 0xCD);
+    mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
+    mem.map_external(0x200000, ps_blob.data(), ps_blob.size() * 4, "ps");
+    mem.map_external(0x300000, mat.data(), 64, "matrix");
+    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x500000, target.data(), target.size(), "target");
+    mem.map_external(0x700000, texels.data(), texels.size(), "texture");
+    mem.map_external(0x710000, tsharp.data(), tsharp.size() * 4, "tsharp");
+    mem.map_external(0x711000, ssharp.data(), ssharp.size() * 4, "ssharp");
+    pm4::Builder b;
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_PS_0, {0x710000, 0, 0x711000, 0});
+    b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
+    b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+    b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
     b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 4).num_instances(1).draw_auto(6);
     cmd = b.dwords();
   }
@@ -1303,6 +1365,56 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       auto r = s.run(vk);
       check(!r.ok && r.error.find("single-level") != std::string::npos,
             "mips: mip filtering on a single-level texture is refused"); }
+  }
+
+  // ---- slice S20: compressed textures (BC1/BC3 decoded to RGBA8) ----
+  {
+    auto centre = [](const DrawResult& r) -> const std::uint8_t* {
+      return &r.rgba[(32 * 64 + 32) * 4];
+    };
+    { TexScene s; s.build_bc(35, 1.0f, 4, 0, 0);   // BC1 solid red
+      auto r = s.run(vk);
+      const std::uint8_t* p = r.ok ? centre(r) : nullptr;
+      check(r.ok && p[0] == 255 && p[1] == 0 && p[2] == 0, "bc: BC1 solid draw samples the decoded red"); }
+    { TexScene s; s.build_bc(35, 1.0f, 4, 0, 0, 0, 0, 0);   // BC1 red/black checker block, point
+      s.texels[0] = 0x00; s.texels[1] = 0xF8; s.texels[2] = 0x00; s.texels[3] = 0x00;
+      s.texels[4] = 0x44; s.texels[5] = 0x11; s.texels[6] = 0x44; s.texels[7] = 0x11;
+      auto r = s.run(vk);
+      auto px = [&](int x, int y) { return &r.rgba[(y * 64 + x) * 4]; };
+      check(r.ok && px(8, 8)[0] == 255 && px(24, 8)[0] == 0 && px(24, 24)[0] == 255 && px(40, 40)[0] == 255,
+            "bc: BC1 checker block draws in exact 16-pixel blocks"); }
+    { TexScene s; s.build_bc(37, 1.0f, 4, 0, 0, 0, 0, 0);   // BC3 white + alpha gradient, point
+      std::uint64_t abits = 0;
+      for (int i = 0; i < 8; ++i) abits |= std::uint64_t(i) << (3 * i);
+      s.texels[0] = 255; s.texels[1] = 0;
+      for (int i = 0; i < 6; ++i) s.texels[2 + i] = std::uint8_t(abits >> (8 * i));
+      s.texels[8] = 0xFF; s.texels[9] = 0xFF; s.texels[10] = 0xFF; s.texels[11] = 0xFF;  // white c0 = c1
+      auto r = s.run(vk);
+      auto al = [&](int x, int y) { return r.rgba[(y * 64 + x) * 4 + 3]; };
+      // Row order may be direct or flipped by the clip-y chain (as in S17).
+      const bool direct = r.ok && al(24, 8) == 0;
+      const int y0 = direct ? 8 : 55, y1 = direct ? 24 : 39;
+      check(r.ok && al(8, y0) == 255 && al(24, y0) == 0 && al(40, y0) == 218 && al(8, y1) == 145,
+            "bc: BC3 alpha gradient reaches the target byte-exact");
+      const std::uint8_t* p = r.ok ? centre(r) : nullptr;
+      check(r.ok && p[0] == 255 && p[1] == 255 && p[2] == 255, "bc: BC3 colour half decodes white"); }
+    { TexScene s; s.build_bc(35, 32.0f, 8, 2, 1);  // BC1 chain, point, footprint 4 -> lod 2
+      auto r = s.run(vk);
+      const std::uint8_t* p = r.ok ? centre(r) : nullptr;
+      check(r.ok && p[0] == 0 && p[1] == 0 && p[2] == 255, "bc: BC1 mip chain selects level 2"); }
+    { TexScene s; s.build_bc(37, 16.0f, 8, 2, 1);  // BC3 chain, point, footprint 2 -> lod 1
+      auto r = s.run(vk);
+      const std::uint8_t* p = r.ok ? centre(r) : nullptr;
+      check(r.ok && p[0] == 0 && p[1] == 255 && p[2] == 0 && p[3] == 255,
+            "bc: BC3 mip chain selects level 1 with full alpha"); }
+    { TexScene s; s.build_bc(35, 1.0f, 4, 0, 0, 8);   // pitch 8 != width 4
+      auto r = s.run(vk);
+      check(!r.ok && r.error.find("tightly pitched") != std::string::npos,
+            "bc: compressed textures with a loose pitch are refused"); }
+    { TexScene s; s.build_bc(35, 1.0f, 6, 0, 0);      // 6x6 extent
+      auto r = s.run(vk);
+      check(!r.ok && r.error.find("multiples of 4") != std::string::npos,
+            "bc: compressed extents not divisible by 4 are refused"); }
   }
 
   // ---- slice S18: face culling + front face (PA_SU_SC_MODE_CNTL) ----
