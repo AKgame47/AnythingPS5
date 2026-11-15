@@ -106,6 +106,7 @@ struct VsharpScene {
   std::uint32_t num_records = 0;              // 0 -> vertex count
   std::uint32_t pos_w3 = 0, col_w3 = 0;       // overrides (0 -> built from fmt)
   std::uint32_t vcount = 0;                   // 0 -> floats/6 (interleaved layout)
+  const std::vector<std::uint32_t>* raw_vb = nullptr;  // raw record words (8_8_8_8 colours)
   static constexpr std::uint32_t W = 64, H = 64;
   static std::uint32_t vsel(std::uint32_t fmt) {
     return 0x688u | (7u << 12) | (fmt << 15);  // identity dst_sel, float
@@ -121,6 +122,8 @@ struct VsharpScene {
                                 pos_stride ? pos_stride / 4 : vsharp_components(pos_fmt),
                                 col_stride ? col_stride / 4 : vsharp_components(col_fmt));
     vb = verts;
+    const void* vbytes = raw_vb ? static_cast<const void*>(raw_vb->data()) : static_cast<const void*>(vb.data());
+    const std::size_t vsize = raw_vb ? raw_vb->size() * 4 : vb.size() * 4;
     mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
     target.assign(W * H * 4, 0xCD);
     vtable.resize(8);
@@ -129,7 +132,7 @@ struct VsharpScene {
     mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
     mem.map_external(0x200000, ps_blob.data(), 4, "ps");
     mem.map_external(0x300000, mat.data(), 64, "matrix");
-    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x400000, const_cast<void*>(vbytes), vsize, "vertices");
     mem.map_external(0x500000, target.data(), target.size(), "target");
     mem.map_external(0x700000, vtable.data(), vtable.size() * 4, "vtable");
     pm4::Builder b;
@@ -963,6 +966,42 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
         check(diff == 0, "fetch: xyzw-position pixels identical to reference");
       }
     }
+    // Slice S16: 8_8_8_8 unorm colours - byte r,g,b packed one dword per
+    // vertex behind the xyz floats (record = 4 dwords). Converted in
+    // translated RDNA (and + cvt + scale); pixels must match the float
+    // reference with colours byte/255.
+    {
+      const std::uint32_t qu[6][3] = {{255, 128, 64}, {255, 128, 64}, {255, 128, 64},
+                                      {255, 128, 64}, {255, 128, 64}, {255, 128, 64}};  // constant: no interpolation
+      std::vector<std::uint32_t> rec;
+      auto f2u_ = [](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); return u; };
+      for (int v = 0; v < 6; ++v) {
+        rec.push_back(f2u_(red[v * 6])); rec.push_back(f2u_(red[v * 6 + 1])); rec.push_back(f2u_(red[v * 6 + 2]));
+        rec.push_back(0xFF000000u | (qu[v][2] << 16) | (qu[v][1] << 8) | qu[v][0]);
+      }
+      VsharpScene u8;
+      u8.col_fmt = 10; u8.pos_stride = 16; u8.col_stride = 16; u8.col_base = 0x40000C;
+      u8.col_w3 = 0x688u | (0u << 12) | (10u << 15);   // unorm 8_8_8_8
+      u8.vcount = 6;
+      u8.raw_vb = &rec;
+      u8.build(std::vector<float>(), 4);
+      auto ru = u8.run(vk);
+      check(ru.ok, std::string("fetch: 8_8_8_8 unorm colour draw ok") + (ru.ok ? "" : (" - " + ru.error)));
+      // Float reference: per-vertex float colours byte/255, same geometry.
+      std::vector<float> fref;
+      for (int v = 0; v < 6; ++v)
+        fref.insert(fref.end(), {red[v * 6], red[v * 6 + 1], red[v * 6 + 2],
+                                 qu[v][0] / 255.0f, qu[v][1] / 255.0f, qu[v][2] / 255.0f});
+      TopoScene fr; fr.build(fref, {}, 4);
+      DrawFrameCache f1; auto rf = fr.run(vk, f1);
+      if (ru.ok && rf.ok) {
+        std::uint32_t diff = 0;
+        for (std::size_t i = 0; i < ru.rgba.size(); ++i) if (ru.rgba[i] != rf.rgba[i]) ++diff;
+        check(diff == 0, "fetch: 8_8_8_8 unorm pixels identical to float reference");
+        check(centre(ru)[0] == 255 && centre(ru)[1] == 128 && centre(ru)[2] == 64,
+              "fetch: 8_8_8_8 centre byte-exact (255,128,64)");
+      }
+    }
     // Refusals.
     { VsharpScene b1; b1.pos_w3 = VsharpScene::vsel(13) | (1u << 23); b1.build(red, 4);
       auto r1 = b1.run(vk);
@@ -970,9 +1009,12 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
     { VsharpScene b2; b2.pos_w3 = 0x688u | (0u << 12) | (13u << 15); b2.build(red, 4);  // unorm
       auto r2 = b2.run(vk);
       check(!r2.ok && r2.error.find("number format is not float") != std::string::npos, "fetch: unorm vertex data refused"); }
-    { VsharpScene b3; b3.pos_w3 = VsharpScene::vsel(10); b3.build(red, 4);   // 8_8_8_8
+    { VsharpScene b3; b3.pos_w3 = VsharpScene::vsel(9); b3.build(red, 4);    // 2_10_10_10
       auto r3 = b3.run(vk);
-      check(!r3.ok && r3.error.find("data format is not a supported") != std::string::npos, "fetch: packed 8-bit format refused"); }
+      check(!r3.ok && r3.error.find("data format is not supported") != std::string::npos, "fetch: packed 10-bit format refused"); }
+    { VsharpScene b3b; b3b.col_w3 = VsharpScene::vsel(10); b3b.build(red, 4);  // 8_8_8_8 with float numerics
+      auto r3b = b3b.run(vk);
+      check(!r3b.ok && r3b.error.find("unorm numerics") != std::string::npos, "fetch: 8_8_8_8 non-unorm refused"); }
     { VsharpScene b4; b4.num_records = 3; b4.build(red, 4);                  // red quad has 6 vertices
       auto r4 = b4.run(vk);
       check(!r4.ok && r4.error.find("num_records") != std::string::npos, "fetch: short buffer refused"); }
