@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include "graphics/gfx_bc7.hpp"
+#include "graphics/gfx_bc6h.hpp"
 
 namespace pnr::graphics {
 
@@ -136,7 +137,7 @@ inline void decode_bc5_block(const std::uint8_t* block, std::uint8_t* out) {
 // w/h are dropped. src_pitch_bytes = bytes per block row in the source.
 inline void decode_bc_level(std::uint32_t data_format, const std::uint8_t* src,
                             std::uint64_t src_pitch_bytes, std::uint32_t w, std::uint32_t h,
-                            std::uint8_t* dst) {
+                            std::uint8_t* dst, bool bc6_signed = false) {
   const std::uint32_t bb = data_format == kFormatBc1 || data_format == kFormatBc4 ? 8 : 16;
   const std::uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
   std::uint8_t block_px[64];
@@ -147,6 +148,7 @@ inline void decode_bc_level(std::uint32_t data_format, const std::uint8_t* src,
       else if (data_format == kFormatBc2) decode_bc2_block(blk, block_px);
       else if (data_format == kFormatBc3) decode_bc3_block(blk, block_px);
       else if (data_format == kFormatBc4) decode_bc4_block(blk, block_px);
+      else if (data_format == kFormatBc6) decode_bc6h_block(blk, block_px, bc6_signed);
       else if (data_format == kFormatBc7) decode_bc7_block(blk, block_px);
       else decode_bc5_block(blk, block_px);
       for (std::uint32_t py = 0; py < 4 && by * 4 + py < h; ++py)
