@@ -37,7 +37,12 @@ constexpr std::uint32_t PA_SC_SCREEN_SCISSOR_TL = ctx(0x000c), PA_SC_SCREEN_SCIS
                         CB_COLOR0_BASE = ctx(0x0318), CB_COLOR0_PITCH = ctx(0x0319), CB_COLOR0_VIEW = ctx(0x031b),
                         CB_COLOR0_INFO = ctx(0x031c), CB_COLOR0_ATTRIB = ctx(0x031d), CB_COLOR0_BASE_EXT = ctx(0x0390),
                         SPI_PS_INPUT_ENA = ctx(0x01b3), SPI_PS_INPUT_ADDR = ctx(0x01b4), VGT_SHADER_STAGES_EN = ctx(0x02d5),
-                        PA_CL_VTE_CNTL = ctx(0x0206), PA_SU_SC_MODE_CNTL = ctx(0x0205);
+                        PA_CL_VTE_CNTL = ctx(0x0206), PA_SU_SC_MODE_CNTL = ctx(0x0205),
+// DB_DEPTH_CONTROL address: public shadPS4 src/video_core/amdgpu/regs.cpp
+// (GFX6_3D_REG_INDEX(depth_control) == 0xA200; values only, no code). Field
+// layout (bit 0 stencil enable, bit 1 depth enable, bit 2 depth write
+// enable, bits 4..6 compare func): public shadPS4 regs_depth.h DepthControl.
+                        DB_DEPTH_CONTROL = ctx(0x0200);
 // UCONFIG (BASE_IDX 1, inside the 0xc000 window).
 constexpr std::uint32_t VGT_PRIMITIVE_TYPE = ctx(0x2242), VGT_INDEX_TYPE = ctx(0x2243), VGT_NUM_INSTANCES = ctx(0x224d);
 
