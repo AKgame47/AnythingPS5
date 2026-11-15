@@ -328,6 +328,28 @@ makes the load fail with a message naming it, and nothing runs.
   bytes); the same red-first order with depth off lets the last-drawn green quad win
   (control); stencil and GREATER draws refused.
 
+## Slice S18 notes (face culling - PA_SU_SC_MODE_CNTL)
+- The PolygonControl register (bit layout from public shadPS4 regs_primitive.h - values
+  only, no code) is decoded at draw time: bit 0 cull_front, bit 1 cull_back, bit 2
+  front_face (0=CCW, 1=CW). The cull bits map onto VK_CULL_MODE_* (front+back is
+  supported and culls everything); the face bit maps onto VK_FRONT_FACE_*.
+- Facing is faithful to GNM even though this pipeline hands the rasterizer NDC and the
+  host's fixed-function viewport maps it (the guest viewport values are validated but
+  not applied - a documented limit of the draw path): GNM determines facing in its
+  y-flipped window space and Vulkan's facing convention negates the framebuffer-area
+  formula, so the two sign flips cancel. The tests pin both windings against both cull
+  bits and both face values.
+- Refused with named reasons (never silently approximated): point/line polygon modes
+  (enable_polygon_mode with a non-fill front or back mode), polygon offset enables,
+  window offset, perspective-correct-interpolation disable, multi-primitive index
+  buffers. The provoking-vertex bit is ignored - flat varyings do not exist in this
+  subset, so it cannot change the output - and the draw notes say so.
+- Strips and fans expand to lists on the host (S10) with winding corrected, so a
+  cull-back draw keeps every expanded triangle; the tests render a strip quad and a
+  three-wedge fan under cull-back and check each wedge.
+- MeshInput carries cull_mode/front_face (VK values, NONE/CCW defaults) so the older
+  render entry points are unchanged; the draw notes report the active cull state.
+
 ## Slice S17 notes (texture sampling - T#/S#)
 - A "PPS2" pixel blob ({magic, 0}) marks the textured pixel stage. Pixel user data 0..1
   addresses the T# (8 dwords), 2..3 the S# (4 dwords); both descriptors live in guest
