@@ -97,6 +97,7 @@ struct TopoScene {
   std::vector<std::uint32_t> ib;
   std::vector<std::uint8_t> target;
   std::vector<std::uint32_t> cmd;
+  std::uint32_t depth_control = 0;   // DB_DEPTH_CONTROL value when nonzero (slice S12)
   static constexpr std::uint32_t W = 64, H = 64;
   void build(const std::vector<float>& verts, const std::vector<std::uint32_t>& indices, std::uint32_t prim) {
     const std::uint32_t nv = std::uint32_t(verts.size() / 6);
@@ -117,6 +118,7 @@ struct TopoScene {
     b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
     b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
     b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
+    if (depth_control) b.set_context(amd::DB_DEPTH_CONTROL, depth_control);
     b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, prim).num_instances(1);
     if (ib.empty()) {
       b.draw_auto(nv);
@@ -628,5 +630,49 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
     { ShadeScene m; m.build(tri9, lp, false);
       auto rm = m.run(vk);
       check(!rm.ok && rm.error.find("user data 4..9") != std::string::npos, "pvs4: missing shade parameters refused"); }
+  }
+
+  // ---- slice S12: depth testing (DB_DEPTH_CONTROL) ----
+  {
+    // Two full-screen overlapping quads in ONE draw: near red (z = 0.2) and
+    // far green (z = 0.8). With depth on, red wins in BOTH draw orders.
+    auto mkquad = [](float z, float rr, float gg, std::vector<float>* out) {
+      const float p[4][2] = {{-0.8f, -0.8f}, {0.8f, -0.8f}, {0.8f, 0.8f}, {-0.8f, 0.8f}};
+      const int order[6] = {0, 1, 2, 0, 2, 3};
+      for (int k = 0; k < 6; ++k)
+        out->insert(out->end(), {p[order[k]][0], p[order[k]][1], z, rr, gg, 0.0f});
+    };
+    std::vector<float> rg; mkquad(0.2f, 1, 0, &rg); mkquad(0.8f, 0, 1, &rg);   // red first
+    std::vector<float> gr; mkquad(0.8f, 0, 1, &gr); mkquad(0.2f, 1, 0, &gr);   // green first
+    auto centre = [](const DrawResult& r) { return &r.rgba[(32 * 64 + 32) * 4]; };
+    auto is_red = [](const std::uint8_t* p) { return p[0] == 255 && p[1] == 0; };
+    auto is_green = [](const std::uint8_t* p) { return p[0] == 0 && p[1] == 255; };
+    TopoScene d1; d1.depth_control = 0x12; d1.build(rg, {}, 4); // depth on (enable + LESS), red first
+    auto r1 = d1.run(vk);
+    TopoScene d2; d2.depth_control = 0x12; d2.build(gr, {}, 4); // depth on (enable + LESS), green first
+    auto r2 = d2.run(vk);
+    TopoScene d0; d0.build(rg, {}, 4);                          // depth off, same red-first order as d1
+    auto r0 = d0.run(vk);
+    if (!r1.ok) std::printf("  depth-1 error: %s\n", r1.error.c_str());
+    if (!r2.ok) std::printf("  depth-2 error: %s\n", r2.error.c_str());
+    if (!r0.ok) std::printf("  depth-0 error: %s\n", r0.error.c_str());
+    check(r1.ok && r2.ok && r0.ok, "depth: three draws ok");
+    if (r1.ok && r2.ok && r0.ok) {
+      check(is_red(centre(r1)) && r1.notes.find("depth testing on") != std::string::npos,
+            "depth: near quad wins when drawn first, depth stated");
+      check(is_red(centre(r2)), "depth: near quad wins when drawn second (order-independent)");
+      check(is_green(centre(r0)), "depth: same draw order with depth off - the last-drawn (green) quad wins (control)");
+      std::uint32_t d = 0;
+      for (size_t p = 0; p < size_t(64) * 64 * 4; ++p) d += r1.rgba[p] != r2.rgba[p];
+      check(d == 0, "depth: both draw orders give byte-identical pixels with depth on");
+    }
+    // Refusals: stencil, and compare functions other than LESS.
+    { TopoScene s; s.depth_control = 3; // stencil bit + enable, func field 0 (stencil refused first)
+      s.build(rg, {}, 4);
+      auto r = s.run(vk);
+      check(!r.ok && r.error.find("stencil") != std::string::npos, "depth: stencil enable refused"); }
+    { TopoScene g; g.depth_control = 2 | (4u << 4); g.build(rg, {}, 4);
+      auto r = g.run(vk);
+      check(!r.ok && r.error.find("LESS") != std::string::npos, "depth: GREATER compare refused (only LESS supported)"); }
   }
 }
