@@ -317,16 +317,20 @@ makes the load fail with a message naming it, and nothing runs.
   (values only, no code). A func field of 0 means NEVER - depth enable alone is not LESS.
 - `DrawBindings` (graphics/gfx_state.{hpp,cpp}) tracks the raw register when written.
 - `execute_draw` (graphics/gfx_draw.cpp): when the register is set and bit 1 is on, the draw
-  renders with the host depth attachment (compare LESS, clear 1.0, D32_SFLOAT). Stencil
-  enable (bit 0) is refused with "stencil testing is not supported"; any compare func other
-  than LESS (bits 4..6 != 1) is refused with "only the LESS depth compare function is
-  supported". The depth surface is created and destroyed per draw: no cross-draw depth, no
+  renders with the host depth attachment (clear 1.0, D32_SFLOAT). Stencil
+  enable (bit 0) is refused with "stencil testing is not supported". Slice S26: all eight
+  compare functions are supported - the AMD CompareFunc encoding 0..7 (never/less/equal/
+  lequal/greater/notequal/gequal/always) matches the VkCompareOp values exactly (values
+  only, public shadPS4 regs_depth.h CompareFunc), so bits 4..6 pass through raw.
+  The depth surface is created and destroyed per draw: no cross-draw depth, no
   depth readback, DB_DEPTH_CLEAR untracked, depth write enable (bit 2) not separated (the
   host always tests and writes within the draw). The notes state the limits.
 - Tests (gfx_draw_tests.cpp): two overlapping quads (near red z = 0.2, far green z = 0.8) in
   one draw - with depth on red wins in BOTH draw orders (byte-identical pixels, 0 differing
   bytes); the same red-first order with depth off lets the last-drawn green quad win
-  (control); stencil and GREATER draws refused.
+  (control); stencil draws refused. Slice S26 adds the compare-function matrix: a green
+  reference quad at z = 0.5 (ALWAYS + write) then a red quad under each function into one
+  shared frame - 14 pass/fail cases (nearer/farther/equal per function) plus a notes check.
 
 ## Slice S18 notes (face culling - PA_SU_SC_MODE_CNTL)
 - The PolygonControl register (bit layout from public shadPS4 regs_primitive.h - values
@@ -463,6 +467,21 @@ makes the load fail with a message naming it, and nothing runs.
   exactly, GCN 8/31 and unknown modes refused with named reasons.
 - Limits: thin (2D, single-slice) modes only - no thick/3D modes, arrays or depth
   sampling; sampling is still not translated RDNA; hardware GPU untested.
+
+## Slice S26 notes (depth compare functions)
+- All eight DB_DEPTH_CONTROL compare functions (bits 4..6) supported: never/less/equal/
+  lequal/greater/notequal/gequal/always. The AMD CompareFunc encoding 0..7 is identical to
+  the VkCompareOp values (values only, public shadPS4 regs_depth.h CompareFunc; the sampler
+  DepthCompare enum in shadPS4 resource.h agrees), so the field passes to the host pipeline
+  raw. Replaces the S12 "only LESS" refusal; stencil stays refused.
+- Plumbing: MeshInput.depth_compare (VK_COMPARE_OP_LESS default keeps pre-S26 callers
+  unchanged) through render_clip_mesh_rgba / render_textured_clip_mesh_rgba into
+  VkPipelineDepthStencilStateCreateInfo.depthCompareOp. Draw notes name the function.
+- Tests (gfx_draw_tests.cpp): 14 shared-frame cases - a green z = 0.5 reference (ALWAYS +
+  write) then a red test quad per function at nearer/farther/equal depth; centre pixel is
+  red iff the function passes. Plus a notes check. Stencil refusal kept.
+- Limits: unchanged from S12/S13 - no depth readback, DB_DEPTH_CLEAR untracked, per-draw
+  surface without a DB binding, D32 float only, stencil refused, hardware GPU untested.
 
 ## Slice S25 notes (BC6H decode)
 - BC6H (T# data format 40, value from public shadPS4 pixel_format.h) completes
@@ -649,7 +668,7 @@ makes the load fail with a message naming it, and nothing runs.
   size, surface). `execute_draw(vk, mem, draw, frame)` renders into the cache; the 3-argument
   overload keeps an empty cache, so single draws behave exactly as before (slice S12 per-draw
   depth). The frame restarts (fresh clear) when the colour base, z base or size changes.
-- Binding rules: with depth enable + LESS and a valid linear Z32 float DB binding, the draw uses
+- Binding rules: with depth enable and a valid linear Z32 float DB binding, the draw uses
   the persistent depth surface; DB_DEPTH_CONTROL depth_write_enable (bit 2) is honoured (read-only
   depth tests without it). Without a valid binding the draw keeps the slice-S12 per-draw depth
   surface. Refused with plain reasons: Z16 and the reserved format, tiled depth (HTILE, bit 28),
