@@ -70,6 +70,9 @@ inline std::vector<uint32_t> make_pnr_ps2_blob() { return {kPnrPs2Magic, 0}; }
 // Slice S27: blob v1 - the T# is a Color2DArray; the vertex record carries a
 // slice index after the uv pair (9 floats per vertex).
 inline std::vector<uint32_t> make_pnr_ps2_array_blob() { return {kPnrPs2Magic, 1}; }
+// Slice S28: blob v2 - the T# is a Cube; the vertex record carries the
+// cubemap direction (9 floats per vertex: xyz rgb dir3).
+inline std::vector<uint32_t> make_pnr_ps2_cube_blob() { return {kPnrPs2Magic, 2}; }
 
 // Runs the four component kernels; uniforms8 = s0..s7 as float bit patterns.
 inline Status rdna_pixel_colour(VulkanBackend& vk, const std::vector<uint32_t>& uniforms8,
