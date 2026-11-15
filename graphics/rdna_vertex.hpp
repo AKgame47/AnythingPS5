@@ -48,6 +48,13 @@ inline void rdna_epilogue(std::vector<uint32_t>& w) {
   w.push_back(0xdc700000u); w.push_back(0x007f0000u | (14u << 8u) | 9u);  // store v14
   w.push_back(0xbf810000u);
 }
+// Two-word VOP3A v_fma_f32 (AMD public "RDNA 2" ISA, Table 83 opcode 331),
+// no modifiers. Sources are 9-bit selectors: SGPR k = k, VGPR k = 256+k.
+inline void rdna_fma_f32(std::vector<uint32_t>& w, uint32_t d,
+                         uint32_t s0, uint32_t s1, uint32_t s2) {
+  w.push_back(0xd4000000u | (331u << 16u) | d);
+  w.push_back(s0 | (s1 << 9u) | (s2 << 18u));
+}
 }  // namespace detail
 
 // SSBO word layout for n points: x[n], y[n], z[n], out[n].
@@ -84,11 +91,27 @@ inline std::vector<uint32_t> rdna_dot3_kernel(uint32_t n) {
   return w;
 }
 
+// Same component kernel built on fused multiply-add: one VOP3 v_fma_f32 per
+// matrix term, single rounding per term instead of separate mul/add. Same
+// uniform ABI (s0..s15 = column-major matrix) and SSBO layout.
+inline std::vector<uint32_t> rdna_vertex_component_kernel_fma(uint32_t c, uint32_t n) {
+  std::vector<uint32_t> w;
+  detail::rdna_prelude(w, n);
+  // out_c = fma(x, m[c], fma(y, m[4+c], fma(z, m[8+c], m[12+c])))
+  w.push_back(0x7e000200u | (14u << 17u) | (12u + c));  // v_mov_b32 v14, s[12+c]
+  detail::rdna_fma_f32(w, 14, 256 + 13, 8 + c, 256 + 14);
+  detail::rdna_fma_f32(w, 14, 256 + 12, 4 + c, 256 + 14);
+  detail::rdna_fma_f32(w, 14, 256 + 11, c, 256 + 14);
+  detail::rdna_epilogue(w);
+  return w;
+}
+
 // Transforms n points (xyz interleaved) by column-major mat4 words (as uint
 // bit patterns). Fills clip[4n] with x,y,z,w per point. Four dispatches.
+// fma=true selects the fused multiply-add kernel (v_fma_f32 VOP3 path).
 inline Status rdna_transform_points(VulkanBackend& vk, const std::vector<float>& xyz,
                                     const std::vector<uint32_t>& mat_words,
-                                    std::vector<float>* clip) {
+                                    std::vector<float>* clip, bool fma = false) {
   if (!clip) return Status::Fail(100, "rdna-vertex", "output vector required");
   if (xyz.empty() || xyz.size() % 3 || xyz.size() / 3 > kRdnaVertexMax)
     return Status::Fail(100, "rdna-vertex", "points must be xyz triples, 1..24");
@@ -97,7 +120,8 @@ inline Status rdna_transform_points(VulkanBackend& vk, const std::vector<float>&
   const uint32_t n = uint32_t(xyz.size() / 3);
   clip->assign(size_t(n) * 4, 0.0f);
   for (uint32_t c = 0; c < 4; ++c) {
-    auto t = shader::translate_compute_words(rdna_vertex_component_kernel(c, n),
+    auto t = shader::translate_compute_words(fma ? rdna_vertex_component_kernel_fma(c, n)
+                                                 : rdna_vertex_component_kernel(c, n),
                                              kRdnaVertexBase, n * 4, n, 16);
     if (!t.ok) return Status::Fail(100, "rdna-vertex", "translate: " + t.error);
     std::vector<uint32_t> io(n * 4, 0);
