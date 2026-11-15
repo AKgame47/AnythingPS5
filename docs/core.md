@@ -309,3 +309,21 @@ makes the load fail with a message naming it, and nothing runs.
 - Not done: interpolated INPUTS to translated pixel code (real PS varyings per pixel), more
   than one varying channel, specular/multiple lights, normal transforms, textures, hardware
   GPU verification.
+
+## Slice S12 notes (depth testing: DB_DEPTH_CONTROL)
+- `DB_DEPTH_CONTROL` (ctx 0x200) added to graphics/amd_regs.hpp. Register address and field
+  layout (bit 0 stencil enable, bit 1 depth enable, bit 2 depth write enable, bits 4..6
+  compare func) from public shadPS4 src/video_core/amdgpu/{regs.cpp,regs_depth.h}
+  (values only, no code). A func field of 0 means NEVER - depth enable alone is not LESS.
+- `DrawBindings` (graphics/gfx_state.{hpp,cpp}) tracks the raw register when written.
+- `execute_draw` (graphics/gfx_draw.cpp): when the register is set and bit 1 is on, the draw
+  renders with the host depth attachment (compare LESS, clear 1.0, D32_SFLOAT). Stencil
+  enable (bit 0) is refused with "stencil testing is not supported"; any compare func other
+  than LESS (bits 4..6 != 1) is refused with "only the LESS depth compare function is
+  supported". The depth surface is created and destroyed per draw: no cross-draw depth, no
+  depth readback, DB_DEPTH_CLEAR untracked, depth write enable (bit 2) not separated (the
+  host always tests and writes within the draw). The notes state the limits.
+- Tests (gfx_draw_tests.cpp): two overlapping quads (near red z = 0.2, far green z = 0.8) in
+  one draw - with depth on red wins in BOTH draw orders (byte-identical pixels, 0 differing
+  bytes); the same red-first order with depth off lets the last-drawn green quad win
+  (control); stencil and GREATER draws refused.
