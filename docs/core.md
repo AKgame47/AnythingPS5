@@ -328,6 +328,25 @@ makes the load fail with a message naming it, and nothing runs.
   bytes); the same red-first order with depth off lets the last-drawn green quad win
   (control); stencil and GREATER draws refused.
 
+## Slice S16 notes (8_8_8_8 unorm vertex colours)
+- The S15 fetch kernels gain a conversion path for data format 10 (8_8_8_8) with unorm
+  numerics: all four components share the record's first dword, so the component dword
+  offset is 0 and the byte is extracted after the load - v_and with the byte mask, cvt to
+  float, fmul by 1/(255*256^c). Bytes 0..2 stay below 2^24, so the subset's signed
+  cvt_i32->f32 is exact; the two roundings (scale constant, multiply) stay ~2 ulp, far
+  below the 0.5/255 UNORM8 quantization step, so the rendered bytes are exact.
+- Validation (gfx_vsharp.hpp): 8_8_8_8 is fetchable only for colour attributes with unorm
+  numerics; 8_8_8_8 positions, snorm/integer byte formats and other packed formats are
+  refused with plain reasons. The guest read for the last vertex keeps to one dword for
+  8_8_8_8 (three components in one dword), so the bounds check stays exact.
+- The alpha byte is not fetched: byte 3's masked value can exceed 2^31 and needs an
+  unsigned cvt (v_cvt_f32_u32), which the subset does not have yet - Planned with the
+  wider format work. Fragment alpha stays 1.0 (slice S14 note).
+- Tests (gfx_draw_tests.cpp): a constant-colour quad as packed records (xyz floats + one
+  colour dword, stride 16) renders byte-identical to the float reference with colours
+  byte/255, and the centre is byte-exact for a mixed colour (255,128,64); 2_10_10_10 and
+  8_8_8_8-with-float-numerics bindings are refused.
+
 ## Slice S15 notes (vertex fetch: V# buffer descriptors)
 - V# decode (graphics/gfx_vsharp.hpp): the 128-bit buffer resource (base 44 bits, stride 14,
   num_records; dst_sel x..w, num_format, data_format, element_size, index_stride,
