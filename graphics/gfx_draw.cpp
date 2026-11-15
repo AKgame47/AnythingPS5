@@ -10,6 +10,7 @@
 #include "graphics/demo/spin_shaders.hpp"
 #include "graphics/demo/tex_shaders.hpp"
 #include "graphics/gfx_tsharp.hpp"
+#include "graphics/gfx_bc.hpp"
 #include "graphics/gfx_vsharp.hpp"
 #include "graphics/rdna_fetch.hpp"
 #include "graphics/rdna_pixel.hpp"
@@ -351,6 +352,9 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
       // Repack pitched rows into tightly packed RGBA8 levels for staging.
       // Guest layout: level 0 at the T# pitch, smaller levels tightly
       // pitched one after another (the layout validate_tsharp_sample bounds).
+      // Compressed formats (BC1/BC3) are decoded block by block into RGBA8.
+      const bool bc = ts.data_format == 35 || ts.data_format == 37;
+      const std::uint32_t bb = ts.data_format == 35 ? 8 : ts.data_format == 37 ? 16 : 4;
       const std::uint32_t levels = ts.last_level + 1;
       std::uint64_t chain_bytes = 0;
       for (std::uint32_t l = 0; l < levels; ++l) {
@@ -359,16 +363,30 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
         chain_bytes += std::uint64_t(lw) * lh * 4;
       }
       texels.resize(chain_bytes);
+      std::vector<std::uint8_t> raw;
       std::uint64_t off = 0, src = ts.base;
       for (std::uint32_t l = 0; l < levels; ++l) {
         const std::uint32_t lw = ts.width >> l ? ts.width >> l : 1;
         const std::uint32_t lh = ts.height >> l ? ts.height >> l : 1;
         // Level 0 rows sit at the T# pitch; deeper levels are tight already.
-        const std::uint64_t src_row = std::uint64_t(l == 0 ? ts.pitch : lw) * 4;
-        for (std::uint32_t row = 0; row < lh; ++row)
-          if (!mem.read(src + std::uint64_t(row) * src_row, texels.data() + off + std::size_t(row) * lw * 4, lw * 4))
-            return fail(r, "T# pixels are not mapped: " + mem.last_error());
-        src += src_row * lh;
+        // For compressed formats a "row" is a row of 4x4 blocks.
+        const std::uint32_t rows = bc ? (lh + 3) / 4 : lh;
+        const std::uint64_t row_bytes = bc ? std::uint64_t((lw + 3) / 4) * bb : std::uint64_t(lw) * 4;
+        const std::uint64_t src_row = l == 0 && !bc ? std::uint64_t(ts.pitch) * 4
+                                     : l == 0 ? std::uint64_t(ts.pitch / 4) * bb
+                                              : row_bytes;
+        if (!bc) {
+          for (std::uint32_t row = 0; row < rows; ++row)
+            if (!mem.read(src + std::uint64_t(row) * src_row, texels.data() + off + std::size_t(row) * row_bytes, row_bytes))
+              return fail(r, "T# pixels are not mapped: " + mem.last_error());
+        } else {
+          raw.resize(rows * row_bytes);
+          for (std::uint32_t row = 0; row < rows; ++row)
+            if (!mem.read(src + std::uint64_t(row) * src_row, raw.data() + std::size_t(row) * row_bytes, row_bytes))
+              return fail(r, "T# blocks are not mapped: " + mem.last_error());
+          decode_bc_level(ts.data_format, raw.data(), row_bytes, lw, lh, texels.data() + off);
+        }
+        src += src_row * rows;
         off += std::uint64_t(lw) * lh * 4;
       }
       tex.rgba = texels.data(); tex.w = ts.width; tex.h = ts.height;
