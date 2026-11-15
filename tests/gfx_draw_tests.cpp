@@ -102,6 +102,7 @@ struct TopoScene {
   std::uint32_t zinfo = 3;           // DB_Z_INFO value (3 = Z32 float linear)
   std::uint32_t stencil_info = 0;    // DB_STENCIL_INFO value when nonzero
   std::uint64_t z_write_base = 0;    // separate write base when nonzero
+  std::uint32_t blend0 = 0;          // CB_BLEND0_CONTROL value when nonzero (slice S14)
   static constexpr std::uint32_t W = 64, H = 64;
   void build(const std::vector<float>& verts, const std::vector<std::uint32_t>& indices, std::uint32_t prim) {
     const std::uint32_t nv = std::uint32_t(verts.size() / 6);
@@ -130,6 +131,7 @@ struct TopoScene {
       b.set_context(amd::DB_DEPTH_SIZE, ((H / 8 - 1) << 11) | (W / 8 - 1));
       if (stencil_info) b.set_context(amd::DB_STENCIL_INFO, stencil_info);
     }
+    if (blend0) b.set_context(amd::CB_BLEND0_CONTROL, blend0);
     b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, prim).num_instances(1);
     if (ib.empty()) {
       b.draw_auto(nv);
@@ -774,5 +776,79 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       DrawFrameCache f; auto r = t.run(vk, f);
       check(!r.ok && r.error.find("separate depth read/write bases") != std::string::npos,
             "frame: separate depth read/write bases refused"); }
+  }
+
+  // ---- slice S14: target-0 blending (CB_BLEND0_CONTROL) ----
+  {
+    // Opaque green quad, then a red quad over it in the SAME frame with
+    // blending on. GNM factors match Vulkan 1:1; enable is bit 30.
+    auto mkq = [](float half, float rr, float gg, std::vector<float>* out) {
+      const float p[4][2] = {{-half, -half}, {half, -half}, {half, half}, {-half, half}};
+      const int order[6] = {0, 1, 2, 0, 2, 3};
+      for (int k = 0; k < 6; ++k)
+        out->insert(out->end(), {p[order[k]][0], p[order[k]][1], 0.5f, rr, gg, 0.0f});
+    };
+    std::vector<float> green; mkq(0.8f, 0, 1, &green);
+    std::vector<float> red;   mkq(0.4f, 1, 0, &red);
+    auto centre = [](const DrawResult& r) { return &r.rgba[(32 * 64 + 32) * 4]; };
+    const std::uint32_t EN = 1u << 30;
+    auto blend_val = [](std::uint32_t csf, std::uint32_t cf, std::uint32_t cdf) {
+      return EN | (csf & 31) | ((cf & 7) << 5) | ((cdf & 31) << 8);
+    };
+    // Additive (src ONE, dst ONE, ADD): red over green -> yellow.
+    { DrawFrameCache f;
+      TopoScene g, r2; g.build(green, {}, 4); r2.blend0 = blend_val(1, 0, 1); r2.build(red, {}, 4);
+      auto ra = g.run(vk, f); auto rb = r2.run(vk, f);
+      if (!rb.ok) std::printf("  blend-add error: %s\n", rb.error.c_str());
+      check(ra.ok && rb.ok, "blend: additive draw ok");
+      if (ra.ok && rb.ok) {
+        const std::uint8_t* p = centre(rb);
+        check(p[0] == 255 && p[1] == 255 && p[2] == 0, "blend: ONE+ONE add gives yellow over green");
+        check(rb.notes.find("target-0 blending on") != std::string::npos, "blend: notes state blending");
+      } }
+    // MIN (src ONE, dst ONE, MIN): min(red, green) -> black.
+    { DrawFrameCache f;
+      TopoScene g, r2; g.build(green, {}, 4); r2.blend0 = blend_val(1, 2, 1); r2.build(red, {}, 4);
+      auto ra = g.run(vk, f); auto rb = r2.run(vk, f);
+      check(ra.ok && rb.ok, "blend: min draw ok");
+      if (ra.ok && rb.ok) {
+        const std::uint8_t* p = centre(rb);
+        check(p[0] == 0 && p[1] == 0 && p[2] == 0, "blend: MIN gives black over green");
+      } }
+    // DST_COLOR factor (src DST_COLOR, dst ZERO, ADD): red * green -> black.
+    { DrawFrameCache f;
+      TopoScene g, r2; g.build(green, {}, 4); r2.blend0 = blend_val(8, 0, 0); r2.build(red, {}, 4);
+      auto ra = g.run(vk, f); auto rb = r2.run(vk, f);
+      check(ra.ok && rb.ok, "blend: dst_color draw ok");
+      if (ra.ok && rb.ok) {
+        const std::uint8_t* p = centre(rb);
+
+        check(p[0] == 0 && p[1] == 0 && p[2] == 0, "blend: src*DST_COLOR multiplies red by green (black)");
+      } }
+    // SRC_ALPHA (GNM 4; fragment alpha is 1.0, so red passes through) -
+    // pins the alpha/colour swap of the factor table: a wrong map to
+    // Vulkan's DST_COLOR (4) would give red*green = black.
+    { DrawFrameCache f;
+      TopoScene g, r2; g.build(green, {}, 4); r2.blend0 = blend_val(4, 0, 0); r2.build(red, {}, 4);
+      auto ra = g.run(vk, f); auto rb = r2.run(vk, f);
+      check(ra.ok && rb.ok && centre(rb)[0] == 255 && centre(rb)[1] == 0 && centre(rb)[2] == 0,
+            "blend: SRC_ALPHA acts as ONE at alpha 1.0");
+      (void)ra; }
+    // Control: no blend register -> the second draw replaces (pure red).
+    { DrawFrameCache f;
+      TopoScene g, r2; g.build(green, {}, 4); r2.build(red, {}, 4);
+      auto ra = g.run(vk, f); auto rb = r2.run(vk, f);
+      check(ra.ok && rb.ok && centre(rb)[0] == 255 && centre(rb)[1] == 0,
+            "blend: without CB_BLEND0_CONTROL the draw replaces (control)");
+      (void)ra; }
+    // Refusals: constant-colour and dual-source factors.
+    { TopoScene t; t.blend0 = blend_val(13, 0, 1); t.build(red, {}, 4);
+      DrawFrameCache f; auto r = t.run(vk, f);
+      check(!r.ok && r.error.find("blend factor not supported") != std::string::npos,
+            "blend: constant-colour factor refused"); }
+    { TopoScene t; t.blend0 = blend_val(15, 0, 1); t.build(red, {}, 4);
+      DrawFrameCache f; auto r = t.run(vk, f);
+      check(!r.ok && r.error.find("blend factor not supported") != std::string::npos,
+            "blend: dual-source (src1) factor refused"); }
   }
 }
