@@ -98,6 +98,10 @@ struct TopoScene {
   std::vector<std::uint8_t> target;
   std::vector<std::uint32_t> cmd;
   std::uint32_t depth_control = 0;   // DB_DEPTH_CONTROL value when nonzero (slice S12)
+  std::uint64_t z_base = 0;          // bound DB depth buffer address when nonzero (slice S13)
+  std::uint32_t zinfo = 3;           // DB_Z_INFO value (3 = Z32 float linear)
+  std::uint32_t stencil_info = 0;    // DB_STENCIL_INFO value when nonzero
+  std::uint64_t z_write_base = 0;    // separate write base when nonzero
   static constexpr std::uint32_t W = 64, H = 64;
   void build(const std::vector<float>& verts, const std::vector<std::uint32_t>& indices, std::uint32_t prim) {
     const std::uint32_t nv = std::uint32_t(verts.size() / 6);
@@ -119,6 +123,13 @@ struct TopoScene {
     b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
     b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
     if (depth_control) b.set_context(amd::DB_DEPTH_CONTROL, depth_control);
+    if (z_base) {
+      b.set_context(amd::DB_Z_INFO, zinfo);
+      b.set_context(amd::DB_Z_READ_BASE, std::uint32_t(z_base >> 8));
+      b.set_context(amd::DB_Z_WRITE_BASE, std::uint32_t((z_write_base ? z_write_base : z_base) >> 8));
+      b.set_context(amd::DB_DEPTH_SIZE, ((H / 8 - 1) << 11) | (W / 8 - 1));
+      if (stencil_info) b.set_context(amd::DB_STENCIL_INFO, stencil_info);
+    }
     b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, prim).num_instances(1);
     if (ib.empty()) {
       b.draw_auto(nv);
@@ -133,6 +144,12 @@ struct TopoScene {
     auto sum = pm4::interpret(cmd.data(), cmd.size());
     if (sum.draws.size() != 1) { DrawResult r; r.error = "no draw parsed"; return r; }
     return execute_draw(vk, mem, sum.draws[0]);
+  }
+  // Slice S13: run into a caller-owned frame cache (shared render targets).
+  DrawResult run(VulkanBackend& vk, DrawFrameCache& frame) {
+    auto sum = pm4::interpret(cmd.data(), cmd.size());
+    if (sum.draws.size() != 1) { DrawResult r; r.error = "no draw parsed"; return r; }
+    return execute_draw(vk, mem, sum.draws[0], frame);
   }
 };
 // Slice S11: PVS4 Gouraud shade. Vertex layout is 9 floats (x y z r g b nx ny nz).
@@ -647,9 +664,9 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
     auto centre = [](const DrawResult& r) { return &r.rgba[(32 * 64 + 32) * 4]; };
     auto is_red = [](const std::uint8_t* p) { return p[0] == 255 && p[1] == 0; };
     auto is_green = [](const std::uint8_t* p) { return p[0] == 0 && p[1] == 255; };
-    TopoScene d1; d1.depth_control = 0x12; d1.build(rg, {}, 4); // depth on (enable + LESS), red first
+    TopoScene d1; d1.depth_control = 0x16; d1.build(rg, {}, 4); // depth on (enable + write + LESS), red first
     auto r1 = d1.run(vk);
-    TopoScene d2; d2.depth_control = 0x12; d2.build(gr, {}, 4); // depth on (enable + LESS), green first
+    TopoScene d2; d2.depth_control = 0x16; d2.build(gr, {}, 4); // depth on (enable + write + LESS), green first
     auto r2 = d2.run(vk);
     TopoScene d0; d0.build(rg, {}, 4);                          // depth off, same red-first order as d1
     auto r0 = d0.run(vk);
@@ -674,5 +691,88 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
     { TopoScene g; g.depth_control = 2 | (4u << 4); g.build(rg, {}, 4);
       auto r = g.run(vk);
       check(!r.ok && r.error.find("LESS") != std::string::npos, "depth: GREATER compare refused (only LESS supported)"); }
+  }
+
+  // ---- slice S13: frame-persistent render targets (bound DB depth buffer) ----
+  {
+    // A big far green quad (z = 0.8, covers [-0.8,0.8]) and a small near red
+    // quad (z = 0.2, covers [-0.4,0.4]) as SEPARATE draws into one frame.
+    auto mkq = [](float half, float z, float rr, float gg, std::vector<float>* out) {
+      const float p[4][2] = {{-half, -half}, {half, -half}, {half, half}, {-half, half}};
+      const int order[6] = {0, 1, 2, 0, 2, 3};
+      for (int k = 0; k < 6; ++k)
+        out->insert(out->end(), {p[order[k]][0], p[order[k]][1], z, rr, gg, 0.0f});
+    };
+    std::vector<float> green_far; mkq(0.8f, 0.8f, 0, 1, &green_far);
+    std::vector<float> red_near;  mkq(0.4f, 0.2f, 1, 0, &red_near);
+    auto at = [](const DrawResult& r, int x, int y) { return &r.rgba[(y * 64 + x) * 4]; };
+    auto is_red = [](const std::uint8_t* p) { return p[0] == 255 && p[1] == 0; };
+    auto is_green = [](const std::uint8_t* p) { return p[0] == 0 && p[1] == 255; };
+    auto mk = [&](const std::vector<float>& v, std::uint64_t zb, std::uint32_t dctl, TopoScene* t) {
+      t->depth_control = dctl; t->z_base = zb; t->build(v, {}, 4);
+    };
+    // Frame 1: far green first, near red second, one shared frame. The final
+    // image keeps green outside the red quad (accumulation) and shows red in
+    // the centre (depth lets the nearer second draw overwrite).
+    { DrawFrameCache f;
+      TopoScene g, r2; mk(green_far, 0x700000, 0x16, &g); mk(red_near, 0x700000, 0x16, &r2);
+      auto r1 = g.run(vk, f); auto r2r = r2.run(vk, f);
+      if (!r1.ok) std::printf("  frame1-1 error: %s\n", r1.error.c_str());
+      if (!r2r.ok) std::printf("  frame1-2 error: %s\n", r2r.error.c_str());
+      check(r1.ok && r2r.ok, "frame: two draws into one frame ok");
+      if (r1.ok && r2r.ok) {
+        check(is_red(at(r2r, 32, 32)), "frame: near second draw wins the overlap (cross-draw depth)");
+        check(is_green(at(r2r, 8, 8)), "frame: first draw's pixels survive the second draw (accumulation)");
+        check(r2r.notes.find("frame-persistent depth surface") != std::string::npos,
+              "frame: notes state the persistent depth surface");
+      } }
+    // Frame 2: near red FIRST, far green second. Cross-draw depth must block
+    // the green quad over the centre - with a per-draw surface the second
+    // draw would clear depth and paint green everywhere.
+    { DrawFrameCache f;
+      TopoScene r1, g; mk(red_near, 0x710000, 0x16, &r1); mk(green_far, 0x710000, 0x16, &g);
+      auto ra = r1.run(vk, f); auto rb = g.run(vk, f);
+      check(ra.ok && rb.ok, "frame: reversed order draws ok");
+      if (ra.ok && rb.ok) {
+        check(is_red(at(rb, 32, 32)), "frame: far second draw blocked by earlier depth (centre stays red)");
+        check(is_green(at(rb, 8, 8)), "frame: far second draw still covers empty depth");
+      } }
+    // Frame 3: control - the same two draws WITHOUT a shared cache keep the
+    // per-draw behaviour: the second draw only sees its own clear.
+    { TopoScene r1, g; mk(red_near, 0x720000, 0x16, &r1); mk(green_far, 0x720000, 0x16, &g);
+      auto ra = r1.run(vk); auto rb = g.run(vk);
+      check(ra.ok && rb.ok && is_green(at(rb, 32, 32)),
+            "frame: without a shared cache the second draw repaints the centre (control)");
+      (void)ra; }
+    // Depth write off (enable + LESS, write bit clear): the first draw does
+    // not update depth, so the far second draw passes everywhere.
+    { DrawFrameCache f;
+      TopoScene r1, g; mk(red_near, 0x730000, 0x12, &r1); mk(green_far, 0x730000, 0x16, &g);
+      auto ra = r1.run(vk, f); auto rb = g.run(vk, f);
+      check(ra.ok && rb.ok && is_green(at(rb, 32, 32)),
+            "frame: depth-write-off draw leaves depth untouched (far quad passes)");
+      (void)ra; }
+    // A new depth buffer address restarts the frame: far green after near
+    // red under a NEW z_base clears and paints over the centre.
+    { DrawFrameCache f;
+      TopoScene r1, g; mk(red_near, 0x740000, 0x16, &r1); mk(green_far, 0x750000, 0x16, &g);
+      auto ra = r1.run(vk, f); auto rb = g.run(vk, f);
+      check(ra.ok && rb.ok && is_green(at(rb, 32, 32)),
+            "frame: a new depth buffer address restarts the frame (fresh clear)");
+      (void)ra; }
+    // Refusals: Z16, tiled, stencil format, separate read/write bases.
+    { TopoScene t; mk(red_near, 0x760000, 0x16, &t); t.zinfo = 1; t.build(red_near, {}, 4);
+      DrawFrameCache f; auto r = t.run(vk, f);
+      check(!r.ok && r.error.find("16-bit depth") != std::string::npos, "frame: Z16 depth surface refused"); }
+    { TopoScene t; t.zinfo = 3 | (1u << 28); t.depth_control = 0x16; t.z_base = 0x770000; t.build(red_near, {}, 4);
+      DrawFrameCache f; auto r = t.run(vk, f);
+      check(!r.ok && r.error.find("tiled depth") != std::string::npos, "frame: tiled (HTILE) depth refused"); }
+    { TopoScene t; t.stencil_info = 1; t.depth_control = 0x16; t.z_base = 0x780000; t.build(red_near, {}, 4);
+      DrawFrameCache f; auto r = t.run(vk, f);
+      check(!r.ok && r.error.find("stencil") != std::string::npos, "frame: stencil surface refused"); }
+    { TopoScene t; t.z_write_base = 0x790000; t.depth_control = 0x16; t.z_base = 0x780000; t.build(red_near, {}, 4);
+      DrawFrameCache f; auto r = t.run(vk, f);
+      check(!r.ok && r.error.find("separate depth read/write bases") != std::string::npos,
+            "frame: separate depth read/write bases refused"); }
   }
 }
