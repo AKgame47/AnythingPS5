@@ -27,6 +27,7 @@ namespace pnr::graphics {
 inline constexpr std::uint32_t kPnrVsMagic = 0x31535650u;   // "PVS1"
 inline constexpr std::uint32_t kPnrVs2Magic = 0x32535650u;  // "PVS2"
 inline constexpr std::uint32_t kPnrVs3Magic = 0x33535650u;  // "PVS3"
+inline constexpr std::uint32_t kPnrVs4Magic = 0x34535650u;  // "PVS4"
 
 // Slice S9 sanity caps for one draw (PNR TEST ABI limits, not hardware):
 // at most 64k transformed vertices and 4M indices per draw call.
@@ -51,6 +52,19 @@ std::vector<std::uint32_t> make_pnr_vs2_blob(std::uint32_t n);
 // discarded). Kernel count 4 = clip only; 7 = clip + post-transform (the
 // PVS2 divide semantics). Covers any vertex count up to kDrawMaxVertices.
 std::vector<std::uint32_t> make_pnr_vs3_blob(bool with_post);
+
+// PVS4 (slice S11): translated per-vertex varying - Gouraud shading. Magic,
+// dword 7, lengths, then 7 kernels built for the fixed 64-lane workgroup
+// (batched like PVS3): 4 clip kernels + 3 shade kernels (one per colour
+// channel). The vertex buffer layout for a PVS4 draw is 9 floats per vertex
+// (x y z r g b nx ny nz). Each shade kernel computes
+//   out_c = col_c * clamp(dot(n, light) + ambient, lo, hi)
+// in translated RDNA (fused multiply-add chain); the shaded rgb replaces the
+// raw vertex colours and the rasterizer interpolates it. VS user data 0..3 as
+// usual (matrix, vertex buffer); user data 4..9 = light xyz, ambient, clamp
+// lo/hi (missing data is refused). A PPS1 pixel blob still overrides the
+// whole draw colour. No specular, no textures, one directional light.
+std::vector<std::uint32_t> make_pnr_vs4_blob();
 
 struct DrawResult {
   bool ok = false;
