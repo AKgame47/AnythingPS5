@@ -192,3 +192,25 @@ makes the load fail with a message naming it, and nothing runs.
   documented caveats.
 - Not done: SDWA/DPP/source modifiers remain rejected, denorm/rounding modes stay host policy, wave/EXEC
   semantics unchanged, hardware GPU untested, min/max signed-zero and NaN picks not matched to RDNA.
+
+## Slice S6 notes (translated perspective divide + viewport transform)
+- New kernels in `graphics/rdna_vertex.hpp`: `rdna_post_ndc_kernel` (inv_w = `v_rcp_f32`, ndc_c =
+  clip_c * inv_w) and `rdna_post_win_kernel` (win_c = `v_fma_f32`(ndc_c, scale, offset); the depth
+  component clamps to [zmin, zmax] with `v_max_f32`/`v_min_f32`). The translated subset allows one
+  store per kernel, so the post-transform is one kernel per output component - six dispatches over
+  a shared 5-region layout (clip x/y/z/w in, one component out). Status: Experimental, Tested.
+- Uniform ABI (8 words): xscale, xoffset, yscale, yoffset, zscale, zoffset, zmin, zmax. The rcp is
+  the slice S5 correctly-rounded `1.0f/w`, NOT RDNA's approximate rcp; w = 0 propagates IEEE
+  inf/NaN with no guard. Host Vulkan FP policy throughout; min/max keep their documented host NaN
+  semantics.
+- New "PVS2" vertex blob (magic 0x32535650, 7 kernels: 4 clip + 3 ndc): `execute_draw` runs the
+  divide in translated RDNA code and feeds the rasterizer ndc with w = 1. Window/depth outputs are
+  computed by `rdna_post_transform_clip` for verification; on-screen viewport scale/offset stays
+  host fixed-function (VkViewport), and viewport depth bounds are not tracked (0..1 used).
+- `tests/rdna_post_xform_tests.cpp`: 24-lane execution vs a CPU division/fma reference measured
+  0 components differing of 144 (bitwise, 0 ulp), w = 0 gives +inf, and the PVS2 draw measured
+  0 pixels differing of 4096 against the PVS1 (GPU-side divide) path. spirv-val accepts the
+  window/depth module.
+- `pnr-window-demo` now runs clip AND the perspective divide through translated RDNA every frame.
+- Not done: indexed draws, other primitive types, viewport depth bounds, w guards/clipping,
+  RDNA-accurate approximate rcp, SDWA/DPP, hardware GPU verification.
