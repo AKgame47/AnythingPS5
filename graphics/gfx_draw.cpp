@@ -58,7 +58,10 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (draw.instances != 1) return fail(r, "only one instance is supported");
   const DrawBindings b = extract_bindings(draw);
   if (!b.missing.empty()) return fail(r, "draw state incomplete: " + b.missing);
-  if (b.primitive != amd::PrimitiveType::TriangleList) return fail(r, "only triangle lists are supported");
+  const bool trilist = b.primitive == amd::PrimitiveType::TriangleList;
+  const bool tristrip = b.primitive == amd::PrimitiveType::TriangleStrip;
+  const bool trifan = b.primitive == amd::PrimitiveType::TriangleFan;
+  if (!trilist && !tristrip && !trifan) return fail(r, "only triangle lists, strips and fans are supported");
   const ShaderBinding* vs = b.vertex_stage();
   if (!vs) return fail(r, "no vertex-stage shader address set");
   if (!b.ps.present) return fail(r, "no pixel-stage shader address set");
@@ -73,8 +76,10 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (draw.kind == pm4::DrawKind::Indexed) {
     if (draw.index_size_bytes != 2 && draw.index_size_bytes != 4)
       return fail(r, "index type not set before the draw (16-bit and 32-bit indices are supported)");
-    if (draw.count == 0 || draw.count % 3)
-      return fail(r, "index count must be a multiple of 3");
+    if (draw.count < 3)
+      return fail(r, "index count must be at least 3");
+    if (trilist && draw.count % 3)
+      return fail(r, "triangle-list index count must be a multiple of 3");
     if (draw.count > kDrawMaxIndices)
       return fail(r, "index count is over the draw cap of " + std::to_string(kDrawMaxIndices));
     const std::uint64_t ibytes = std::uint64_t(draw.count) * draw.index_size_bytes;
@@ -92,8 +97,32 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     n = maxidx + 1;
     if (n > kDrawMaxVertices)
       return fail(r, "indexed draw references more than " + std::to_string(kDrawMaxVertices) + " vertices (draw cap)");
-  } else if (n == 0 || n % 3 || n > kDrawMaxVertices) {
-    return fail(r, "vertex count must be a multiple of 3 and at most " + std::to_string(kDrawMaxVertices));
+  } else if (n < 3 || (trilist && n % 3) || n > kDrawMaxVertices) {
+    return fail(r, trilist ? "vertex count must be a multiple of 3 and at most " + std::to_string(kDrawMaxVertices)
+                           : "vertex count must be at least 3 and at most " + std::to_string(kDrawMaxVertices));
+  }
+  // Slice S10: triangle strips and fans expand to a plain triangle list on
+  // the host before rasterization. Strip triangle i takes source vertices
+  // (i, i+1, i+2) with the first two swapped on odd i to keep the winding;
+  // fan triangle i takes (0, i+1, i+2). Winding matters once culling exists;
+  // the current rasterizer does not cull, so this is a correctness pre-step.
+  if (!trilist) {
+    if (draw.count - 2 > kDrawMaxIndices / 3)
+      return fail(r, "expanded index count is over the draw cap of " + std::to_string(kDrawMaxIndices));
+    std::vector<std::uint32_t> seq;
+    if (draw.kind == pm4::DrawKind::Indexed) seq = indices;
+    else { seq.resize(n); for (std::uint32_t i = 0; i < n; ++i) seq[i] = i; }
+    indices.clear();
+    indices.reserve(std::size_t(draw.count - 2) * 3);
+    for (std::uint32_t i = 0; i + 2 < draw.count; ++i) {
+      if (trifan) {
+        indices.push_back(seq[0]); indices.push_back(seq[i + 1]); indices.push_back(seq[i + 2]);
+      } else if (i & 1) {
+        indices.push_back(seq[i + 1]); indices.push_back(seq[i]); indices.push_back(seq[i + 2]);
+      } else {
+        indices.push_back(seq[i]); indices.push_back(seq[i + 1]); indices.push_back(seq[i + 2]);
+      }
+    }
   }
   const std::uint32_t w = b.screen_scissor_br & 0xffff, h = b.screen_scissor_br >> 16;
   if (w == 0 || h == 0 || w > 2048 || h > 2048) return fail(r, "screen scissor gives an unusable target size");
@@ -208,7 +237,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     for (int c = 3; c < 6; ++c) verts.push_back(pps1 ? ps_colour[c - 3] : vb[i * 6 + c]);
     idx.push_back(i);
   }
-  if (draw.kind == pm4::DrawKind::Indexed) idx = indices;
+  if (!indices.empty()) idx = indices;
   const float clear[4] = {0, 0, 0, 1};
   std::vector<std::uint32_t> vsp(std::begin(clip_vert), std::end(clip_vert)), fsp(std::begin(spin_frag), std::end(spin_frag));
   auto st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, false, clear, &r.rgba);
@@ -220,6 +249,8 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   r.notes += pps1 ? "; pixel shader is a translated PPS1 blob (constant colour, no varyings)"
                   : "; pixel shader not translated: fixed pass-through colour used";
   if (draw.kind == pm4::DrawKind::Indexed) r.notes += "; indexed draw: index buffer fetched from guest memory";
+  if (tristrip) r.notes += "; triangle strip expanded to a list on the host (winding corrected)";
+  if (trifan) r.notes += "; triangle fan expanded to a list on the host";
   const std::size_t bytes = std::size_t(w) * h * 4;
   if (std::uint8_t* dst = mem.resolve_mut(b.color0.address, bytes)) {
     std::memcpy(dst, r.rgba.data(), bytes);
