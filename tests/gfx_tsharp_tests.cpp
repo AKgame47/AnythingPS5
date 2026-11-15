@@ -220,4 +220,32 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   decode_tsharp(w, &t);
   check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("type") != std::string::npos,
         "tsharp: a Color2D descriptor with slices is refused (S27)");
+
+  // ---- slice S28: Cube (type 11), exactly 6 faces, square, linear ----
+  auto make_cube = [&](std::uint32_t tiling, std::uint32_t last_arr,
+                       std::uint32_t wdt, std::uint32_t hgt) {
+    make_tsharp(w, 0x100000, wdt, hgt, wdt, tiling);
+    w[3] = (w[3] & 0x0FFFFFFFu) | (11u << 28);
+    w[5] = (w[5] & ~(0x1FFFu << 13)) | (last_arr << 13);
+    decode_tsharp(w, &t);
+  };
+  make_cube(0, 5, 64, 64);
+  check(validate_tsharp_sample(t, 0x100000 + 64ull * 64 * 4 * 6, &why),
+        "tsharp: linear 6-face cubemap validates (S28)");
+  check(!validate_tsharp_sample(t, 0x100000 + 64ull * 64 * 4 * 6 - 1, &why) && why.find("outside") != std::string::npos,
+        "tsharp: cubemap bounds cover all 6 faces (S28)");
+  make_cube(0, 4, 64, 64);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("6 faces") != std::string::npos,
+        "tsharp: a face count other than 6 is refused (S28)");
+  make_cube(0, 5, 64, 32);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("square") != std::string::npos,
+        "tsharp: a non-square cubemap is refused (S28)");
+  make_cube(9, 5, 64, 64);  // SW_64KB_S
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("cubemap") != std::string::npos,
+        "tsharp: tiled cubemaps are refused (S28)");
+  make_cube(0, 5, 64, 64);
+  w[5] = (w[5] & ~0x1FFFu) | 1u;  // base_array = 1
+  decode_tsharp(w, &t);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("base_array") != std::string::npos,
+        "tsharp: a non-zero cubemap base face is refused (S28)");
 }
