@@ -90,12 +90,15 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
   if (t.type != 9) return no("T# image type is not Color2D (1D/3D/cube/array/MSAA images are not implemented)");
   const bool bc1 = t.data_format == 35, bc2 = t.data_format == 36, bc3 = t.data_format == 37;
   const bool bc4 = t.data_format == 38, bc5 = t.data_format == 39, bc7 = t.data_format == 41;
-  const bool bc = bc1 || bc2 || bc3 || bc4 || bc5 || bc7;  // shadPS4 DataFormat values
+  const bool bc6 = t.data_format == 40;
+  const bool bc = bc1 || bc2 || bc3 || bc4 || bc5 || bc6 || bc7;  // shadPS4 DataFormat values
   PlainFormat pf{};
   const bool plain = plain_format_info(t.data_format, t.num_format, pf);
-  const bool bc_ok = bc && (t.num_format == kNumUnorm || format_uses_srgb_image(t.data_format, t.num_format));
+  // BC6H is HDR: nf Uint (4) decodes unsigned, nf Sint (5) signed (no sRGB).
+  const bool bc6_ok = bc6 && (t.num_format == 4 || t.num_format == 5);
+  const bool bc_ok = (bc && !bc6 && (t.num_format == kNumUnorm || format_uses_srgb_image(t.data_format, t.num_format))) || bc6_ok;
   if (!plain && !bc_ok)
-    return no("T# format is outside the sampled subset (plain unorm/float, 5_6_5, BC1-BC5, or sRGB on 8_8_8_8/BC1-BC3; other formats are not implemented)");
+    return no("T# format is outside the sampled subset (plain unorm/float, 5_6_5, BC1-BC7, BC6H uint/sint, or sRGB on 8_8_8_8/BC1-BC3; other formats are not implemented)");
   if (t.tiling_index == 8 || t.tiling_index == 31)
     return no("T# tiling uses a GCN (PS4) index encoding, not a PS5-native SW_MODE value");
   if (!swizzle_mode_known(t.tiling_index))
