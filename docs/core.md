@@ -464,6 +464,35 @@ makes the load fail with a message naming it, and nothing runs.
 - Limits: thin (2D, single-slice) modes only - no thick/3D modes, arrays or depth
   sampling; sampling is still not translated RDNA; hardware GPU untested.
 
+## Slice S24 notes (BC7 decode)
+- BC7 (T# data format 41, value from public shadPS4 pixel_format.h) joins the
+  S20-S21 compressed-texture subset: all 8 modes decoded to RGBA8 with exact
+  integer interpolation (graphics/gfx_bc7.hpp). 1-3 subsets, rotation, the
+  mode-4 index selector, shared and per-endpoint P-bits, and anchor-bit
+  removal are all implemented; a reserved block (no mode bit set) decodes to
+  zeros, matching the public specification.
+- The partition, fixup and weight tables (graphics/gfx_bc7_tables.inc) were
+  transcribed by script from public MIT-licensed sources (microsoft/DirectXTex
+  BC6HBC7.cpp, iOrange/bcdec) - never retyped - and the decoder was
+  differential-fuzzed against bcdec on 2,000,000 random blocks with zero
+  mismatches before any test was written (this caught a table-index bug
+  immediately).
+- BC7 flows through the common repack: T# validation accepts df 41 with unorm
+  or sRGB numerics (graphics/gfx_tsharp.hpp), the draw path decodes it like
+  BC1-BC5 (graphics/gfx_draw.cpp), and sRGB BC7 converts in the host sampler
+  through the S23 SRGB staging image (graphics/gfx_formats.hpp).
+- Tests (21 in gfx_bc7_tests, 4 in gfx_tsharp_tests, 3 in gfx_draw_tests):
+  the reserved block, hand-computed mode 0/4/6 structural cases (endpoint and
+  P-bit expansion, partition lookup, weight interpolation, rotation, index
+  selector), 16 captured known-answer vectors (one per mode, forced and
+  random, seed 0xBC7EC7), the tsharp accept/refuse matrix, and end-to-end
+  draws - a mode-6 solid byte-exact, a mip chain selecting level 1, and an
+  sRGB solid byte-exact through lavapipe's hardware conversion (sRGB bytes
+  201/101/51 land on 149/33/8).
+- Limits: BC6H not implemented; 16-byte blocks require the usual tight pitch
+  and multiple-of-4 extents; sampling is still not translated RDNA; hardware
+  GPU untested.
+
 ## Slice S23 notes (extended plain texture formats + sRGB)
 - The sampled T# subset grows past 8_8_8_8 unorm (graphics/gfx_formats.hpp;
   data/number format values from public shadPS4 pixel_format.h, values only):
@@ -495,7 +524,7 @@ makes the load fail with a message naming it, and nothing runs.
   conversion lands exactly on the specification values (10, 128, 255 for
   guest bytes 55, 188, 255).
 - Limits: integer/sampled-as-float targets still land in an 8-bit unorm
-  frame; snorm would clamp there and is refused instead; no BC6/BC7, arrays,
+  frame; snorm would clamp there and is refused instead; no BC6H, arrays,
   3D or cubes; sampling is still not translated RDNA; hardware GPU untested.
 
 ## Slice S16 notes (8_8_8_8 unorm vertex colours)
