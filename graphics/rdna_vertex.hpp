@@ -16,7 +16,10 @@
 namespace pnr::graphics {
 
 inline constexpr uint64_t kRdnaVertexBase = 0x1200001000ull;
-inline constexpr uint32_t kRdnaVertexMax = 24;  // lanes in the single workgroup (<=64)
+// Lanes in one dispatch (the translator's hard limit is 64; verified at 64 in
+// slice S9). Draws with more vertices are batched into ceil(n/64) dispatches
+// by execute_draw via the PVS3 blob format; these helpers stay single-dispatch.
+inline constexpr uint32_t kRdnaVertexMax = 64;
 
 namespace detail {
 inline uint32_t rdna_vop2(uint32_t op, uint32_t d, uint32_t v1, uint32_t src0) {
@@ -114,7 +117,7 @@ inline Status rdna_transform_points(VulkanBackend& vk, const std::vector<float>&
                                     std::vector<float>* clip, bool fma = false) {
   if (!clip) return Status::Fail(100, "rdna-vertex", "output vector required");
   if (xyz.empty() || xyz.size() % 3 || xyz.size() / 3 > kRdnaVertexMax)
-    return Status::Fail(100, "rdna-vertex", "points must be xyz triples, 1..24");
+    return Status::Fail(100, "rdna-vertex", "points must be xyz triples, 1..64 (single dispatch)");
   if (mat_words.size() != 16)
     return Status::Fail(100, "rdna-vertex", "matrix must be 16 words");
   const uint32_t n = uint32_t(xyz.size() / 3);
@@ -142,7 +145,7 @@ inline Status rdna_light_dots(VulkanBackend& vk, const std::vector<float>& norma
                               const float light_obj[3], std::vector<float>* d) {
   if (!d) return Status::Fail(100, "rdna-vertex", "output vector required");
   if (normals.empty() || normals.size() % 3 || normals.size() / 3 > kRdnaVertexMax)
-    return Status::Fail(100, "rdna-vertex", "normals must be xyz triples, 1..24");
+    return Status::Fail(100, "rdna-vertex", "normals must be xyz triples, 1..64 (single dispatch)");
   const uint32_t n = uint32_t(normals.size() / 3);
   auto t = shader::translate_compute_words(rdna_dot3_kernel(n), kRdnaVertexBase, n * 4, n, 3);
   if (!t.ok) return Status::Fail(100, "rdna-vertex", "translate: " + t.error);
@@ -242,7 +245,7 @@ inline Status rdna_post_transform_clip(VulkanBackend& vk, const std::vector<floa
                                        std::vector<float>* ndc, std::vector<float>* win) {
   if (!ndc || !win) return Status::Fail(100, "rdna-vertex", "output vectors required");
   if (clip.empty() || clip.size() % 4 || clip.size() / 4 > kRdnaVertexMax)
-    return Status::Fail(100, "rdna-vertex", "clip must be xyzw quads, 1..24");
+    return Status::Fail(100, "rdna-vertex", "clip must be xyzw quads, 1..64 (single dispatch)");
   if (vp8.size() != 8) return Status::Fail(100, "rdna-vertex", "viewport must be 8 words");
   const uint32_t n = uint32_t(clip.size() / 4);
   ndc->assign(size_t(n) * 3, 0.0f);
