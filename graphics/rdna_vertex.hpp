@@ -277,4 +277,30 @@ inline Status rdna_post_transform_clip(VulkanBackend& vk, const std::vector<floa
   return Status::Ok();
 }
 
+// ---- slice S11: translated per-vertex varying (Gouraud shade) ----
+// Shade kernel for colour component c over the 8-region layout
+// x[n], y[n], z[n], nx[n], ny[n], nz[n], col_c[n], out[n]:
+//   dot   = fma(nz, l.z, fma(ny, l.y, nx * l.x))
+//   out_c = col_c * clamp(dot + ambient, lo, hi)
+// Uniform ABI (6 words): s0..s2 = light direction, s3 = ambient, s4 = clamp
+// lo, s5 = clamp hi. One store per kernel; the x/y/z regions are loaded but
+// only the normal and colour regions feed the result (the layout stays the
+// full vertex so one prelude addresses all inputs).
+inline std::vector<uint32_t> rdna_shade_kernel(uint32_t c, uint32_t n) {
+  using detail::rdna_vop2;
+  std::vector<uint32_t> w;
+  detail::rdna_prelude_multi(w, n, 8, 7, 50);   // v50=x v51=y v52=z v53=nx v54=ny v55=nz v56=col_c
+  w.push_back(rdna_vop2(8, 60, 53, 0));         // v60 = nx * s0
+  detail::rdna_fma_f32(w, 60, 256 + 54, 1, 256 + 60);  // v60 = fma(ny, s1, v60)
+  detail::rdna_fma_f32(w, 60, 256 + 55, 2, 256 + 60);  // v60 = fma(nz, s2, v60)
+  w.push_back(rdna_vop2(3, 60, 60, 3));         // v60 = s3 + v60  (dot + ambient)
+  w.push_back(rdna_vop2(0x10, 60, 60, 4));      // v60 = max(s4, v60)
+  w.push_back(rdna_vop2(0x0f, 60, 60, 5));      // v60 = min(s5, v60)
+  w.push_back(rdna_vop2(8, 61, 60, 256 + 56));  // v61 = col_c * v60
+  detail::rdna_store(w, 61, 3 + 2 * 7);         // out region is pair 7
+  w.push_back(0xbf810000u);
+  (void)c;
+  return w;
+}
+
 }  // namespace pnr::graphics
