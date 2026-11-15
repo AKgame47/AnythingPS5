@@ -32,6 +32,10 @@ struct TexInput {
   uint32_t w = 0, h = 0;
   bool linear = false;
   bool repeat = false;
+  // Slice S17 overrides (VK_FILTER_* / VK_SAMPLER_ADDRESS_MODE_* values);
+  // -1 keeps the linear/repeat-derived default so older callers are unchanged.
+  int32_t mag_filter = -1, min_filter = -1;
+  int32_t addr_u = -1, addr_v = -1;
 };
 
 // Colour blend state for one target (slice S14), decoded from GNM
@@ -187,6 +191,21 @@ public:
                                    const std::vector<float>& vertices,
                                    const std::vector<uint32_t>& indices, bool depth,
                                    const float clear[4], std::vector<uint8_t>* image);
+
+  // Clip-space textured variant (slice S17): float4 clip position + float3
+  // colour (tint) + float2 uv (9 floats), single frame, optional shared frame
+  // surface, depth write and blend like render_clip_mesh_rgba. The fragment
+  // shader samples a combined image sampler at set 0 binding 0.
+  Status render_textured_clip_mesh_rgba(uint32_t width, uint32_t height,
+                                        const std::vector<uint32_t>& vert_spirv,
+                                        const std::vector<uint32_t>& frag_spirv,
+                                        const std::vector<float>& vertices,
+                                        const std::vector<uint32_t>& indices, bool depth,
+                                        const TexInput& tex,
+                                        const float clear[4], std::vector<uint8_t>* image,
+                                        FrameSurface* shared_frame = nullptr,
+                                        bool depth_write = true,
+                                        const BlendState* blend = nullptr);
 
   // Textured variant: float3 position + float3 colour (tint) + float2 uv (8
   // floats), push constants 1..32 words per frame (vertex stage). The fragment
