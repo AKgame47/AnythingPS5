@@ -34,6 +34,22 @@ struct TexInput {
   bool repeat = false;
 };
 
+// Frame-persistent render targets (slice S13): a colour + depth attachment
+// pair kept across draws so consecutive draws accumulate into one frame and
+// test against earlier depth, the way GNM games bind CB_COLOR0_* and DB_Z_*
+// once per frame. Created and cleared on first use (or after destroy_frame),
+// reloaded (LOAD_OP_LOAD) afterwards. Owned by the caller; destroy with
+// destroy_frame(). Single-frame renders only.
+struct FrameSurface {
+  VkImage color_image = 0;
+  VkDeviceMemory color_memory = 0;
+  VkImageView color_view = 0;
+  VkImage depth_image = 0;
+  VkDeviceMemory depth_memory = 0;
+  VkImageView depth_view = 0;
+  uint32_t width = 0, height = 0;
+};
+
 struct MeshInput {
   const std::vector<float>* vertices = nullptr;
   uint32_t pos_floats = 2;
@@ -41,6 +57,8 @@ struct MeshInput {
   const std::vector<uint32_t>* indices = nullptr;
   bool depth = false;
   const TexInput* tex = nullptr;  // sampled at set 0 binding 0 (fragment stage)
+  FrameSurface* shared_frame = nullptr;  // slice S13: persistent targets; null = per-draw
+  bool depth_write = true;               // DB_DEPTH_CONTROL depth_write_enable
 };
 
 class VulkanBackend {
@@ -132,7 +150,12 @@ public:
                                const std::vector<uint32_t>& frag_spirv,
                                const std::vector<float>& vertices,
                                const std::vector<uint32_t>& indices, bool depth,
-                               const float clear[4], std::vector<uint8_t>* image);
+                               const float clear[4], std::vector<uint8_t>* image,
+                               FrameSurface* shared_frame = nullptr,
+                               bool depth_write = true);
+
+  // Destroys a FrameSurface's Vulkan objects and zeroes it (slice S13).
+  void destroy_frame(FrameSurface& s);
 
   // Lit variants: one extra attribute at location 2 after the colour.
   // Hand-authored path: float3 position + float3 colour + float3 normal (9
@@ -182,6 +205,7 @@ public:
 
 private:
   friend class WindowPresenter;  // uses resolved entry points for swapchain I/O
+  Status create_frame_targets(uint32_t w, uint32_t h, bool with_depth, FrameSurface& s);
   Status render_core(uint32_t w, uint32_t h, const std::vector<uint32_t>& vs,
                      const std::vector<uint32_t>& fs, uint32_t vertex_count,
                      const MeshInput* mesh,
