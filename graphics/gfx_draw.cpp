@@ -42,6 +42,16 @@ std::vector<std::uint32_t> make_pnr_vs3_blob(bool with_post) {
   return blob;
 }
 
+std::vector<std::uint32_t> make_pnr_vs4_blob() {
+  std::vector<std::vector<std::uint32_t>> k;
+  for (std::uint32_t c = 0; c < 4; ++c) k.push_back(rdna_vertex_component_kernel(c, kRdnaVertexMax));
+  for (std::uint32_t c = 0; c < 3; ++c) k.push_back(rdna_shade_kernel(c, kRdnaVertexMax));
+  std::vector<std::uint32_t> blob = {kPnrVs4Magic, 7};
+  for (auto& v : k) blob.push_back(static_cast<std::uint32_t>(v.size()));
+  for (auto& v : k) blob.insert(blob.end(), v.begin(), v.end());
+  return blob;
+}
+
 namespace {
 DrawResult fail(DrawResult r, const std::string& why) { r.ok = false; r.error = why; return r; }
 bool read_u64(const ShaderBinding& s, int slot, std::uint64_t* out) {
@@ -168,11 +178,13 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   if (!mem.read(vs->address, hdr, sizeof hdr)) return fail(r, "vertex shader address is not mapped: " + mem.last_error());
   const bool pvs2 = hdr[0] == kPnrVs2Magic && hdr[1] == 7;
   const bool pvs3 = hdr[0] == kPnrVs3Magic && (hdr[1] == 4 || hdr[1] == 7);
-  if (!(hdr[0] == kPnrVsMagic && hdr[1] == 4) && !pvs2 && !pvs3)
-    return fail(r, "vertex shader memory is not a PNR PVS1/PVS2/PVS3 blob (a real GCN/RDNA program is not accepted here)");
-  if (!pvs3 && n > kRdnaVertexMax)
-    return fail(r, "PVS1/PVS2 blobs are built per vertex count and run one dispatch (at most 64 vertices); a PVS3 blob batches larger draws");
-  const uint32_t nk = (pvs2 || pvs3) ? hdr[1] : 4;
+  const bool pvs4 = hdr[0] == kPnrVs4Magic && hdr[1] == 7;
+  if (!(hdr[0] == kPnrVsMagic && hdr[1] == 4) && !pvs2 && !pvs3 && !pvs4)
+    return fail(r, "vertex shader memory is not a PNR PVS1/PVS2/PVS3/PVS4 blob (a real GCN/RDNA program is not accepted here)");
+  if (!pvs3 && !pvs4 && n > kRdnaVertexMax)
+    return fail(r, "PVS1/PVS2 blobs are built per vertex count and run one dispatch (at most 64 vertices); a PVS3/PVS4 blob batches larger draws");
+  const uint32_t nk = (pvs2 || pvs3 || pvs4) ? hdr[1] : 4;
+  const bool batched = pvs3 || pvs4;
   std::vector<std::vector<std::uint32_t>> kern(nk);
   std::uint64_t off = (2 + nk) * 4;
   for (uint32_t c = 0; c < nk; ++c) {
@@ -184,16 +196,24 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   std::uint64_t mat_va = 0, vb_va = 0;
   if (!read_u64(*vs, 0, &mat_va) || !read_u64(*vs, 2, &vb_va)) return fail(r, "vertex user data 0..3 (matrix and vertex buffer addresses) not set");
   std::vector<std::uint32_t> mat(16);
-  std::vector<float> vb(std::size_t(n) * 6);
+  const std::uint32_t stride = pvs4 ? 9 : 6;   // PVS4 adds per-vertex normals (slice S11)
+  std::vector<float> vb(std::size_t(n) * stride);
   if (!mem.read(mat_va, mat.data(), 64)) return fail(r, "matrix address is not mapped: " + mem.last_error());
   if (!mem.read(vb_va, vb.data(), vb.size() * 4)) return fail(r, "vertex buffer is not mapped: " + mem.last_error());
+  std::vector<std::uint32_t> shade_params(6);
+  if (pvs4) {
+    for (int k = 0; k < 6; ++k) {
+      if (!vs->user_data_set[4 + k]) return fail(r, "PVS4 blob needs vertex user data 4..9 (light xyz, ambient, clamp lo/hi)");
+      shade_params[k] = vs->user_data[4 + k];
+    }
+  }
 
   // Translate and run each clip component. PVS1/PVS2 kernels are specialized
   // to n (one dispatch). PVS3 kernels are built for the fixed 64-lane
   // workgroup, so any n runs as ceil(n/64) dispatches; the last batch
   // zero-pads its tail lanes and their stores land in scratch (slice S9).
-  const std::uint32_t lanes = pvs3 ? kRdnaVertexMax : n;
-  const std::uint32_t batches = pvs3 ? (n + lanes - 1) / lanes : 1;
+  const std::uint32_t lanes = batched ? kRdnaVertexMax : n;
+  const std::uint32_t batches = batched ? (n + lanes - 1) / lanes : 1;
   std::vector<float> clip(std::size_t(n) * 4, 0.0f);
   for (std::uint32_t c = 0; c < 4; ++c) {
     auto t = shader::translate_compute_words(kern[c], kRdnaVertexBase, lanes * 4, lanes, 16);
@@ -202,7 +222,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
       const std::uint32_t base = bno * lanes, m = (n - base < lanes) ? (n - base) : lanes;
       std::vector<std::uint32_t> io(std::size_t(lanes) * 4, 0);
       for (std::uint32_t i = 0; i < m; ++i)
-        for (std::uint32_t k = 0; k < 3; ++k) std::memcpy(&io[k * lanes + i], &vb[(base + i) * 6 + k], 4);
+        for (std::uint32_t k = 0; k < 3; ++k) std::memcpy(&io[k * lanes + i], &vb[(base + i) * stride + k], 4);
       auto st = shader::run_translated_compute(vk, t, &io, mat);
       if (!st) return fail(r, "translated vertex shader did not run: " + st.error.message);
       for (std::uint32_t i = 0; i < m; ++i) std::memcpy(&clip[(base + i) * 4 + c], &io[3 * lanes + i], 4);
@@ -230,11 +250,34 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     }
     for (std::uint32_t i = 0; i < n; ++i) clip[i * 4 + 3] = 1.0f;
   }
+  // Slice S11 (PVS4): three shade kernels compute the per-vertex colour
+  // varying in translated RDNA (dot + ambient, clamped, times the vertex
+  // colour); the rasterizer interpolates the result across each triangle.
+  std::vector<float> shade;
+  if (pvs4) {
+    shade.assign(std::size_t(n) * 3, 0.0f);
+    for (std::uint32_t c = 0; c < 3; ++c) {
+      auto t = shader::translate_compute_words(kern[4 + c], kRdnaVertexBase, lanes * 8, lanes, 6);
+      if (!t.ok) return fail(r, "RDNA shade translation failed: " + t.error);
+      for (std::uint32_t bno = 0; bno < batches; ++bno) {
+        const std::uint32_t base = bno * lanes, m = (n - base < lanes) ? (n - base) : lanes;
+        std::vector<std::uint32_t> io(std::size_t(lanes) * 8, 0);
+        for (std::uint32_t i = 0; i < m; ++i) {
+          for (std::uint32_t k = 0; k < 3; ++k) std::memcpy(&io[k * lanes + i], &vb[(base + i) * 9 + k], 4);
+          for (std::uint32_t k = 0; k < 3; ++k) std::memcpy(&io[(3 + k) * lanes + i], &vb[(base + i) * 9 + 6 + k], 4);
+          std::memcpy(&io[6 * lanes + i], &vb[(base + i) * 9 + 3 + c], 4);
+        }
+        auto st = shader::run_translated_compute(vk, t, &io, shade_params);
+        if (!st) return fail(r, "translated shade kernel did not run: " + st.error.message);
+        for (std::uint32_t i = 0; i < m; ++i) std::memcpy(&shade[(base + i) * 3 + c], &io[7 * lanes + i], 4);
+      }
+    }
+  }
   std::vector<float> verts;
   std::vector<std::uint32_t> idx;
   for (std::uint32_t i = 0; i < n; ++i) {
     for (int c = 0; c < 4; ++c) verts.push_back(clip[i * 4 + c]);
-    for (int c = 3; c < 6; ++c) verts.push_back(pps1 ? ps_colour[c - 3] : vb[i * 6 + c]);
+    for (int c = 0; c < 3; ++c) verts.push_back(pps1 ? ps_colour[c] : pvs4 ? shade[i * 3 + c] : vb[i * stride + 3 + c]);
     idx.push_back(i);
   }
   if (!indices.empty()) idx = indices;
@@ -242,7 +285,8 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   std::vector<std::uint32_t> vsp(std::begin(clip_vert), std::end(clip_vert)), fsp(std::begin(spin_frag), std::end(spin_frag));
   auto st = vk.render_clip_mesh_rgba(w, h, vsp, fsp, verts, idx, false, clear, &r.rgba);
   if (!st) return fail(r, "Vulkan draw failed: " + st.error.message);
-  r.notes = pvs3 ? (with_post ? "PVS3 blob: clip and perspective divide are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices), w = 1 fed to the rasterizer"
+  r.notes = pvs4 ? "PVS4 blob: clip and Gouraud shade varyings are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices); the rasterizer interpolates the shade"
+                 : pvs3 ? (with_post ? "PVS3 blob: clip and perspective divide are translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices), w = 1 fed to the rasterizer"
                               : "PVS3 blob: clip transform is translated RDNA in 64-lane batches (" + std::to_string(batches) + " for " + std::to_string(n) + " vertices)")
                  : pvs2 ? "PVS2 blob: clip and perspective divide are translated RDNA, w = 1 fed to the rasterizer"
                         : "vertex shader is a PNR PVS1 test blob";
