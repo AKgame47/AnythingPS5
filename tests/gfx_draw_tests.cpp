@@ -416,6 +416,17 @@ struct TexScene {
       for (int i = 0; i < 16; ++i) put(0, i == 0 ? 3 : 4);
       return;
     }
+    if (df == 40) {  // BC6H: mode 11 solid, 10-bit unsigned endpoints (callers use 0/255 only)
+      for (int i = 0; i < 16; ++i) blk[i] = 0;
+      const std::uint32_t w10[3] = {r == 255 ? 1023u : 0u, g == 255 ? 1023u : 0u, b == 255 ? 1023u : 0u};
+      int pos = 0;
+      auto put = [&](std::uint64_t v, int n) { for (int i = 0; i < n; ++i, ++pos) blk[pos / 8] |= std::uint8_t(((v >> i) & 1) << (pos % 8)); };
+      put(0x03, 5);  // mode 11 (0x03)
+      for (int c = 0; c < 3; ++c) { put(w10[c], 10); }        // RW GW BW
+      for (int c = 0; c < 3; ++c) { put(w10[c], 10); }        // RX GX BX (explicit, untransformed)
+      for (int i = 0; i < 16; ++i) put(0, i == 0 ? 3 : 4);    // indices 0 (anchor 3 bits)
+      return;
+    }
     if (df == 38) { blk[0] = r; blk[1] = r; for (int i = 2; i < 8; ++i) blk[i] = 0; return; }  // BC4: red only
     if (df == 39) {  // BC5: one value block per channel
       blk[0] = r; blk[1] = r; for (int i = 2; i < 8; ++i) blk[i] = 0;
@@ -430,7 +441,7 @@ struct TexScene {
   }
   void build_bc(std::uint32_t df, float uv_scale, std::uint32_t side, std::uint32_t last_level,
                 std::uint32_t mip_filter, std::uint32_t pitch = 0,
-                std::uint32_t mag_filter = 1, std::uint32_t min_filter = 1) {
+                std::uint32_t mag_filter = 1, std::uint32_t min_filter = 1, std::uint32_t nf = 0) {
     vs_blob = make_pnr_vs3_blob(true);
     ps_blob = make_pnr_ps2_blob();
     mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
@@ -451,7 +462,7 @@ struct TexScene {
       for (std::uint32_t i = 0; i < nb * nb; ++i)
         bc_solid(&texels[at + i * bb], df, cols[l % 3][0], cols[l % 3][1], cols[l % 3][2], 255);
     }
-    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, side, side, pitch ? pitch : side, 0, last_level, 0, df);
+    std::uint32_t tw[8]; make_tdesc(tw, 0x700000, side, side, pitch ? pitch : side, 0, last_level, 0, df, nf);
     tsharp.assign(tw, tw + 8);
     std::uint64_t sq0 = 0;  // wrap x and y
     std::uint64_t sq1 = std::uint64_t(mag_filter) << 20 | std::uint64_t(min_filter) << 22;
@@ -1716,6 +1727,22 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       const std::uint8_t* p = r.ok ? centre(r) : nullptr;
       check(r.ok && p[0] == 0 && p[1] == 254 && p[2] == 0,
             "bc: BC7 mip chain selects level 1"); }  // 255 quantizes to 254 in mode 6 (P-bit 0)
+    // Slice S25: BC6H end to end (mode 11 solid blocks, nf Uint = 4).
+    { TexScene s; s.build_bc(40, 1.0f, 4, 0, 0, 0, 0, 0, 4);   // BC6H solid red, point
+      auto r = s.run(vk);
+      const std::uint8_t* p = r.ok ? centre(r) : nullptr;
+      check(r.ok && p[0] == 255 && p[1] == 0 && p[2] == 0 && p[3] == 255,
+            "bc: BC6H solid draw decodes byte-exact"); }
+    { TexScene s; s.build_bc(40, 16.0f, 8, 2, 1, 0, 1, 1, 4);  // BC6H chain, footprint 2 -> lod 1
+      auto r = s.run(vk);
+      const std::uint8_t* p = r.ok ? centre(r) : nullptr;
+      check(r.ok && p[0] == 0 && p[1] == 255 && p[2] == 0,
+            "bc: BC6H mip chain selects level 1"); }
+    { TexScene s; s.build_bc(40, 1.0f, 4, 0, 0, 0, 0, 0, 5);   // BC6H signed (nf Sint = 5): 10-bit 1023 = -1 -> black
+      auto r = s.run(vk);
+      const std::uint8_t* p = r.ok ? centre(r) : nullptr;
+      check(r.ok && p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 255,
+            "bc: BC6H signed draw clamps negative endpoints to black"); }
   }
 
   // ---- slice S18: face culling + front face (PA_SU_SC_MODE_CNTL) ----
