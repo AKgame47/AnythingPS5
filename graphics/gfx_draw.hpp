@@ -83,6 +83,25 @@ struct DrawResult {
 // is emulated for one.) DB_DEPTH_CONTROL switches on depth testing (slice S12): only the
 // LESS compare, no stencil, and the depth surface is per-draw (no cross-draw depth or
 // readback; the host clears to 1.0).
+// Frame-persistent render targets (slice S13): reuse one cache across the
+// draws of a frame so consecutive draws accumulate into the bound colour
+// target and test against earlier depth, the way GNM games bind CB_COLOR0_*
+// and DB_Z_* once per frame. The surface is created and cleared on the first
+// draw (or when the colour/depth binding or size changes) and reloaded
+// afterwards. A draw without a bound depth buffer (DB_Z_INFO not written or
+// format Invalid / no base address) keeps the slice-S12 per-draw depth
+// surface.
+struct DrawFrameCache {
+  std::uint64_t color_base = UINT64_MAX;  // bound colour target address
+  std::uint64_t z_base = UINT64_MAX;      // bound depth buffer address (0 = none)
+  std::uint32_t width = 0, height = 0;
+  FrameSurface surface;                   // host targets; empty until first use
+  ~DrawFrameCache();                      // destroys the surface on the device
+  VulkanBackend* vk = nullptr;            // device that owns the surface
+};
+
 DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::DrawCall& draw);
+DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::DrawCall& draw,
+                        DrawFrameCache& frame);
 
 }  // namespace pnr::graphics
