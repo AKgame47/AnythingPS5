@@ -1100,14 +1100,11 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       for (size_t p = 0; p < size_t(64) * 64 * 4; ++p) d += r1.rgba[p] != r2.rgba[p];
       check(d == 0, "depth: both draw orders give byte-identical pixels with depth on");
     }
-    // Refusals: stencil, and compare functions other than LESS.
+    // Refusal: stencil (all eight compare functions are supported - slice S26).
     { TopoScene s; s.depth_control = 3; // stencil bit + enable, func field 0 (stencil refused first)
       s.build(rg, {}, 4);
       auto r = s.run(vk);
       check(!r.ok && r.error.find("stencil") != std::string::npos, "depth: stencil enable refused"); }
-    { TopoScene g; g.depth_control = 2 | (4u << 4); g.build(rg, {}, 4);
-      auto r = g.run(vk);
-      check(!r.ok && r.error.find("LESS") != std::string::npos, "depth: GREATER compare refused (only LESS supported)"); }
   }
 
   // ---- slice S13: frame-persistent render targets (bound DB depth buffer) ----
@@ -1191,6 +1188,58 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
       DrawFrameCache f; auto r = t.run(vk, f);
       check(!r.ok && r.error.find("separate depth read/write bases") != std::string::npos,
             "frame: separate depth read/write bases refused"); }
+  }
+
+  // ---- slice S26: all eight depth compare functions ----
+  {
+    // A green reference quad (z = 0.5) drawn with ALWAYS + depth write, then
+    // a red test quad with the function under test into the same frame. The
+    // centre is red iff func(z_test, 0.5) passes.
+    auto mkz = [](float z, float rr, float gg, std::vector<float>* out) {
+      const float p[4][2] = {{-0.8f, -0.8f}, {0.8f, -0.8f}, {0.8f, 0.8f}, {-0.8f, 0.8f}};
+      const int order[6] = {0, 1, 2, 0, 2, 3};
+      for (int k = 0; k < 6; ++k)
+        out->insert(out->end(), {p[order[k]][0], p[order[k]][1], z, rr, gg, 0.0f});
+    };
+    auto red_at_centre = [](const DrawResult& r) {
+      const std::uint8_t* p = &r.rgba[(32 * 64 + 32) * 4];
+      return p[0] == 255 && p[1] == 0;
+    };
+    struct CmpCase { std::uint32_t func; float z; bool red; const char* name; };
+    const CmpCase cases[] = {
+      {0, 0.4f, false, "cmp NEVER: never passes"},
+      {1, 0.4f, true,  "cmp LESS: nearer passes"},
+      {1, 0.6f, false, "cmp LESS: farther fails"},
+      {2, 0.5f, true,  "cmp EQUAL: equal passes"},
+      {2, 0.4f, false, "cmp EQUAL: different fails"},
+      {3, 0.5f, true,  "cmp LEQUAL: equal passes"},
+      {3, 0.6f, false, "cmp LEQUAL: farther fails"},
+      {4, 0.6f, true,  "cmp GREATER: farther passes"},
+      {4, 0.4f, false, "cmp GREATER: nearer fails"},
+      {5, 0.4f, true,  "cmp NOTEQUAL: different passes"},
+      {5, 0.5f, false, "cmp NOTEQUAL: equal fails"},
+      {6, 0.5f, true,  "cmp GEQUAL: equal passes"},
+      {6, 0.4f, false, "cmp GEQUAL: nearer fails"},
+      {7, 0.6f, true,  "cmp ALWAYS: always passes"},
+    };
+    std::uint32_t zb = 0x800000;
+    for (const auto& c : cases) {
+      std::vector<float> ref; mkz(0.5f, 0, 1, &ref);
+      std::vector<float> tst; mkz(c.z, 1, 0, &tst);
+      DrawFrameCache f;
+      TopoScene g, t;
+      g.depth_control = 2 | 4 | (7u << 4); g.z_base = zb; g.build(ref, {}, 4);
+      t.depth_control = 2 | 4 | (c.func << 4); t.z_base = zb; t.build(tst, {}, 4);
+      auto rgr = g.run(vk, f); auto rt = t.run(vk, f);
+      check(rgr.ok && rt.ok && (red_at_centre(rt) == c.red), c.name);
+      zb += 0x10000;
+    }
+    // Notes name the selected function.
+    { DrawFrameCache f;
+      std::vector<float> far_green; mkz(0.8f, 0, 1, &far_green);
+      TopoScene g; g.depth_control = 2 | 4 | (4u << 4); g.z_base = 0x8F0000; g.build(far_green, {}, 4);
+      auto r = g.run(vk, f);
+      check(r.ok && r.notes.find("GREATER") != std::string::npos, "cmp: notes name the compare function"); }
   }
 
   // ---- slice S14: target-0 blending (CB_BLEND0_CONTROL) ----
