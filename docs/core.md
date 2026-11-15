@@ -464,6 +464,35 @@ makes the load fail with a message naming it, and nothing runs.
 - Limits: thin (2D, single-slice) modes only - no thick/3D modes, arrays or depth
   sampling; sampling is still not translated RDNA; hardware GPU untested.
 
+## Slice S25 notes (BC6H decode)
+- BC6H (T# data format 40, value from public shadPS4 pixel_format.h) completes
+  the compressed-texture subset: all 14 modes, unsigned (number format Uint,
+  4) and signed (Sint, 5); sRGB and other numerics are refused with named
+  reasons (graphics/gfx_tsharp.hpp).
+- The decoder (graphics/gfx_bc6h.hpp) is table-driven: the per-mode bit-field
+  layout, mode info and mode-to-info map (graphics/gfx_bc6h_tables.inc) were
+  transcribed by script from microsoft/DirectXTex DirectXTex/BC6HBC7.cpp (MIT)
+  and never retyped. Transform-inverse, unquantize, interpolation and the
+  31/64 / 31/32 finish follow the public BC6H specification; the 2-subset
+  partition/fixup and weight tables are shared with BC7.
+- Before any test was written, the decoder was differential-fuzzed against
+  bcdec's bc6h_half on 2,000,000 random blocks per sign with zero mismatches
+  (the same standard as S24).
+- Output lands in the RGBA8 staging chain: decoded half floats convert to
+  float and clamp to [0, 1] - HDR values above 1.0 clamp, which matches what
+  an 8-bit unorm frame would do to any sampled HDR value (slice S23 note).
+  Alpha is always 255; BC6H has no alpha channel.
+- Tests (7 in gfx_bc6h_tests, 4 in gfx_tsharp_tests, 3 in gfx_draw_tests):
+  reserved mode (black, full alpha), hand-computed mode 1/11/14 structural
+  cases (unquantize extremes, delta-transform wrap, signed negative clamp,
+  partition mapping, full-precision 16-bit endpoints), 32 captured
+  known-answer vectors covering every mode in both signs (seed 0xBC6DEC), the
+  tsharp accept/refuse matrix, and end-to-end draws - mode-11 solid red
+  byte-exact, a mip chain selecting level 1, and a signed draw clamping
+  negative endpoints to black.
+- Limits: HDR above 1.0 clamps in the 8-bit frame; sampling is still not
+  translated RDNA; hardware GPU untested.
+
 ## Slice S24 notes (BC7 decode)
 - BC7 (T# data format 41, value from public shadPS4 pixel_format.h) joins the
   S20-S21 compressed-texture subset: all 8 modes decoded to RGBA8 with exact
@@ -489,7 +518,7 @@ makes the load fail with a message naming it, and nothing runs.
   draws - a mode-6 solid byte-exact, a mip chain selecting level 1, and an
   sRGB solid byte-exact through lavapipe's hardware conversion (sRGB bytes
   201/101/51 land on 149/33/8).
-- Limits: BC6H not implemented; 16-byte blocks require the usual tight pitch
+- Limits: 16-byte blocks require the usual tight pitch
   and multiple-of-4 extents; sampling is still not translated RDNA; hardware
   GPU untested.
 
