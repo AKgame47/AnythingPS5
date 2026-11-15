@@ -82,6 +82,24 @@ void pnr_rdna_vertex_tests(int& pass,int& fail) {
     for(size_t i=0;ok&&i<24;++i)ok=clip[i*4]==xyz[i*3]&&clip[i*4+1]==xyz[i*3+1]&&clip[i*4+2]==xyz[i*3+2]&&clip[i*4+3]==1.0f;
     check(ok,"rdna-vertex: identity matrix reproduces positions exactly with w=1");
   }
+  // slice S9: the single-dispatch lane cap is the translator's hard limit, 64.
+  {
+    std::vector<float> p64;
+    for(uint32_t i=0;i<64;++i){
+      p64.push_back(0.25f*float(int(i*7%17)-8));
+      p64.push_back(0.125f*float(int(i*5%13)-6));
+      p64.push_back(0.5f-0.015625f*float(i));
+    }
+    Mat4 M64=mat4_mul(mat4_rotate_x(0.5f),mat4_rotate_y(0.75f));
+    std::vector<float> clip64;auto s64=rdna_transform_points(vk,p64,mat4_words(M64),&clip64);
+    float w64=0;bool ok64=bool(s64)&&clip64.size()==256;
+    for(size_t i=0;ok64&&i<64;++i){
+      auto rr=mat4_apply(M64,p64[i*3],p64[i*3+1],p64[i*3+2]);
+      for(int c=0;c<4;++c)w64=std::max(w64,std::fabs(rr[c]-clip64[i*4+c]));
+    }
+    std::printf("  rdna-vertex: max |clip - CPU float| over 64 lanes x 4 comps = %.3g\n",(double)w64);
+    check(ok64&&w64<1e-5f,"rdna-vertex: 64-lane dispatch matches CPU float reference (<1e-5)");
+  }
   // translated output vs CPU float reference for every frame
   std::vector<std::vector<uint8_t>> ref,got;
   float worst=0;bool numeric=true;
@@ -182,7 +200,7 @@ void pnr_rdna_vertex_tests(int& pass,int& fail) {
     std::printf("  rdna-light: max |kernel - CPU float dot| over 24 normals = %.3g\n",(double)worst);
     check(ok&&worst<1e-6f,"rdna-light: translated dot3 matches the CPU float dot (<1e-6)");
     check(!rdna_light_dots(vk,{},L,&dd).ok,"rdna-light: empty normals rejected");
-    check(!rdna_light_dots(vk,std::vector<float>(75,0.0f),L,&dd).ok,"rdna-light: more than 24 normals rejected");
+    check(!rdna_light_dots(vk,std::vector<float>(3*65,0.0f),L,&dd).ok,"rdna-light: more than 64 normals rejected (single dispatch)");
     check(!rdna_light_dots(vk,nrm,L,nullptr).ok,"rdna-light: null output rejected");
     std::vector<uint8_t> img;std::vector<std::vector<uint8_t>> frs;
     std::vector<uint32_t> lvs(std::begin(lit_clip_vert),std::end(lit_clip_vert)),lh(std::begin(lit_hand_vert),std::end(lit_hand_vert)),lf(std::begin(lit_frag),std::end(lit_frag));
@@ -194,8 +212,8 @@ void pnr_rdna_vertex_tests(int& pass,int& fail) {
   std::vector<float> clip;
   check(!rdna_transform_points(vk,{},mat4_words(mat4_identity()),&clip).ok,"rdna-vertex: empty point list rejected");
   check(!rdna_transform_points(vk,xyz,std::vector<uint32_t>(15),&clip).ok,"rdna-vertex: wrong matrix size rejected");
-  std::vector<float> many(3*25,0.0f);
-  check(!rdna_transform_points(vk,many,mat4_words(mat4_identity()),&clip).ok,"rdna-vertex: more than 24 points rejected");
+  std::vector<float> many(3*65,0.0f);
+  check(!rdna_transform_points(vk,many,mat4_words(mat4_identity()),&clip).ok,"rdna-vertex: more than 64 points rejected (single dispatch)");
   check(!vk.render_clip_mesh_rgba(W,H,cvs,fs,std::vector<float>(6),idx,true,black,nullptr).ok,"rdna-vertex: null image rejected");
   std::vector<uint8_t> junk;
   check(!vk.render_clip_mesh_rgba(W,H,cvs,fs,std::vector<float>(13),idx,true,black,&junk).ok,"rdna-vertex: clip vertex data not multiple of 7 floats rejected");
