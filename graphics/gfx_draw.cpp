@@ -353,8 +353,8 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
       // Guest layout: level 0 at the T# pitch, smaller levels tightly
       // pitched one after another (the layout validate_tsharp_sample bounds).
       // Compressed formats (BC1/BC3) are decoded block by block into RGBA8.
-      const bool bc = ts.data_format == 35 || ts.data_format == 37;
-      const std::uint32_t bb = ts.data_format == 35 ? 8 : ts.data_format == 37 ? 16 : 4;
+      const bool bc = ts.data_format >= 35 && ts.data_format <= 39;
+      const std::uint32_t bb = ts.data_format == 35 || ts.data_format == 38 ? 8 : bc ? 16 : 4;
       const std::uint32_t levels = ts.last_level + 1;
       std::uint64_t chain_bytes = 0;
       for (std::uint32_t l = 0; l < levels; ++l) {
