@@ -328,6 +328,35 @@ makes the load fail with a message naming it, and nothing runs.
   bytes); the same red-first order with depth off lets the last-drawn green quad win
   (control); stencil and GREATER draws refused.
 
+## Slice S14 notes (target-0 blending: CB_BLEND0_CONTROL)
+- Register (graphics/amd_regs.hpp): CB_BLEND0_CONTROL ctx 0x1E0. Field layout (colour src
+  factor bits 0..4, colour function bits 5..7, colour dst factor bits 8..12, alpha src factor
+  bits 16..20, alpha function bits 21..23, alpha dst factor bits 24..28, separate-alpha bit 29,
+  enable bit 30) from public shadPS4 src/video_core/amdgpu/{regs.cpp,regs_color.h} (values
+  only, no code).
+- Factor translation: GNM orders factors 4..9 alpha-first (4 src-alpha, 5 inv-src-alpha,
+  6 dst-alpha, 7 inv-dst-alpha, 8 dst-colour, 9 inv-dst-colour); Vulkan orders the same rows
+  colour-first (4 dst-colour, 5 inv-dst-colour, 6 src-alpha .. 9 inv-dst-alpha). gfx_draw
+  translates values 4..9 through a ten-entry table; 0..3 (zero/one/src-colour/inv-src-colour)
+  coincide. All five GNM blend functions map onto Vulkan blend ops (add, subtract, min, max,
+  reverse-subtract).
+- `BlendState` (graphics/vulkan.hpp) + MeshInput.blend + the colour-blend attachment state in
+  render.cpp: blending is per-draw pipeline state, like slice-S12 depth. Without the register
+  (or its enable bit) the draw replaces, exactly as before.
+- Separate-alpha bit 29 is decoded: when set, the alpha factor/function fields drive the alpha
+  channel; otherwise the colour fields apply to alpha. No pixel-level test yet (the current
+  pipeline has fragment alpha 1.0, so only SRC/DST_ALPHA = pass/zero would be observable).
+- Refused with plain reasons: src-alpha-saturate (10), constant colour/alpha (13, 14, 19, 20)
+  and dual-source src1 factors (15..18) - no blend constants or dual-source outputs yet.
+- Limits (stated in the draw notes): target 0 only (CB_BLEND1..7_CONTROL untracked); fragment
+  alpha is 1.0 on the current pipeline (no vertex alpha, no pixel-shader alpha export); blend
+  constants and logic ops not implemented.
+- Tests (gfx_draw_tests.cpp): additive ONE+ONE over green gives yellow; MIN gives black;
+  src*DST_COLOR multiplies the source by the target content (red over green -> black);
+  SRC_ALPHA at fragment alpha 1.0 passes the source through (pins the alpha/colour row swap of
+  the factor table); without the register the second draw replaces (control); constant-colour
+  and dual-source factors refused.
+
 ## Slice S13 notes (frame-persistent render targets: bound DB depth buffer)
 - Depth buffer binding registers (graphics/amd_regs.hpp): DB_Z_INFO ctx 0x010, DB_STENCIL_INFO
   0x011, DB_Z_READ_BASE 0x012, DB_Z_WRITE_BASE 0x014, DB_DEPTH_SIZE 0x016. Addresses and field
