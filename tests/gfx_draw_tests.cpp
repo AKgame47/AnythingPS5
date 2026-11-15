@@ -89,6 +89,50 @@ struct IndexedScene {
     return execute_draw(vk, mem, sum.draws[0]);
   }
 };
+// Slice S10: strip/fan topology. Fixed vertex list; indexed (u32) or auto draws.
+struct TopoScene {
+  GpuAddressSpace mem;
+  std::vector<std::uint32_t> vs_blob, ps_blob{0xbf810000}, mat;
+  std::vector<float> vb;
+  std::vector<std::uint32_t> ib;
+  std::vector<std::uint8_t> target;
+  std::vector<std::uint32_t> cmd;
+  static constexpr std::uint32_t W = 64, H = 64;
+  void build(const std::vector<float>& verts, const std::vector<std::uint32_t>& indices, std::uint32_t prim) {
+    const std::uint32_t nv = std::uint32_t(verts.size() / 6);
+    vs_blob = make_pnr_vs_blob(nv);
+    vb = verts;
+    ib = indices;
+    mat.assign(16, 0); for (int i = 0; i < 4; ++i) mat[i * 5] = f2u(1.0f);
+    target.assign(W * H * 4, 0xCD);
+    mem.map_external(0x100000, vs_blob.data(), vs_blob.size() * 4, "vs");
+    mem.map_external(0x200000, ps_blob.data(), 4, "ps");
+    mem.map_external(0x300000, mat.data(), 64, "matrix");
+    mem.map_external(0x400000, vb.data(), vb.size() * 4, "vertices");
+    mem.map_external(0x500000, target.data(), target.size(), "target");
+    pm4::Builder b;
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+    b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+    b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(W / 2.0f), f2u(W / 2.0f), f2u(-0.5f * float(H)), f2u(0.5f * float(H)), f2u(0.5f), f2u(0.5f)});
+    b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+    b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (H << 16) | W);
+    b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, prim).num_instances(1);
+    if (ib.empty()) {
+      b.draw_auto(nv);
+    } else {
+      mem.map_external(0x600000, ib.data(), ib.size() * 4, "indices");
+      b.index_type(1u);
+      b.draw_indexed(0x600000, std::uint32_t(ib.size()), std::uint32_t(ib.size()));
+    }
+    cmd = b.dwords();
+  }
+  DrawResult run(VulkanBackend& vk) {
+    auto sum = pm4::interpret(cmd.data(), cmd.size());
+    if (sum.draws.size() != 1) { DrawResult r; r.error = "no draw parsed"; return r; }
+    return execute_draw(vk, mem, sum.draws[0]);
+  }
+};
 // Slice S9: PVS3 batched draws. nverts/3 triangles, all red at the standard
 // position except the LAST triangle, green and mirrored (apex down).
 struct BatchScene {
@@ -191,7 +235,7 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
     if (r.ok || r.error.find(frag) == std::string::npos) std::printf("  got: ok=%d error='%s'\n", int(r.ok), r.error.c_str());
     check(!r.ok && r.error.find(frag) != std::string::npos && r.rgba.empty(), label);
   };
-  { Scene s; s.build(64, 5); refused(s, "triangle lists", "draw: triangle fan refused"); }
+  { Scene s; s.build(64, 2); refused(s, "strips and fans", "draw: line list refused"); }
   { Scene s; s.build(32); refused(s, "viewport", "draw: viewport that does not match the target is refused"); }
   { Scene s; s.build(64, 4, false); refused(s, "user data", "draw: missing vertex user data refused"); }
   { Scene s; s.build(); s.vs_blob[0] = 0; refused(s, "PVS1", "draw: a vertex program that is not a PVS1 blob is refused"); }
@@ -412,5 +456,74 @@ void pnr_gfx_draw_tests(int& pass, int& fail) {
     { BatchScene f; f.count_override = 7; f.build(false, false, 96);
       auto r = f.run(vk);
       check(!r.ok && r.error.find("multiple of 3") != std::string::npos, "pvs3: non-multiple-of-3 vertex count refused"); }
+  }
+
+  // ---- slice S10: triangle strips and fans (host-side expansion to lists) ----
+  {
+    // Quad as a 4-vertex strip: triangles (0,1,2) and (2,1,3) after the
+    // odd-triangle winding swap. Reference: the same two triangles listed.
+    const std::vector<float> quad = {
+      -0.8f, -0.8f, 0, 1, 0, 0,   -0.8f, 0.8f, 0, 1, 0, 0,
+       0.8f, -0.8f, 0, 1, 0, 0,    0.8f, 0.8f, 0, 1, 0, 0};
+    TopoScene strip; strip.build(quad, {}, 6);
+    auto rs = strip.run(vk);
+    if (!rs.ok) std::printf("  strip error: %s\n", rs.error.c_str());
+    check(rs.ok && rs.notes.find("strip expanded") != std::string::npos, "topo: 4-vertex strip auto draw ok, expansion stated");
+    TopoScene sref; sref.build(quad, {0, 1, 2, 2, 1, 3}, 4);
+    auto rsr = sref.run(vk);
+    if (!rsr.ok) std::printf("  strip-ref error: %s\n", rsr.error.c_str());
+    if (rs.ok && rsr.ok) {
+      std::uint32_t d = 0;
+      for (size_t p = 0; p < size_t(64) * 64 * 4; ++p) d += rs.rgba[p] != rsr.rgba[p];
+      check(d == 0, "topo: strip draw pixel-identical to the expanded triangle list");
+      int reds = 0;
+      for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x) reds += rs.rgba[(y * 64 + x) * 4] == 255;
+      check(reds > 2500 && reds < 2750, "topo: strip quad covers about 64% of the target (count " + std::to_string(reds) + ")");
+    } else check(false, "topo: strip reference draw ok");
+    // The same quad through an INDEXED strip (index buffer 0,1,2,3).
+    TopoScene istrip; istrip.build(quad, {0, 1, 2, 3}, 6);
+    auto ris = istrip.run(vk);
+    if (!ris.ok) std::printf("  indexed-strip error: %s\n", ris.error.c_str());
+    if (ris.ok && rs.ok) {
+      std::uint32_t d = 0;
+      for (size_t p = 0; p < size_t(64) * 64 * 4; ++p) d += ris.rgba[p] != rs.rgba[p];
+      check(d == 0, "topo: indexed strip pixel-identical to the auto strip");
+    } else check(false, "topo: indexed strip draw ok");
+    // Fan: centre + 4 ring vertices, 3 triangles (the left wedge stays clear).
+    const std::vector<float> fan = {
+       0.0f,  0.0f, 0, 1, 0, 0,   -0.8f, -0.8f, 0, 1, 0, 0,   0.8f, -0.8f, 0, 1, 0, 0,
+       0.8f,  0.8f, 0, 1, 0, 0,   -0.8f,  0.8f, 0, 1, 0, 0};
+    TopoScene fs; fs.build(fan, {}, 5);
+    auto rf = fs.run(vk);
+    if (!rf.ok) std::printf("  fan error: %s\n", rf.error.c_str());
+    check(rf.ok && rf.notes.find("fan expanded") != std::string::npos, "topo: 5-vertex fan auto draw ok, expansion stated");
+    TopoScene fref; fref.build(fan, {0, 1, 2, 0, 2, 3, 0, 3, 4}, 4);
+    auto rfr = fref.run(vk);
+    if (!rfr.ok) std::printf("  fan-ref error: %s\n", rfr.error.c_str());
+    if (rf.ok && rfr.ok) {
+      std::uint32_t d = 0;
+      for (size_t p = 0; p < size_t(64) * 64 * 4; ++p) d += rf.rgba[p] != rfr.rgba[p];
+      check(d == 0, "topo: fan draw pixel-identical to the expanded triangle list");
+      auto px = [&](int x, int y) { return &rf.rgba[(y * 64 + x) * 4]; };
+      check(px(32, 32)[0] == 255, "topo: fan centre pixel is drawn");
+      check(px(10, 32)[0] == 0 && px(10, 32)[3] == 255, "topo: the missing fan wedge stays at the clear colour");
+    } else check(false, "topo: fan reference draw ok");
+    // Refusals: too few vertices for a strip/fan; non-triangle primitives.
+    { TopoScene t; t.build(quad, {}, 6);
+      pm4::Builder b;   // rebuild the command with a 2-vertex strip
+      b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_VS, {0x100000 >> 8, 0});
+      b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_PGM_LO_PS, {0x200000 >> 8, 0});
+      b.set_reg(pm4::SET_SH_REG, amd::SPI_SHADER_USER_DATA_VS_0, {0x300000, 0, 0x400000, 0});
+      b.set_reg(pm4::SET_CONTEXT_REG, amd::PA_CL_VPORT_XSCALE, {f2u(32.0f), f2u(32.0f), f2u(-32.0f), f2u(32.0f), f2u(0.5f), f2u(0.5f)});
+      b.set_context(amd::CB_COLOR0_BASE, 0x500000 >> 8).set_context(amd::CB_TARGET_MASK, 0xf);
+      b.set_context(amd::PA_SC_SCREEN_SCISSOR_BR, (64 << 16) | 64);
+      b.set_uconfig(amd::VGT_PRIMITIVE_TYPE, 6).num_instances(1).draw_auto(2);
+      auto c2 = b.dwords();
+      auto sum = pm4::interpret(c2.data(), c2.size());
+      auto r = execute_draw(vk, t.mem, sum.draws[0]);
+      check(!r.ok && r.error.find("at least 3") != std::string::npos, "topo: 2-vertex strip refused"); }
+    { TopoScene t; t.build(quad, {}, 1);
+      auto r = t.run(vk);
+      check(!r.ok && r.error.find("strips and fans") != std::string::npos, "topo: point list refused"); }
   }
 }
