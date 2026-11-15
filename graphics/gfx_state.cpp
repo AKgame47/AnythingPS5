@@ -46,6 +46,7 @@ DrawBindings extract_bindings(const pm4::DrawCall& d) {
     get(r, CB_TARGET_MASK, &b.color0.target_mask);
   }
   if (get(r, VGT_PRIMITIVE_TYPE, &v)) b.primitive = static_cast<PrimitiveType>(v);
+  if (get(r, DB_DEPTH_CONTROL, &v)) { b.depth_control_set = true; b.depth_control = v; }
   if (get(r, PA_SC_SCREEN_SCISSOR_BR, &b.screen_scissor_br)) { b.has_scissor = true; get(r, PA_SC_SCREEN_SCISSOR_TL, &b.screen_scissor_tl); }
   if (!b.vertex_stage()) b.missing += "no vertex-stage program address (VS or GS); ";
   if (!b.ps.present) b.missing += "no pixel shader address; ";
