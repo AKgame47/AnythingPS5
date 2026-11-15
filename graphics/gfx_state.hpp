@@ -43,6 +43,8 @@ struct DrawBindings {
   std::uint64_t db_z_write_base = 0;   // DB_Z_WRITE_BASE << 8
   std::uint32_t db_depth_size = 0;     // pitch_tile_max bits 0..10, height_tile_max bits 11..21
   bool db_depth_size_set = false;
+  bool blend0_set = false;             // CB_BLEND0_CONTROL was written (slice S14)
+  std::uint32_t blend0 = 0;            // raw BlendControl value
   // What a minimal draw would need but is missing, in plain words.
   std::string missing;
   const ShaderBinding* vertex_stage() const { return vs.present ? &vs : (gs.present ? &gs : nullptr); }
