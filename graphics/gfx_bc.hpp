@@ -10,6 +10,8 @@
 #pragma once
 #include <cstdint>
 
+#include "graphics/gfx_bc7.hpp"
+
 namespace pnr::graphics {
 
 inline constexpr std::uint32_t kFormatBc1 = 35;
@@ -145,6 +147,7 @@ inline void decode_bc_level(std::uint32_t data_format, const std::uint8_t* src,
       else if (data_format == kFormatBc2) decode_bc2_block(blk, block_px);
       else if (data_format == kFormatBc3) decode_bc3_block(blk, block_px);
       else if (data_format == kFormatBc4) decode_bc4_block(blk, block_px);
+      else if (data_format == kFormatBc7) decode_bc7_block(blk, block_px);
       else decode_bc5_block(blk, block_px);
       for (std::uint32_t py = 0; py < 4 && by * 4 + py < h; ++py)
         for (std::uint32_t px = 0; px < 4 && bx * 4 + px < w; ++px) {
