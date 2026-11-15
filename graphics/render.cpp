@@ -555,9 +555,13 @@ Status VulkanBackend::render_core(
       lh[l] = (tex->h >> l) ? (tex->h >> l) : 1;
       tex_bytes += (size_t)lw[l] * lh[l] * 4;
     }
+    // Slice S23: sRGB guest textures stage as SRGB images so the host sampler
+    // does the sRGB -> linear conversion in hardware.
+    const int32_t tex_vk_format = tex->srgb ? (int32_t)VK_FORMAT_R8G8B8A8_SRGB
+                                            : (int32_t)VK_FORMAT_R8G8B8A8_UNORM;
     VkFormatProperties fprops{};
     fn<void (*)(VkPhysicalDevice, int32_t, VkFormatProperties*)>(vkGetPhysicalDeviceFormatProperties)(
-        phys_, (int32_t)VK_FORMAT_R8G8B8A8_UNORM, &fprops);
+        phys_, tex_vk_format, &fprops);
     if (!(fprops.optimalTilingFeatures & 0x1))
       return Status::Fail(100, "vulkan", "RGBA8 sampled images unsupported on this device; texture Blocked");
     if (tex->linear && !(fprops.optimalTilingFeatures & 0x1000))
@@ -565,7 +569,7 @@ Status VulkanBackend::render_core(
     if (Status s = host_buffer(tex->rgba, tex_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, "texture staging", &tstage); !s.ok) return s;
     VkImageCreateInfo tci{};
     tci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    tci.imageType = VK_IMAGE_TYPE_2D; tci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    tci.imageType = VK_IMAGE_TYPE_2D; tci.format = tex_vk_format;
     tci.extent = {tex->w, tex->h, 1}; tci.mipLevels = levels; tci.arrayLayers = 1;
     tci.samples = VK_SAMPLE_COUNT_1_BIT; tci.tiling = VK_IMAGE_TILING_OPTIMAL;
     tci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -589,7 +593,7 @@ Status VulkanBackend::render_core(
     if (r != VK_SUCCESS) return vkfail("vkBindImageMemory (texture)", r);
     VkImageViewCreateInfo tvci{};
     tvci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    tvci.image = timg; tvci.viewType = VK_IMAGE_VIEW_TYPE_2D; tvci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    tvci.image = timg; tvci.viewType = VK_IMAGE_VIEW_TYPE_2D; tvci.format = tex_vk_format;
     tvci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
     VkImageView tview = 0;
     r = fn<VkResult (*)(VkDevice, const VkImageViewCreateInfo*, void*, VkImageView*)>(vkCreateImageView)(device_, &tvci, nullptr, &tview);
