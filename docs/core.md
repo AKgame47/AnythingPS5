@@ -427,6 +427,16 @@ makes the load fail with a message naming it, and nothing runs.
   target, BC1/BC3 mip chains select the right level, loose pitch and non-multiple-
   of-4 extents refused.
 
+## Slice S21 notes (BC2/BC4/BC5)
+- T# data formats 36 (BC2), 38 (BC4) and 39 (BC5) join the subset under the same
+  rules as S20 (linear tiling, tight pitch, multiple-of-4 extents, S19 mip chains).
+- BC2: explicit 4-bit alphas scaled by 17, colour half always on the 4-colour ramp.
+  BC4: one channel (the BC3 alpha block layout) sampled as (r, 0, 0, 1). BC5: two
+  BC4 blocks sampled as (r, g, 0, 1). All exact integer arithmetic.
+- Tests (5 in gfx_bc_tests + 3 in gfx_draw_tests): nibble scaling, both BC4 modes
+  with nonzero endpoints, independent BC5 channels, and end-to-end draws byte-exact
+  (BC2 alpha ramp in the target, BC4 red-only, BC5 two-channel).
+
 ## Slice S16 notes (8_8_8_8 unorm vertex colours)
 - The S15 fetch kernels gain a conversion path for data format 10 (8_8_8_8) with unorm
   numerics: all four components share the record's first dword, so the component dword
