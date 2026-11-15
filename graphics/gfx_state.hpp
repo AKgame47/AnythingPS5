@@ -45,6 +45,9 @@ struct DrawBindings {
   bool db_depth_size_set = false;
   bool blend0_set = false;             // CB_BLEND0_CONTROL was written (slice S14)
   std::uint32_t blend0 = 0;            // raw BlendControl value
+  bool mode_cntl_set = false;          // PA_SU_SC_MODE_CNTL was written (slice S18)
+  std::uint32_t mode_cntl = 0;         // raw PolygonControl value: bit 0 cull front,
+                                       // bit 1 cull back, bit 2 front face (0=CCW, 1=CW)
   // What a minimal draw would need but is missing, in plain words.
   std::string missing;
   const ShaderBinding* vertex_stage() const { return vs.present ? &vs : (gs.present ? &gs : nullptr); }
