@@ -356,6 +356,12 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
       // Compressed formats (BC1/BC3) are decoded block by block into RGBA8.
       const bool bc = ts.data_format >= 35 && ts.data_format <= 39;
       const std::uint32_t bb = ts.data_format == 35 || ts.data_format == 38 ? 8 : bc ? 16 : 4;
+      // Slice S23 plain formats: element size from the format table (the
+      // descriptor passed validation, so this always succeeds).
+      PlainFormat pf{};
+      if (!bc && !plain_format_info(ts.data_format, ts.num_format, pf))
+        return fail(r, "T# plain format is not in the sampled subset");
+      const std::uint32_t eb = bc ? bb : pf.element_bytes;
       const std::uint32_t levels = ts.last_level + 1;
       std::uint64_t chain_bytes = 0;
       for (std::uint32_t l = 0; l < levels; ++l) {
@@ -404,9 +410,9 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
         // Level 0 rows sit at the T# pitch; deeper levels are tight already.
         // For compressed formats a "row" is a row of 4x4 blocks.
         const std::uint32_t rows = bc ? (lh + 3) / 4 : lh;
-        const std::uint64_t row_bytes = bc ? std::uint64_t((lw + 3) / 4) * bb : std::uint64_t(lw) * 4;
+        const std::uint64_t row_bytes = bc ? std::uint64_t((lw + 3) / 4) * bb : std::uint64_t(lw) * eb;
         const std::uint64_t src_row = ts.tiling_index != kSwLinear ? tiled_layout[l].pitch_bytes
-                                     : l == 0 && !bc ? std::uint64_t(ts.pitch) * 4
+                                     : l == 0 && !bc ? std::uint64_t(ts.pitch) * eb
                                      : l == 0 ? std::uint64_t(ts.pitch / 4) * bb
                                               : row_bytes;
         if (ts.tiling_index != kSwLinear) {
@@ -414,8 +420,9 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
           const std::uint64_t level_base = tiled_layout[l].linear_offset;
           if (!bc) {
             for (std::uint32_t row = 0; row < rows; ++row)
-              std::memcpy(texels.data() + off + std::size_t(row) * row_bytes,
-                          detiled.data() + level_base + std::uint64_t(row) * src_row, row_bytes);
+              convert_plain_row(ts.data_format, ts.num_format,
+                                detiled.data() + level_base + std::uint64_t(row) * src_row,
+                                texels.data() + off + std::size_t(row) * std::uint64_t(lw) * 4, lw);
           } else {
             raw.resize(rows * row_bytes);
             for (std::uint32_t row = 0; row < rows; ++row)
@@ -427,9 +434,13 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
           continue;
         }
         if (!bc) {
+          raw.resize(rows * row_bytes);
           for (std::uint32_t row = 0; row < rows; ++row)
-            if (!mem.read(src + std::uint64_t(row) * src_row, texels.data() + off + std::size_t(row) * row_bytes, row_bytes))
+            if (!mem.read(src + std::uint64_t(row) * src_row, raw.data() + std::size_t(row) * row_bytes, row_bytes))
               return fail(r, "T# pixels are not mapped: " + mem.last_error());
+          for (std::uint32_t row = 0; row < rows; ++row)
+            convert_plain_row(ts.data_format, ts.num_format, raw.data() + std::size_t(row) * row_bytes,
+                              texels.data() + off + std::size_t(row) * std::uint64_t(lw) * 4, lw);
         } else {
           raw.resize(rows * row_bytes);
           for (std::uint32_t row = 0; row < rows; ++row)
@@ -441,6 +452,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
         off += std::uint64_t(lw) * lh * 4;
       }
       tex.rgba = texels.data(); tex.w = ts.width; tex.h = ts.height;
+      tex.srgb = format_uses_srgb_image(ts.data_format, ts.num_format);  // S23: host-side sRGB
       tex.mag_filter = ss.mag_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
       tex.min_filter = ss.min_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
       // Slice S19: mip chain state. mip_filter none samples only level 0;
