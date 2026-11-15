@@ -354,7 +354,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
       // Guest layout: level 0 at the T# pitch, smaller levels tightly
       // pitched one after another (the layout validate_tsharp_sample bounds).
       // Compressed formats (BC1/BC3) are decoded block by block into RGBA8.
-      const bool bc = (ts.data_format >= 35 && ts.data_format <= 39) || ts.data_format == 41;
+      const bool bc = (ts.data_format >= 35 && ts.data_format <= 41);
       const std::uint32_t bb = ts.data_format == 35 || ts.data_format == 38 ? 8 : bc ? 16 : 4;
       // Slice S23 plain formats: element size from the format table (the
       // descriptor passed validation, so this always succeeds).
@@ -428,7 +428,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
             for (std::uint32_t row = 0; row < rows; ++row)
               std::memcpy(raw.data() + std::size_t(row) * row_bytes,
                           detiled.data() + level_base + std::uint64_t(row) * src_row, row_bytes);
-            decode_bc_level(ts.data_format, raw.data(), row_bytes, lw, lh, texels.data() + off);
+            decode_bc_level(ts.data_format, raw.data(), row_bytes, lw, lh, texels.data() + off, ts.num_format == 5);
           }
           off += std::uint64_t(lw) * lh * 4;
           continue;
@@ -446,7 +446,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
           for (std::uint32_t row = 0; row < rows; ++row)
             if (!mem.read(src + std::uint64_t(row) * src_row, raw.data() + std::size_t(row) * row_bytes, row_bytes))
               return fail(r, "T# blocks are not mapped: " + mem.last_error());
-          decode_bc_level(ts.data_format, raw.data(), row_bytes, lw, lh, texels.data() + off);
+          decode_bc_level(ts.data_format, raw.data(), row_bytes, lw, lh, texels.data() + off, ts.num_format == 5);
         }
         src += src_row * rows;
         off += std::uint64_t(lw) * lh * 4;
