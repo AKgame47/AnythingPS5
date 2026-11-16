@@ -468,6 +468,43 @@ makes the load fail with a message naming it, and nothing runs.
 - Limits: thin (2D, single-slice) modes only - no thick/3D modes, arrays or depth
   sampling; sampling is still not translated RDNA; hardware GPU untested.
 
+## Slice S31 notes (array/cube descriptor semantics: allocation vs view)
+- **Corrects S27/S28.** The T# DEPTH field (q2 bits 0-12) is not just for
+  3D: for Color2DArray it holds the ALLOCATION layer count - 1, and
+  base_array..last_array select a view window clamped to that allocation:
+  view = min(last_array + 1, depth + 1) - base_array. For Cube it counts
+  full cubes (one cube = depth field 0 = 6 layers). Sources, independent of
+  each other: shadPS4's resource.h (NumLayers: "Depth is the number of
+  layers for Array images", "Depth is the number of full cubes for Cube
+  images", and the clamp in NumArraySlices) and Mesa's ac_descriptors.c
+  (AMD's own driver stack: the GCN-era builder sets DEPTH = layers-1 for
+  arrays, and its gfx9+ comment documents DEPTH as "the last accessible
+  layer"). The GCN-era layout is corroboration, not proof, of the console
+  layout: no PlayStation verification exists, so the implemented subset is
+  grounded in shadPS4's console model with Mesa as the independent second
+  reading, and residual PS5-versus-GCN uncertainty is retained here rather
+  than generalized away.
+- PNR implements: arrays with base_array 0 and any view window (clamped),
+  cubes with exactly one cube. Still refused with named reasons: non-zero
+  base_array (mid-allocation views), cube arrays, tiled arrays/cubes.
+- **Allocation bounds and the sampled view are kept distinct, per review:**
+  validate_tsharp_sample bounds the full ALLOCATION (depth layers per mip
+  level for arrays, depth*6 faces for cubes); the repack copies only the
+  view window's slices out of each level and strides the guest address by
+  the full allocation width per level. The byte-exact tests prove the
+  distinction: a 4-slice view inside an 8-slice allocation draws the right
+  slice colours, and mip level 1 is read after all 8 level-0 slices, not 4.
+- Earlier descriptors PNR accepted remain accepted and behave identically
+  when they follow the typical GNM pattern (depth field = last_array,
+  base_array = 0): all S27/S28 tests pass unchanged in meaning. What
+  changes: a mismatched descriptor is now read the way the console model
+  reads it instead of silently treating last_array as the slice count.
+- File layout: gfx_draw_tests.cpp outgrew the practical size limit of the
+  editing tooling, so the texture draw tests (S17/S19/S20-S25/S27/S28 and
+  the S18 textured-cull checks) moved to tests/gfx_tex_draw_tests.cpp
+  (suite pnr_gfx_tex_draw_tests). No test was dropped; counts grew by the
+  new S31 checks only.
+
 ## Slice S30 notes (3D / volume textures)
 - **Implemented, Tested (software-output verified; texture-3d sweep path
   also validation-layer clean).** Color3D T# (type 10): the q2 bits 0-12
