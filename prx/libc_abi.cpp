@@ -30,6 +30,16 @@ constexpr std::int64_t kSceEinval = SCE_KERNEL_ERROR_EINVAL;
 // Slice S34: qsort's guest comparator (thread-local so nested/concurrent sorts do not race)
 // and the __cxa_guard_* lock.
 thread_local std::uint64_t s_qsort_cmp = 0;
+struct ScopedQsortComparator {
+  explicit ScopedQsortComparator(std::uint64_t comparator) noexcept : previous(s_qsort_cmp) {
+    s_qsort_cmp = comparator;
+  }
+  ~ScopedQsortComparator() { s_qsort_cmp = previous; }
+  ScopedQsortComparator(const ScopedQsortComparator&) = delete;
+  ScopedQsortComparator& operator=(const ScopedQsortComparator&) = delete;
+ private:
+  std::uint64_t previous;
+};
 int qsort_guest_cmp(const void* x, const void* y) {
   return static_cast<int>(pnr::loader::call_guest_function(s_qsort_cmp, reinterpret_cast<std::int64_t>(x),
                                                            reinterpret_cast<std::int64_t>(y)));
@@ -226,7 +236,7 @@ void add_libc_abi_symbols(std::vector<PrxSymbol>& out) {
   // (same process). The comparator's int result passes through unchanged.
   add(L, "qsort", [need](Args a) -> std::int64_t {
     if (!need(a, 4) || !a.i[3] || (a.i[1] != 0 && (!a.i[0] || !a.i[2]))) return kSceEinval;
-    s_qsort_cmp = static_cast<std::uint64_t>(a.i[3]);
+    const ScopedQsortComparator comparator(static_cast<std::uint64_t>(a.i[3]));
     std::qsort(M(a.i[0]), static_cast<std::size_t>(a.i[1]), static_cast<std::size_t>(a.i[2]), &qsort_guest_cmp);
     return 0;
   });
