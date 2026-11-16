@@ -9,6 +9,7 @@
   #include <windows.h>
 #endif
 #if defined(__unix__) || defined(__APPLE__)
+  #include <sys/mman.h>
   #include <unistd.h>
 #endif
 
@@ -878,6 +879,25 @@ int main() {
     a.i[0] = 1; a.i[1] = 2; a.i[2] = 3; a.i[3] = 4; a.i[4] = 5; a.i[5] = 6;
     a.s[0] = 700; a.s[1] = 9999;  // s[1..] must not leak into the 7-arg sum
     CHECK(fn(a) == 721, "abi7: 6 register args + stack slot0 sum verbatim");
+  }
+
+  // --- S41: untracked "munmap" pairs with the "mmap" binding ---
+  {
+    pnr::prx::PrxRegistry reg;
+    std::function<std::int64_t(const pnr::prx::GuestCallArgs&)> fn;
+    std::string err;
+    CHECK(reg.bind(pnr::loader::nid::compute_nid("munmap", "libkernel"),
+                   &fn, &err) == pnr::prx::SCE_OK,
+          "mm: raw munmap binds");
+    void* page = ::mmap(nullptr, 4096, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(page != MAP_FAILED, "mm: host page for raw munmap test");
+    // misaligned address: the kernel refuses with EINVAL (note: Linux munmap of an
+    // unmapped-but-aligned range is NOT an error - "no mapped pages" succeeds)
+    CHECK(fn({{reinterpret_cast<std::int64_t>(page) + 1, 4096}}) != 0,
+          "mm: raw munmap misaligned address fails");
+    CHECK(fn({{reinterpret_cast<std::int64_t>(page), 4096}}) == 0,
+          "mm: raw munmap unmaps a live page");
   }
 
   // --- SHOWCASE: PS-style demo binary dispatched through the PS-ABI shim ---
