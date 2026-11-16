@@ -53,6 +53,11 @@ struct TexInput {
   uint32_t layers = 1;
   // Slice S28: the image is a cubemap (layers must be 6: +X -X +Y -Y +Z -Z).
   bool cube = false;
+  // Slice S30: 3D (volume) texture depth in z-planes (1 = a 2D-family image).
+  // Each level holds w_l*h_l*depth_l tightly packed texels, level-major; the
+  // depth shrinks per level like the width and height. Cannot combine with
+  // layers > 1 or cube.
+  uint32_t depth = 1;
 };
 
 // Colour blend state for one target (slice S14), decoded from GNM
