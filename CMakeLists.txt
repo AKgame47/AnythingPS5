@@ -197,6 +197,9 @@ add_test(NAME pnr_filew_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAK
 # Slice S39: guest lseek/fstat - the module seeks SET/CUR/END, checks positions, reads at
 # the offsets and fstats into guest memory (size + not-directory), prints "pos ok".
 add_test(NAME pnr_filepos_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_filepos.elf --filepos && rm -rf ${CMAKE_BINARY_DIR}/s39jail && mkdir -p ${CMAKE_BINARY_DIR}/s39jail && printf pnr-asset-42 > ${CMAKE_BINARY_DIR}/s39jail/asset.txt && out=$(PNR_JAIL_ROOT=${CMAKE_BINARY_DIR}/s39jail $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_filepos.elf) && echo \"$out\" | grep -q \"pos ok\" && echo \"$out\" | grep -q \"MODULE FINISHED: exit 0\"")
+# Slice S40: 7th scalar (stack) argument end-to-end via the synthetic libpnrtest import
+# (test-only scaffolding installed under PNR_TEST_IMPORTS=1, not a Sony API).
+add_test(NAME pnr_abi7_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_abi7.elf --abi7 && out=$(PNR_TEST_IMPORTS=1 $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_abi7.elf) && echo \"$out\" | grep -q \"abi7 ok\" && echo \"$out\" | grep -q \"MODULE FINISHED: exit 0\"")
 add_test(NAME pnr_gnm_decode COMMAND sh -c "$<TARGET_FILE:pnr> gnm-synth ${CMAKE_BINARY_DIR}/synth_pm4.bin && $<TARGET_FILE:pnr> gnm-decode ${CMAKE_BINARY_DIR}/synth_pm4.bin | grep -q \"2 draws\"")
 add_test(NAME pnr_module_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_ok.elf && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_ok.elf")
 set_tests_properties(pnr_module_run PROPERTIES PASS_REGULAR_EXPRESSION "MODULE FINISHED: exit 30")
