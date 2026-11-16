@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <map>
 #include <memory>
+#include <limits>
 #include <mutex>
 
 namespace pnr::loader {
@@ -360,22 +361,61 @@ std::int64_t guest_thread_join(std::int64_t h, std::int64_t* ret) {
 }
 std::int64_t guest_thread_self() { return static_cast<std::int64_t>(::pthread_self()); }
 
+namespace {
+struct GuestMutex {
+  pthread_mutex_t native{};
+  bool initialized = false;
+  std::atomic<unsigned> held{0};
+  ~GuestMutex() { if (initialized) ::pthread_mutex_destroy(&native); }
+};
+std::mutex g_mutex_mu;
+std::map<std::int64_t, std::shared_ptr<GuestMutex>> g_mutexes;
+std::int64_t g_mutex_next = 0x100000;
+std::shared_ptr<GuestMutex> find_mutex(std::int64_t id) {
+  std::lock_guard<std::mutex> lock(g_mutex_mu);
+  const auto it = g_mutexes.find(id);
+  return it == g_mutexes.end() ? nullptr : it->second;
+}
+}  // namespace
+
 std::int64_t guest_mutex_op(int op, std::int64_t* handle) {
   if (!handle) return -2;
   if (op == 0) {
-    auto* m = new pthread_mutex_t;
-    ::pthread_mutex_init(m, nullptr);
-    *handle = reinterpret_cast<std::int64_t>(m);
+    auto m = std::make_shared<GuestMutex>();
+    if (::pthread_mutex_init(&m->native, nullptr) != 0) return -3;
+    m->initialized = true;
+    std::lock_guard<std::mutex> lock(g_mutex_mu);
+    if (g_mutex_next == std::numeric_limits<std::int64_t>::max()) return -3;
+    const auto id = g_mutex_next;
+    g_mutexes.emplace(id, m);
+    ++g_mutex_next;
+    *handle = id;  // publish only after native init and registry insertion
     return 0;
   }
-  auto* m = reinterpret_cast<pthread_mutex_t*>(*handle);
-  if (!m) return -2;
-  switch (op) {
-    case 1: return ::pthread_mutex_lock(m) == 0 ? 0 : -3;
-    case 2: return ::pthread_mutex_unlock(m) == 0 ? 0 : -3;
-    case 3: ::pthread_mutex_destroy(m); delete m; *handle = 0; return 0;
-    default: return -2;
+  if (op == 3) {
+    std::lock_guard<std::mutex> lock(g_mutex_mu);
+    const auto it = g_mutexes.find(*handle);
+    if (it == g_mutexes.end()) return -2;
+    // Lookups retain shared ownership through native calls, including lock waiters and
+    // condition waits. Successful locks retain a held count until a successful unlock.
+    if (it->second.use_count() != 1 || it->second->held.load() != 0) return -3;
+    if (::pthread_mutex_destroy(&it->second->native) != 0) return -3;
+    it->second->initialized = false;
+    g_mutexes.erase(it);
+    *handle = 0;
+    return 0;
   }
+  if (op != 1 && op != 2) return -2;
+  auto m = find_mutex(*handle);
+  if (!m) return -2;
+  if (op == 1) {
+    if (::pthread_mutex_lock(&m->native) != 0) return -3;
+    m->held.fetch_add(1);
+  } else {
+    if (::pthread_mutex_unlock(&m->native) != 0) return -3;
+    m->held.fetch_sub(1);
+  }
+  return 0;
 }
 
 // ---- Kernel sync objects (slice S1)
@@ -400,8 +440,10 @@ std::int64_t guest_cond_init(std::int64_t* handle) {
 }
 std::int64_t guest_cond_wait(std::int64_t cond, std::int64_t* mh, std::int64_t timeout_us) {
   auto c = find_cond(cond);
-  if (!c || !mh || !*mh) return -2;
-  auto* m = reinterpret_cast<pthread_mutex_t*>(*mh);
+  if (!c || !mh) return -2;
+  auto mutex = find_mutex(*mh);
+  if (!mutex) return -2;
+  auto* m = &mutex->native;
   if (timeout_us < 0) return ::pthread_cond_wait(&c->c, m) == 0 ? 0 : -3;
   timespec ts{}; ::clock_gettime(CLOCK_MONOTONIC, &ts);
   const std::int64_t ns = ts.tv_nsec + (timeout_us % 1000000) * 1000;
