@@ -22,7 +22,8 @@ road, not the end of it.
 | libSceLibcInternal subset: memmove memcmp memchr strcpy strncpy strcat strncmp strchr strrchr strstr calloc realloc snprintf sprintf puts putchar atoi strtol abs labs toupper tolower isdigit isalpha isspace srand rand atexit exit, plus the earlier printf malloc free memcpy memset strlen strcmp (`prx/libc_abi`) | Implemented, Tested (unit and from machine code) |
 | C-style formatter: flags `-` and `0`, width, length h hh l ll z j t, conversions d i u x X o c s p | Implemented, Tested. Floating point formats are NOT supported and print literally |
 | libSceSysmodule `LoadModule`, `IsLoaded`, `UnloadModule` | Experimental stubs: ids are recorded, nothing is loaded, id values unverified |
-| Libc imports beyond this subset, floating point arguments, qsort and other callbacks into guest code | Planned |
+| C++ ABI surface: `__cxa_atexit` and `__cxa_thread_atexit_impl` (one argument, thread destructors run before atexit handlers, glibc order), `qsort` with a guest comparator, `__cxa_guard_acquire/release/abort`, `__cxa_pure_virtual` | Implemented, Tested on synthetic modules only |
+| Libc imports beyond the subsets above, floating point arguments | Planned |
 | PM4 command buffer decode and register-state tracking: packet types 0, 2, 3, SET_*_REG windows, draw and dispatch capture with the register state at each draw, indirect buffers through an address resolver, `pnr gnm-decode <file>` (`graphics/pm4`) | Implemented, Tested on SYNTHETIC buffers only. Opcode numbers, header layout and register windows verified against the public Linux kernel header soc15d.h. Draw packet body layouts are from public driver usage and NOT verified on a PlayStation |
 | Register meaning and draw bindings (`graphics/amd_regs.hpp`, `graphics/gfx_state`): shader addresses, user data, viewport, color target 0, primitive type | Implemented, Tested on SYNTHETIC buffers. Per public AMD headers, unverified on PlayStation |
 | GPU virtual address map (`graphics/gpu_va`): range table to host memory, no stitching across regions, PM4 indirect-buffer resolver | Implemented, Tested on synthetic data. No page tables or coherency model |
@@ -99,6 +100,23 @@ makes the load fail with a message naming it, and nothing runs.
   DT_FINI_ARRAY (reversed) + DT_FINI in exact reverse init order.
 - `pnr_make_ps_elf OUT --dep` / `--depmain` build the synthetic dependency/main pair. A one-dependency run
   must print `ghIABE21yxFvw`: dep init g,h; main I,A,B,E,2,1,y,x; dep fini v,w.
+
+## Slice S34 notes (C++ ABI surface)
+- `__cxa_atexit(fn, arg, dso)` joins the atexit table (now 64 entries, each with one argument); plain
+  `atexit(fn)` registers arg=0. `__cxa_thread_atexit_impl(fn, arg, dso)` registers per calling thread,
+  keyed by that thread's host FS base; a thread's handlers run LIFO when it exits, and the main thread's
+  list runs FIRST in the process exit sequence (glibc's __call_tls_dtors-before-atexit order). The dso
+  argument is accepted and ignored: PNR does not unload modules individually (documented in S33).
+- `qsort` sorts with the host qsort and calls the guest comparator through the S32 call_guest_function
+  path (thread-local comparator slot, so nested or concurrent sorts do not race).
+- `__cxa_guard_acquire/release/abort` implement the one-byte guard protocol under a mutex. Simplified
+  semantics, documented: a second thread that finds an init IN PROGRESS is not blocked - acquire returns
+  "take it" again instead of waiting. `__cxa_pure_virtual` prints and exits 70 like the host runtime's
+  abort path (no atexit/fini).
+- `pnr_make_ps_elf OUT --cxx` builds the synthetic C++ module. A run must print `EGQQB` and exit 55:
+  entry E, guard sequence G, qsort Q (verified {5,3,8,1} sorts to 8,5,3,1 through a guest comparator),
+  then the thread destructor prints the low byte of its argument (0x51='Q') BEFORE the __cxa_atexit
+  handler prints its own (0x42='B') - order and argument delivery are both proven.
 
 ## Slice C4a notes (PM4 decode)
 - PM4 is the AMD packet format. This slice only decodes packets and tracks registers; it submits nothing to Vulkan.
@@ -596,7 +614,7 @@ the full unit suite's negative tests) remains software-output verified only.
   VkMemoryAllocateInfo.sType (VUID-VkMemoryAllocateInfo-sType-sType). Fixed;
   the sweep now runs with zero layer errors.
 - ctest `pnr_vulkan_validation` runs the sweep and fails on any "Validation
-  Error" in its output (26/26 suites in the default build, 28/28 with the
+  Error" in its output (27/27 suites in the default build, 29/29 with the
   window build). CI gained a `linux-validation` job that installs
   vulkan-validationlayers and treats a SKIP as a failure, so the layer run
   is guaranteed real there.
