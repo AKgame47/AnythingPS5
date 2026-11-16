@@ -21,8 +21,8 @@ void p64(std::vector<std::uint8_t>& b, std::size_t o, std::uint64_t v) { for (in
 // entry 0x100, ptr slots 0x200/0x208 (RELATIVE), GOT 0x210 (6), guard byte 0x240,
 // int[4] {5,3,8,1} at 0x248, RELA 0x260 (8 entries), dynsym 0x320 (7), dynstr 0x3c8,
 // dynamic at 0x440 (8 entries). Failures exit 61 (guard/registration) or 62 (qsort result).
-std::vector<std::uint8_t> build_synthetic_cxx_elf() {
-  std::vector<std::uint8_t> b(0x560, 0);
+static std::vector<std::uint8_t> build_cxx_elf(bool nested_qsort) {
+  std::vector<std::uint8_t> b(nested_qsort ? 0x720 : 0x560, 0);
   const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
   std::memcpy(b.data(), ident, 8);
   p16(b, 0x10, 3);       // ET_DYN
@@ -82,7 +82,7 @@ std::vector<std::uint8_t> build_synthetic_cxx_elf() {
     movrdi(0x208);
     for (int x : {0xbe, 0x04, 0x00, 0x00, 0x00}) e8(x);         // mov esi,4
     for (int x : {0xba, 0x04, 0x00, 0x00, 0x00}) e8(x);         // mov edx,4
-    learcx(0x4c0);                                              // comparator
+    learcx(nested_qsort ? 0x600 : 0x4c0);                       // comparator
     cg(G_QSORT);
     movrsi(0x208);
     for (int x : {0x83, 0x3e, 0x08}) e8(x);                     // cmp [rsi],8
@@ -124,21 +124,40 @@ std::vector<std::uint8_t> build_synthetic_cxx_elf() {
   // comparator at 0x4c0 (descending; returns *b - *a). On the FIRST invocation only it bumps
   // the counter byte at 0x258 (just past the int[4], before the rela area) and makes a NESTED host call (putchar 'n') from inside the qsort
   // callback - proving guest->host->guest->host FS transitions restore correctly.
-  at = 0x4c0;
+  at = nested_qsort ? 0x600 : 0x4c0;
   {
     ins({0x50, 0x53});            // push rax; push rbx
-    ins({0x41, 0x54});            // push r12
+    ins({0x41, 0x54});            // push r12; three pushes align calls
     ins({0x48, 0x89, 0xfb});      // mov rbx, rdi
     ins({0x4c, 0x8b, 0xe6});      // mov r12, rsi
-    ins({0x80, 0x3d}); d32(0x258 - (at + 4 + 1)); ins({0x00});  // cmp byte [rip->0x258], 0
-    ins({0x75, 0x12});            // jne skip (7+5+6 bytes ahead)
-    ins({0x80, 0x05}); d32(0x258 - (at + 4 + 1)); ins({0x01});  // add byte [rip->0x258], 1
-    ins({0xbf, 0x6e, 0x00, 0x00, 0x00});                        // mov edi, 'n'
-    callgot(G_PUTCHAR);           // nested host call from inside the guest comparator
-    // skip:
-    ins({0x41, 0x8b, 0x04, 0x24});// mov eax, [r12]
-    ins({0x2b, 0x03});            // sub eax, [rbx]
-    ins({0x41, 0x5c, 0x5b, 0x59, 0xc3});  // pop r12; pop rbx; pop rcx; ret
+    ins({0x80, 0x3d}); d32(0x258 - (at + 4 + 1)); ins({0x00});
+    ins({0x0f, 0x85});
+    const auto skip_patch = at; d32(0);  // jne skip (computed below)
+    ins({0x80, 0x05}); d32(0x258 - (at + 4 + 1)); ins({0x01});
+    ins({0xbf, 0x6e, 0x00, 0x00, 0x00});  // mov edi, 'n'
+    callgot(G_PUTCHAR);
+    if (nested_qsort) {
+      ins({0x48, 0x8d, 0x3d}); d32(0x710 - (at + 4));  // inner int[4]
+      ins({0xbe, 4, 0, 0, 0, 0xba, 4, 0, 0, 0});       // count=4, size=4
+      ins({0x48, 0x8d, 0x0d}); d32(0x700 - (at + 4));  // ascending comparator
+      callgot(G_QSORT);
+      for (int i = 0; i < 4; ++i) {
+        ins({0x83, 0x3d}); d32(0x710 + 4*i - (at + 4 + 1)); ins({i+1});
+        ins({0x74, 0x02, 0x0f, 0x0b});  // je pass; ud2 if inner result wrong
+      }
+    }
+    p32(b, skip_patch, static_cast<std::uint32_t>(at - (skip_patch + 4)));
+    ins({0x41, 0x8b, 0x04, 0x24}); // mov eax, [r12]
+    ins({0x2b, 0x03});             // sub eax, [rbx] (outer descending)
+    ins({0x41, 0x5c, 0x5b, 0x59, 0xc3});
+    if (at > (nested_qsort ? 0x700u : 0x500u)) {
+      std::fprintf(stderr, "cxx comparator overflow\n"); std::abort();
+    }
+  }
+  if (nested_qsort) {
+    at = 0x700;
+    ins({0x8b, 0x07, 0x2b, 0x06, 0xc3}); // mov eax,[rdi]; sub eax,[rsi]; ret
+    p32(b, 0x710, 4); p32(b, 0x714, 2); p32(b, 0x718, 3); p32(b, 0x71c, 1);
   }
   // dtor_c at 0x500: the LAST destructor to run (plain atexit, after the thread dtor). It
   // VERIFIES the whole run instead of trusting stdout order: the comparator's nested call
@@ -191,6 +210,9 @@ std::vector<std::uint8_t> build_synthetic_cxx_elf() {
   return b;
 }
 
+
+std::vector<std::uint8_t> build_synthetic_cxx_elf() { return build_cxx_elf(false); }
+std::vector<std::uint8_t> build_synthetic_nested_qsort_elf() { return build_cxx_elf(true); }
 
 std::vector<std::uint8_t> build_synthetic_ps_elf(const SynthSpec& spec) {
   std::vector<std::uint8_t> b(0x340, 0);
