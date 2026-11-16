@@ -575,6 +575,76 @@ std::vector<std::uint8_t> build_synthetic_stkovf_elf() {
   return b;
 }
 
+// Slice S37: a module that reads an asset through the jailed file calls. Opens
+// "/app0/asset.txt" (the /app0 prefix maps to the jail root), reads 12 bytes, byte-compares
+// them against "pnr-asset-42" in guest code, prints "asset ok" and exits 0 on success;
+// failure exits 1..5.
+std::vector<std::uint8_t> build_synthetic_file_elf() {
+  std::vector<std::uint8_t> b(0x780, 0);
+  const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
+  std::memcpy(b.data(), ident, 8);
+  p16(b, 0x10, 3); p16(b, 0x12, 62); p32(b, 0x14, 1);
+  p64(b, 0x18, 0x100); p64(b, 0x20, 0x40);
+  p16(b, 0x34, 64); p16(b, 0x36, 56); p16(b, 0x38, 2); p16(b, 0x3A, 64);
+  const std::size_t total = b.size();
+  p32(b, 0x40, 1); p32(b, 0x44, 7); p64(b, 0x48, 0); p64(b, 0x50, 0); p64(b, 0x58, 0); p64(b, 0x60, total); p64(b, 0x68, total); p64(b, 0x70, 0x1000);
+  p32(b, 0x78, 2); p32(b, 0x7C, 6); p64(b, 0x80, 0x700); p64(b, 0x88, 0x700); p64(b, 0x90, 0x700); p64(b, 0x98, 0x80); p64(b, 0xA0, 0x80); p64(b, 0xA8, 8);
+  auto str = [&](std::size_t at, const char* s) { std::memcpy(&b[at], s, std::strlen(s) + 1); };
+  const std::size_t PATH = 0x400, OK = 0x420, BUF = 0x440;
+  str(PATH, "/app0/asset.txt"); str(OK, "asset ok");
+  enum { G_OPEN, G_READ, G_CLOSE, G_PRINTF, G_N };
+  std::size_t pc = 0x100;
+  std::vector<std::size_t> fails;
+  auto emit = [&](std::initializer_list<int> bytes) { for (int v : bytes) b[pc++] = static_cast<std::uint8_t>(v); };
+  auto imm32 = [&](std::uint32_t v) { p32(b, pc, v); pc += 4; };
+  auto call = [&](int g) { emit({0xFF, 0x15}); p32(b, pc, static_cast<std::uint32_t>(0x480 + 8 * g - (pc + 4))); pc += 4; };
+  auto rip = [&](std::initializer_list<int> op, std::size_t target) { emit(op); p32(b, pc, static_cast<std::uint32_t>(target - (pc + 4))); pc += 4; };
+  auto check = [&](int ok_jcc, int n) { emit({ok_jcc, 10, 0xB8}); imm32(n); emit({0xE9}); fails.push_back(pc); pc += 4; };
+  auto buf_cmp32 = [&](std::size_t off, std::uint32_t v, int n) {
+    emit({0x81, 0x3D}); p32(b, pc, static_cast<std::uint32_t>(BUF + off - (pc + 8))); pc += 4; imm32(v);
+    check(0x74, n);
+  };
+
+  emit({0x53, 0x48, 0x83, 0xEC, 0x60});  // push rbx; sub rsp,0x60
+  // sceKernelOpen("/app0/asset.txt", O_RDONLY)
+  rip({0x48, 0x8D, 0x3D}, PATH); emit({0x31, 0xF6}); call(G_OPEN);
+  emit({0x48, 0x83, 0xF8, 0x03}); check(0x7D, 1);          // fd >= 3 (jge)
+  emit({0x48, 0x89, 0xC3});                                 // mov rbx, rax (fd)
+  // sceKernelRead(fd, BUF, 12) == 12
+  emit({0x48, 0x89, 0xC7}); rip({0x48, 0x8D, 0x35}, BUF); emit({0xBA}); imm32(12); call(G_READ);
+  emit({0x48, 0x83, 0xF8, 0x0C}); check(0x74, 2);
+  // content == "pnr-asset-42" (three dword compares)
+  buf_cmp32(0, 0x2D726E70u, 3);  // "pnr-"
+  buf_cmp32(4, 0x65737361u, 4);  // "asse"
+  buf_cmp32(8, 0x32342D74u, 5);  // "t-42"
+  // sceKernelClose(fd)
+  emit({0x48, 0x89, 0xDF}); call(G_CLOSE);
+  // printf("asset ok\n")
+  rip({0x48, 0x8D, 0x3D}, OK); emit({0x31, 0xC0}); call(G_PRINTF);
+  emit({0x31, 0xC0});
+  const std::size_t epi = pc;
+  emit({0x48, 0x83, 0xC4, 0x60, 0x5B, 0xC3});
+  for (std::size_t f : fails) p32(b, f, static_cast<std::uint32_t>(epi - (f + 4)));
+
+  const char* names[G_N] = {"sceKernelOpen", "sceKernelRead", "sceKernelClose", "printf"};
+  std::size_t so = 0x580 + 1;
+  for (int i = 0; i < G_N; ++i) {
+    const std::string nm = pnr::loader::nid::compute_nid(names[i], "") + "#A#A";
+    const std::size_t sy = 0x500 + 24 * (i + 1);
+    p32(b, sy, static_cast<std::uint32_t>(so - 0x580)); b[sy + 4] = 0x12; p16(b, sy + 6, 0);
+    std::memcpy(&b[so], nm.c_str(), nm.size() + 1); so += nm.size() + 1;
+  }
+  const std::size_t strsz = so - 0x580;
+  for (int i = 0; i < G_N; ++i) {
+    const std::size_t r = 0x600 + 24 * i;
+    p64(b, r, 0x480 + 8 * i); p64(b, r + 8, (static_cast<std::uint64_t>(i + 1) << 32) | 6); p64(b, r + 16, 0);
+  }
+  std::size_t dy = 0x700;
+  auto dyn = [&](std::int64_t tag, std::uint64_t v) { p64(b, dy, static_cast<std::uint64_t>(tag)); p64(b, dy + 8, v); dy += 16; };
+  dyn(6, 0x500); dyn(5, 0x580); dyn(10, strsz); dyn(11, 24); dyn(7, 0x600); dyn(8, 24 * G_N); dyn(9, 24); dyn(0, 0);
+  return b;
+}
+
 std::vector<std::uint8_t> build_synthetic_lifecycle_elf(const LifecycleSpec& spec) {
   std::vector<std::uint8_t> b(0x4c0, 0);
   const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
