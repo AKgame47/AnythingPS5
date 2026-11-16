@@ -194,6 +194,9 @@ add_test(NAME pnr_file_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE
 # "pnr-write-42", reopens and byte-compares it in guest code; the wrapper also checks the
 # host-visible file inside the jail afterwards.
 add_test(NAME pnr_filew_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_filew.elf --filew && rm -rf ${CMAKE_BINARY_DIR}/s38jail && mkdir -p ${CMAKE_BINARY_DIR}/s38jail && out=$(PNR_JAIL_ROOT=${CMAKE_BINARY_DIR}/s38jail $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_filew.elf) && echo \"$out\" | grep -q \"write ok\" && echo \"$out\" | grep -q \"MODULE FINISHED: exit 0\" && test \"$(cat ${CMAKE_BINARY_DIR}/s38jail/out.bin)\" = \"pnr-write-42\"")
+# Slice S39: guest lseek/fstat - the module seeks SET/CUR/END, checks positions, reads at
+# the offsets and fstats into guest memory (size + not-directory), prints "pos ok".
+add_test(NAME pnr_filepos_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_filepos.elf --filepos && rm -rf ${CMAKE_BINARY_DIR}/s39jail && mkdir -p ${CMAKE_BINARY_DIR}/s39jail && printf pnr-asset-42 > ${CMAKE_BINARY_DIR}/s39jail/asset.txt && out=$(PNR_JAIL_ROOT=${CMAKE_BINARY_DIR}/s39jail $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_filepos.elf) && echo \"$out\" | grep -q \"pos ok\" && echo \"$out\" | grep -q \"MODULE FINISHED: exit 0\"")
 add_test(NAME pnr_gnm_decode COMMAND sh -c "$<TARGET_FILE:pnr> gnm-synth ${CMAKE_BINARY_DIR}/synth_pm4.bin && $<TARGET_FILE:pnr> gnm-decode ${CMAKE_BINARY_DIR}/synth_pm4.bin | grep -q \"2 draws\"")
 add_test(NAME pnr_module_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_ok.elf && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_ok.elf")
 set_tests_properties(pnr_module_run PROPERTIES PASS_REGULAR_EXPRESSION "MODULE FINISHED: exit 30")
