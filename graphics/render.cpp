@@ -429,6 +429,7 @@ Status VulkanBackend::render_core(
   VkImageView view = 0;
   VkResult r = VK_SUCCESS;
   VkMemoryAllocateInfo mai{};
+  mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;  // S29: validation layer caught this missing
   VkImageViewCreateInfo vci{};
   if (shared) {
     image = shared->color_image; imem = shared->color_memory; view = shared->color_view;
