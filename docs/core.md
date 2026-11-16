@@ -18,7 +18,7 @@ road, not the end of it.
 | Sony protection and mmap flag translation, `mmap` (anonymous only), clock id translation and `sceKernelClockGettime` | Implemented, Tested. Only SHARED, PRIVATE, FIXED and ANON are FreeBSD-standard values. NO_OVERWRITE, NOCORE, NO_COALESCE, GPU bits and clock ids come from public homebrew knowledge, not verified on a console. Unknown bits are refused |
 | Guest threads and mutexes: `scePthreadCreate`, `scePthreadJoin`, `scePthreadSelf`, `scePthreadMutex{Init,Lock,Unlock,Destroy}` | Implemented, Tested (32 threads at once; no condition variables, rwlocks, TLS keys or thread attributes yet) |
 | Init/fini arrays and atexit: DT_INIT then DT_INIT_ARRAY (file order) run before the entry point; libc atexit handlers (LIFO), DT_FINI_ARRAY (reverse order) and DT_FINI run when the guest calls exit() or its entry returns. Ordering follows the System V gABI; PlayStation's exact init-argument convention is unverified on hardware, so init functions receive the same (args, exit) pair the entry gets | Implemented, Tested on synthetic modules only |
-| Dependent modules (loading the files named by DT_NEEDED) | Planned |
+| Dependent modules (loading the files named by DT_NEEDED) | Implemented, Tested on synthetic modules only |
 | libSceLibcInternal subset: memmove memcmp memchr strcpy strncpy strcat strncmp strchr strrchr strstr calloc realloc snprintf sprintf puts putchar atoi strtol abs labs toupper tolower isdigit isalpha isspace srand rand atexit exit, plus the earlier printf malloc free memcpy memset strlen strcmp (`prx/libc_abi`) | Implemented, Tested (unit and from machine code) |
 | C-style formatter: flags `-` and `0`, width, length h hh l ll z j t, conversions d i u x X o c s p | Implemented, Tested. Floating point formats are NOT supported and print literally |
 | libSceSysmodule `LoadModule`, `IsLoaded`, `UnloadModule` | Experimental stubs: ids are recorded, nothing is loaded, id values unverified |
@@ -76,8 +76,29 @@ makes the load fail with a message naming it, and nothing runs.
 - atexit takes a guest function pointer; the table holds 32 entries (a PNR limit, not a Sony value).
   Handlers and fini functions run with the guest FS base, including when exit() is called from a thunk.
 - Ordering follows the System V gABI. PlayStation's own init-argument convention is unverified on hardware;
-  PNR passes init functions the same (args, exit) pair the entry point gets. Only the module's own functions
-  run: dependent modules named by DT_NEEDED are still not loaded (Planned).
+  PNR passes init functions the same (args, exit) pair the entry point gets.
+
+## Slice S33 notes (dependent modules)
+- `load_module_tree`/`run_module_tree` (`loader/module_loader`) load the main module plus every DT_NEEDED
+  module found as a file, recursively and post-order (dependencies before dependents). Search order:
+  caller-supplied directories, then the main module's own directory, then its sce_module, sce_modules and
+  prx subdirectories. A needed name matches a file by exact filename or by PS stem convention
+  ("libSceFoo.sprx" matches needed "libSceFoo"); two matching files are an ambiguity error. A needed name
+  with no matching file is treated as firmware-provided and stays bound through the host PRX registry;
+  symbols it needs that the registry does not implement fail the load with the symbol named (honest, no
+  silent skip). Bundled guest modules bind BEFORE the host registry (console semantics, same precedence
+  rule AnyPS5's relinker uses).
+- Limits: dependent modules with PT_TLS are refused (only the main module's TLS is set up), at most 32
+  modules per tree, cyclic dependencies are refused, the 64 bound-import thunk slots are shared across the
+  whole tree. Export lookup walks modules in reverse load order, so a dependent's direct dependency wins a
+  name conflict; a diamond exporting the same symbol from two siblings resolves most-recent-first, a
+  documented simplification of the gABI's breadth-first global scope.
+- Lifecycle with dependencies: every dependency's DT_INIT + DT_INIT_ARRAY runs before the dependent's, in
+  load order; on exit, atexit handlers run LIFO as one global list (a real loader interleaves them per
+  module - PNR does not track the dso handle, a documented simplification), then every module's
+  DT_FINI_ARRAY (reversed) + DT_FINI in exact reverse init order.
+- `pnr_make_ps_elf OUT --dep` / `--depmain` build the synthetic dependency/main pair. A one-dependency run
+  must print `ghIABE21yxFvw`: dep init g,h; main I,A,B,E,2,1,y,x; dep fini v,w.
 
 ## Slice C4a notes (PM4 decode)
 - PM4 is the AMD packet format. This slice only decodes packets and tracks registers; it submits nothing to Vulkan.
@@ -575,7 +596,7 @@ the full unit suite's negative tests) remains software-output verified only.
   VkMemoryAllocateInfo.sType (VUID-VkMemoryAllocateInfo-sType-sType). Fixed;
   the sweep now runs with zero layer errors.
 - ctest `pnr_vulkan_validation` runs the sweep and fails on any "Validation
-  Error" in its output (25/25 suites in the default build, 27/27 with the
+  Error" in its output (26/26 suites in the default build, 28/28 with the
   window build). CI gained a `linux-validation` job that installs
   vulkan-validationlayers and treats a SKIP as a failure, so the layer run
   is guaranteed real there.
