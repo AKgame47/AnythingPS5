@@ -91,6 +91,8 @@ __attribute__((optimize("no-stack-protector"))) std::int64_t guest_thread_tramp(
   auto* t = static_cast<Thr*>(a);
   return reinterpret_cast<std::int64_t (*)(std::int64_t)>(t->entry)(t->arg);
 }
+void run_thread_dtors(std::uint64_t guest_fs, std::uint64_t host_fs);  // defined below
+
 void* thread_main(void* p) {
   auto* t = static_cast<Thr*>(p);
   Tls tl;
@@ -98,6 +100,7 @@ void* thread_main(void* p) {
   const std::uint64_t host_fs = raw_get_fs();
   if (!fs_register(tl.fs, host_fs)) { ::munmap(tl.mem, tl.size); t->ret = -1; return nullptr; }
   const std::int64_t r = call_with_fs(&guest_thread_tramp, t, nullptr, tl.fs, host_fs);
+  run_thread_dtors(tl.fs, host_fs);  // S34: this thread's __cxa_thread_atexit_impl handlers
   fs_unregister(tl.fs);
   ::munmap(tl.mem, tl.size);
   t->ret = r;
@@ -107,12 +110,16 @@ void* thread_main(void* p) {
 std::mutex g_thr_mu;
 std::vector<Thr*>& thr_list() { static std::vector<Thr*> v; return v; }
 
-// ---- Module lifecycle (slice S32): atexit table + the loaded module's fini list.
+// ---- Module lifecycle (slices S32/S34): atexit table + the loaded module's fini list.
 // Lives in the forked child: written before guest code starts, read during the exit sequence.
+// S34: entries carry one argument (__cxa_atexit(fn, arg, dso); plain atexit registers arg=0),
+// and __cxa_thread_atexit_impl registers per calling thread, keyed by that thread's host FS.
+struct AtexitEntry { std::uint64_t fn = 0, arg = 0; };
 std::mutex g_exit_mu;
-std::vector<std::uint64_t> g_atexit;  // LIFO order at run time
+std::vector<AtexitEntry> g_atexit;  // LIFO order at run time
+std::map<std::uint64_t, std::vector<AtexitEntry>> g_tls_atexit;  // host FS -> handlers, LIFO
 GuestLifecycle g_lc;
-constexpr std::size_t kMaxAtexit = 32;
+constexpr std::size_t kMaxAtexit = 64;
 
 // The guest FS base registered for the thread whose HOST FS base is `host_fs`, or 0.
 std::uint64_t current_guest_fs(std::uint64_t host_fs) {
@@ -124,15 +131,28 @@ std::uint64_t current_guest_fs(std::uint64_t host_fs) {
   return 0;
 }
 
-// atexit handlers LIFO, then the module fini list in (already reversed) order. Every call runs
-// with the guest FS base via call_with_fs.
+// Exit order: the exiting thread's __cxa_thread_atexit_impl handlers (LIFO), then atexit /
+// __cxa_atexit handlers (LIFO), then the module fini list in (already reversed) order. The
+// thread-handler-first order matches glibc (__call_tls_dtors before the atexit list). Every
+// call runs with the guest FS base via call_with_fs and receives its registered argument.
+void run_thread_dtors(std::uint64_t guest_fs, std::uint64_t host_fs) {
+  std::vector<AtexitEntry> dtors;
+  { std::lock_guard<std::mutex> l(g_exit_mu);
+    auto it = g_tls_atexit.find(host_fs);
+    if (it != g_tls_atexit.end()) { dtors.swap(it->second); g_tls_atexit.erase(it); } }
+  using Fn2 = std::int64_t (*)(void*, void*);
+  for (auto it = dtors.rbegin(); it != dtors.rend(); ++it)
+    call_with_fs(reinterpret_cast<Fn2>(it->fn), reinterpret_cast<void*>(it->arg), nullptr, guest_fs, host_fs);
+}
+
 void run_exit_sequence(std::uint64_t guest_fs, std::uint64_t host_fs) {
-  std::vector<std::uint64_t> handlers;
+  run_thread_dtors(guest_fs, host_fs);
+  std::vector<AtexitEntry> handlers;
   GuestLifecycle lc;
   { std::lock_guard<std::mutex> l(g_exit_mu); handlers.swap(g_atexit); lc = g_lc; }
   using Fn2 = std::int64_t (*)(void*, void*);
   for (auto it = handlers.rbegin(); it != handlers.rend(); ++it)
-    call_with_fs(reinterpret_cast<Fn2>(*it), nullptr, nullptr, guest_fs, host_fs);
+    call_with_fs(reinterpret_cast<Fn2>(it->fn), reinterpret_cast<void*>(it->arg), nullptr, guest_fs, host_fs);
   for (const std::uint64_t f : lc.fini) call_with_fs(reinterpret_cast<Fn2>(f), nullptr, nullptr, guest_fs, host_fs);
 }
 }  // namespace
@@ -253,11 +273,24 @@ std::int64_t run_guest_main(const TlsTemplate& t, std::int64_t (*fn)(void*, void
   return r;
 }
 
-std::int64_t guest_atexit_register(std::uint64_t fn) {
+std::int64_t guest_atexit_register(std::uint64_t fn) { return guest_cxa_atexit_register(fn, 0); }
+
+std::int64_t guest_cxa_atexit_register(std::uint64_t fn, std::uint64_t arg) {
   if (!fn || !guest_active()) return -2;
   std::lock_guard<std::mutex> l(g_exit_mu);
   if (g_atexit.size() >= kMaxAtexit) return -1;
-  g_atexit.push_back(fn);
+  g_atexit.push_back({fn, arg});
+  return 0;
+}
+
+std::int64_t guest_cxa_thread_atexit_register(std::uint64_t fn, std::uint64_t arg) {
+  if (!fn || !guest_active()) return -2;
+  const std::uint64_t host_fs = raw_get_fs();  // inside a thunk the FS is already the host base
+  if (!host_fs || !current_guest_fs(host_fs)) return -2;  // not a thread running guest code
+  std::lock_guard<std::mutex> l(g_exit_mu);
+  auto& v = g_tls_atexit[host_fs];
+  if (v.size() >= kMaxAtexit) return -1;
+  v.push_back({fn, arg});
   return 0;
 }
 
