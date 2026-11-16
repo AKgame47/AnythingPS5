@@ -30,6 +30,17 @@ std::vector<std::uint8_t> build_synthetic_kernel_elf(const KernelSpec& spec);
 // "C3 libc ok 42" through the bound printf.
 std::vector<std::uint8_t> build_synthetic_libc_elf();
 
+// Slice S32: a module with DT_INIT, DT_INIT_ARRAY (2), DT_FINI_ARRAY (2), DT_FINI and two
+// atexit handlers registered from its entry point. Every lifecycle function prints one letter
+// through the bound putchar; the exact stdout order "IABE21yxF" proves the call order:
+//   I = DT_INIT, A B = init array, E = entry body, 2 1 = atexit LIFO, y x = fini array reversed,
+//   F = DT_FINI. Entry returns kLifecycleExitReturn (55), or calls exit(kLifecycleExitExit=42)
+//   when `use_exit` is set; the atexit/fini sequence must run on BOTH paths.
+struct LifecycleSpec { bool use_exit = false; };
+std::vector<std::uint8_t> build_synthetic_lifecycle_elf(const LifecycleSpec& spec);
+constexpr int kLifecycleExitReturn = 55, kLifecycleExitExit = 42;
+constexpr const char* kLifecycleOrder = "IABE21yxF";
+
 extern const char* const kSynthMessage;
 constexpr int kSynthExitCode = 30;
 
