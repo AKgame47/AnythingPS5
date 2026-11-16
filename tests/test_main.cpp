@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <string>
 #if defined(_WIN32)
   #include <windows.h>
@@ -766,6 +767,83 @@ int main() {
                    &fn, &err) == pnr::prx::SCE_OK,
           "mm: munmap binds");
     CHECK(fn({{mapped, 4096}}) == pnr::prx::SCE_OK, "mm: bound unmap works");
+  }
+
+  // --- S43: tracked range refusals must not mutate host pages or registry ---
+  {
+    using namespace pnr::prx;
+    const auto page = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+    auto* p = static_cast<unsigned char*>(sceKernelMapMemory(page * 3, 3));
+    CHECK(p != nullptr, "range: three-page allocation");
+    if (p) {
+      auto live = [&](void* at) {
+        unsigned char residency = 0;
+        return ::mincore(at, page, &residency) == 0;
+      };
+      void* start = nullptr; void* end = nullptr; std::int64_t prot = -1;
+      auto unchanged = [&]() {
+        return sceKernelQueryMemoryProtection(p + page, &start, &end, &prot) == SCE_OK &&
+               start == p && end == p + page * 3 && prot == 3 &&
+               live(p) && live(p + page) && live(p + page * 2);
+      };
+      CHECK(sceKernelMunmap(p + page, page) == SCE_KERNEL_ERROR_EINVAL,
+            "range: middle split refused");
+      CHECK(unchanged(), "range: rejected middle split leaves pages and registry intact");
+      CHECK(sceKernelMunmap(p + page * 2, page * 2) == SCE_KERNEL_ERROR_EINVAL,
+            "range: interior unmap overrun refused");
+      CHECK(unchanged(), "range: unmap overrun leaves mapping intact");
+      CHECK(sceKernelMunmap(p + 1, page) == SCE_KERNEL_ERROR_EINVAL,
+            "range: misaligned unmap refused");
+      CHECK(sceKernelMunmap(p, std::numeric_limits<std::size_t>::max()) ==
+                SCE_KERNEL_ERROR_EINVAL, "range: unmap rounding overflow refused");
+      CHECK(sceKernelMTypeprotect(p, page, 1) == SCE_KERNEL_ERROR_EINVAL,
+            "range: partial prefix reprotect refused");
+      CHECK(sceKernelMTypeprotect(p + page, page * 2, 1) == SCE_KERNEL_ERROR_EINVAL,
+            "range: partial suffix reprotect refused");
+      CHECK(sceKernelMTypeprotect(p + page, page * 3, 1) == SCE_KERNEL_ERROR_EINVAL,
+            "range: interior reprotect overrun refused");
+      CHECK(sceKernelMTypeprotect(p, page * 4, 1) == SCE_KERNEL_ERROR_EINVAL,
+            "range: whole reprotect overrun refused");
+      CHECK(sceKernelMTypeprotect(p + 1, page * 3, 1) == SCE_KERNEL_ERROR_EINVAL,
+            "range: misaligned reprotect refused");
+      CHECK(sceKernelMTypeprotect(p, std::numeric_limits<std::size_t>::max(), 1) ==
+                SCE_KERNEL_ERROR_EINVAL, "range: reprotect rounding overflow refused");
+      CHECK(unchanged(), "range: refused reprotects preserve RW registry and pages");
+      // Volatile writes prove rejected reprotects did not secretly remove WRITE.
+      volatile unsigned char* bytes = p;
+      bytes[0] = 11; bytes[page] = 22; bytes[page * 2] = 33;
+      CHECK(bytes[0] == 11 && bytes[page] == 22 && bytes[page * 2] == 33,
+            "range: all pages still writable after refusals");
+      CHECK(sceKernelMunmap(p, 1) == SCE_OK,
+            "range: one-byte prefix unmap rounds to host page");
+      CHECK(sceKernelQueryMemoryProtection(p + page, &start, &end, &prot) == SCE_OK &&
+                start == p + page && end == p + page * 3 && !live(p),
+            "range: prefix removal updates registry by rounded extent");
+      CHECK(sceKernelMunmap(p + page * 2, 1) == SCE_OK,
+            "range: rounded suffix unmap supported");
+      CHECK(sceKernelQueryMemoryProtection(p + page, &start, &end, &prot) == SCE_OK &&
+                start == p + page && end == p + page * 2 && !live(p + page * 2),
+            "range: suffix removal updates registry by rounded extent");
+      CHECK(sceKernelMTypeprotect(p + page, 1, 1) == SCE_OK,
+            "range: rounded whole-map reprotect supported");
+      CHECK(sceKernelQueryMemoryProtection(p + page, &start, &end, &prot) == SCE_OK &&
+                prot == 1, "range: whole-map reprotect query accurate");
+      CHECK(sceKernelMunmap(p + page, 1) == SCE_OK,
+            "range: rounded final unmap supported");
+      CHECK(sceKernelQueryMemoryProtection(p + page, nullptr, nullptr, nullptr) ==
+                SCE_KERNEL_ERROR_EINVAL, "range: removed mapping no longer tracked");
+    }
+    auto* short_map = static_cast<unsigned char*>(sceKernelMapMemory(1, 3));
+    CHECK(short_map != nullptr, "range: non-page-sized map supported");
+    if (short_map) {
+      void* end = nullptr;
+      CHECK(sceKernelQueryMemoryProtection(short_map, nullptr, &end, nullptr) == SCE_OK &&
+                end == short_map + page, "range: allocation registry records host-rounded extent");
+      CHECK(sceKernelMunmap(short_map, 1) == SCE_OK,
+            "range: non-page-sized allocation unmaps cleanly");
+    }
+    CHECK(sceKernelMapMemory(std::numeric_limits<std::size_t>::max(), 3) == nullptr,
+          "range: allocation rounding overflow refused");
   }
 
   // --- libkernel file calls over the jailed filesystem ---
