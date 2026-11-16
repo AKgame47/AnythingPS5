@@ -41,6 +41,40 @@ std::vector<std::uint8_t> build_synthetic_lifecycle_elf(const LifecycleSpec& spe
 constexpr int kLifecycleExitReturn = 55, kLifecycleExitExit = 42;
 constexpr const char* kLifecycleOrder = "IABE21yxF";
 
+// Slice S33: dependent modules.
+// build_synthetic_dep_elf makes a .prx-style module: DT_SONAME, an exported function
+// (returns `value`), an exported data symbol dep_counter (holds 2*value), one DT_INIT and one
+// DT_INIT_ARRAY entry printing letters[0]/letters[1] through putchar, and DT_FINI_ARRAY +
+// DT_FINI printing letters[2]/letters[3]. With `import_fn` set, the exported function instead
+// returns import_fn() + value (import resolved from another module, proving cross-module
+// binding). `needed` adds a DT_NEEDED entry by that name. `with_tls` adds a PT_TLS segment
+// (the loader must refuse dependent modules that have one).
+struct DepSpec {
+  std::string soname = "libdep.prx";
+  std::string export_fn = "dep_value";   // plain name; exported as NID#A#A like real PS modules
+  int value = 41;
+  std::string needed;                    // optional DT_NEEDED name
+  std::string import_fn;                 // optional import (plain name) called by export_fn
+  char letters[4] = {'g', 'h', 'v', 'w'};  // init, init-array, fini-array, fini
+  bool with_tls = false;
+};
+std::vector<std::uint8_t> build_synthetic_dep_elf(const DepSpec& spec);
+
+// Slice S33: a main module with a DT_NEEDED entry. Imports putchar+atexit from the host and
+// import_fn + dep_counter from the dependent module. Entry prints 'E', fails with exit 61/62
+// when the imported function/data does not match, registers two atexit handlers ('1','2') and
+// returns 55. Lifecycle letters are the S32 ones, so a one-dependency run prints
+// "ghIABE21yxFvw": dep init first, dep fini last.
+struct DepMainSpec {
+  std::string needed = "libdep.prx";
+  std::string import_fn = "dep_value";
+  int expect_fn = 41;
+  int expect_data = 82;
+};
+std::vector<std::uint8_t> build_synthetic_depmain_elf(const DepMainSpec& spec);
+constexpr int kDepMainExitReturn = 55;
+constexpr const char* kDepOrder = "ghIABE21yxFvw";
+
 extern const char* const kSynthMessage;
 constexpr int kSynthExitCode = 30;
 
