@@ -991,8 +991,10 @@ failures, before more texture features land on the shim.
   double, in argument order); the exact output "1 11 2 12 3 13 4 14 5 15 6 16 7 17 8 18 9" and
   the printf return count are asserted in guest code, plus formatter unit checks and the
   pnr_stkovf_run ctest.
-- Bounds of the claim: up to 8 spill slots, 8 bytes wide each (no 16-byte types such as long
-  double), tested through the varargs printf path. Fixed-signature imports with overflowing
+- Bounds of the claim: up to 8 spill slots, each a scalar 8-byte value, tested through the
+  varargs printf path. Excluded: aggregates passed by value (MEMORY class), vector types
+  (__m128/__m256 and friends, SSE class with their own width/alignment), and 16-byte-aligned
+  long double - none of those layouts are captured or claimed. Fixed-signature imports with overflowing
   signatures share the same capture path, but no current binding has one, so that shape is not
   separately exercised end-to-end. Spills past 8 slots stay literal in the formatter and are
   undefined for fixed signatures.
