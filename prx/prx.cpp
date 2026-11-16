@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <limits>
 #include <thread>
 
 #include <sys/mman.h>
@@ -63,11 +64,30 @@ struct Mapping { void* start; std::size_t size; std::int64_t prot; };
 std::mutex g_map_mu;
 std::vector<Mapping>& mappings() { static std::vector<Mapping> m; return m; }
 
+// Use integer differences, not ordering/arithmetic on unrelated host pointers.
 Mapping* find_mapping(void* addr) {
-  for (auto& m : mappings())
-    if (addr >= m.start && addr < static_cast<char*>(m.start) + m.size)
-      return &m;
+  const auto value = reinterpret_cast<std::uintptr_t>(addr);
+  for (auto& m : mappings()) {
+    const auto base = reinterpret_cast<std::uintptr_t>(m.start);
+    if (value >= base && value - base < m.size) return &m;
+  }
   return nullptr;
+}
+
+bool page_extent(std::size_t size, std::size_t& rounded) {
+  const long ps = ::sysconf(_SC_PAGESIZE);
+  if (ps <= 0 || size == 0) return false;
+  const auto page = static_cast<std::size_t>(ps);
+  if (size > std::numeric_limits<std::size_t>::max() - (page - 1))
+    return false;
+  rounded = ((size + page - 1) / page) * page;
+  return true;
+}
+
+bool aligned_page(void* addr) {
+  const long ps = ::sysconf(_SC_PAGESIZE);
+  return ps > 0 && reinterpret_cast<std::uintptr_t>(addr) %
+                          static_cast<std::size_t>(ps) == 0;
 }
 
 bool prot_valid(std::int64_t prot) {
@@ -78,46 +98,56 @@ bool prot_valid(std::int64_t prot) {
 }  // namespace
 
 void* sceKernelMapMemory(std::size_t size, std::int64_t prot) {
-  if (size == 0 || !prot_valid(prot)) return nullptr;
+  std::size_t extent = 0;
+  if (!prot_valid(prot) || !page_extent(size, extent)) return nullptr;
   void* p = ::mmap(nullptr, size, static_cast<int>(prot),
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (p == MAP_FAILED) return nullptr;
   std::lock_guard<std::mutex> lk(g_map_mu);
-  mappings().push_back(Mapping{p, size, prot});
+  mappings().push_back(Mapping{p, extent, prot});
   return p;
 }
 
 SceInt32 sceKernelMunmap(void* addr, std::size_t size) {
-  if (addr == nullptr || size == 0) return SCE_KERNEL_ERROR_EINVAL;
+  std::size_t extent = 0;
+  if (addr == nullptr || !aligned_page(addr) || !page_extent(size, extent))
+    return SCE_KERNEL_ERROR_EINVAL;
   std::lock_guard<std::mutex> lk(g_map_mu);
   Mapping* m = find_mapping(addr);
-  if (m == nullptr) return SCE_KERNEL_ERROR_EINVAL;  // not ours: honest
-  if (size > m->size) return SCE_KERNEL_ERROR_EINVAL;
-  if (::munmap(addr, size) != 0) return SCE_KERNEL_ERROR_UNKNOWN;
-  if (addr == m->start && size == m->size) {
+  if (m == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+  const auto offset = reinterpret_cast<std::uintptr_t>(addr) -
+                      reinterpret_cast<std::uintptr_t>(m->start);
+  // Reject overruns and unsupported middle splits BEFORE touching host pages.
+  if (extent > m->size - offset ||
+      (offset != 0 && extent != m->size - offset))
+    return SCE_KERNEL_ERROR_EINVAL;
+  if (::munmap(addr, extent) != 0) return SCE_KERNEL_ERROR_UNKNOWN;
+  if (offset == 0 && extent == m->size) {
     *m = mappings().back();
     mappings().pop_back();
-  } else if (addr == m->start) {
-    m->start = static_cast<char*>(m->start) + size;
-    m->size -= size;
-  } else if (static_cast<char*>(addr) + size ==
-             static_cast<char*>(m->start) + m->size) {
-    m->size -= size;
+  } else if (offset == 0) {
+    m->start = reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(m->start) + extent);
+    m->size -= extent;
   } else {
-    return SCE_KERNEL_ERROR_EINVAL;  // middle-split unmap: not supported yet
+    m->size -= extent;
   }
   return SCE_OK;
 }
 
 SceInt32 sceKernelMTypeprotect(void* addr, std::size_t size, std::int64_t prot) {
-  if (addr == nullptr || size == 0 || !prot_valid(prot))
+  std::size_t extent = 0;
+  if (addr == nullptr || !aligned_page(addr) || !prot_valid(prot) ||
+      !page_extent(size, extent))
     return SCE_KERNEL_ERROR_EINVAL;
   std::lock_guard<std::mutex> lk(g_map_mu);
   Mapping* m = find_mapping(addr);
-  if (m == nullptr) return SCE_KERNEL_ERROR_EINVAL;
-  if (::mprotect(addr, size, static_cast<int>(prot)) != 0)
+  // This registry stores one protection per mapping. Until split bookkeeping
+  // exists, refuse partial reprotects rather than silently report stale state.
+  if (m == nullptr || addr != m->start || extent != m->size)
+    return SCE_KERNEL_ERROR_EINVAL;
+  if (::mprotect(addr, extent, static_cast<int>(prot)) != 0)
     return SCE_KERNEL_ERROR_UNKNOWN;
-  if (addr == m->start && size >= m->size) m->prot = prot;
+  m->prot = prot;
   return SCE_OK;
 }
 
