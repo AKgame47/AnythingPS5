@@ -8,9 +8,12 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <mutex>
+#include <set>
 #include <utility>
 
 #include "loader/nid.hpp"
@@ -78,6 +81,7 @@ struct Dyn {
   bool has_dyn = false;
   std::uint64_t symtab = 0, strtab = 0, strsz = 0, rela = 0, relasz = 0, jmprel = 0, pltrelsz = 0;
   std::uint64_t init = 0, fini = 0, init_array = 0, init_arraysz = 0, fini_array = 0, fini_arraysz = 0;
+  std::uint64_t soname = 0;  // DT_SONAME string offset
   std::vector<std::string> needed_offsets_unused;
   std::vector<std::uint64_t> needed;  // DT_NEEDED string offsets
   bool has_tls = false;
@@ -137,6 +141,7 @@ pnr::Status parse_dyn(const Bytes& b, Dyn* d) {
       case 2: d->pltrelsz = val; break;
       case 12: d->init = val; break;
       case 13: d->fini = val; break;
+      case 14: d->soname = val; break;
       case 25: d->init_array = val; break;
       case 27: d->init_arraysz = val; break;
       case 26: d->fini_array = val; break;
@@ -203,7 +208,15 @@ ModuleImage::~ModuleImage() {
   for (int s : slots) release_slot(s);
 }
 
-pnr::Status load_module(const std::string& path, const pnr::prx::PrxRegistry& reg, std::unique_ptr<ModuleImage>* out, ModuleLoadReport* report) {
+// Guest-module export table: defined dynamic symbols of the modules loaded so far, in load
+// order. Lookups walk it in REVERSE load order: a module's direct dependencies load after their
+// own dependencies, so the module closest to the dependent wins a name conflict (matching the
+// gABI global-scope order for a dependency chain; a diamond with the same symbol exported by two
+// sibling modules resolves most-recent-first, a documented simplification of breadth-first).
+using GuestExports = std::vector<std::pair<std::string, std::uint64_t>>;
+
+pnr::Status load_one(const std::string& path, const pnr::prx::PrxRegistry& reg, const GuestExports* guest_exports,
+                     std::unique_ptr<ModuleImage>* out, ModuleLoadReport* report) {
   auto fail = [](int c, const std::string& m) { return pnr::Status::Fail(c, "module", m); };
   ModuleLoadReport local;
   if (!report) report = &local;
@@ -267,19 +280,29 @@ pnr::Status load_module(const std::string& path, const pnr::prx::PrxRegistry& re
         if (shndx != 0) {
           value = B + u64(b, so + 8);  // defined inside this module
         } else {
-          SonySymbol ss;
-          const pnr::prx::PrxSymbol* sym = nullptr;
-          if (parse_sony_symbol(name, &ss)) sym = reg.find(ss.nid); else sym = reg.find_name(name);
-          const std::string label = (sym ? sym->name + " (" + (ss.nid.empty() ? sym->nid : ss.nid) + ")" : name);
-          if (!sym || !sym->implemented || !sym->invoke) {
-            report->missing.push_back(sym && !sym->implemented ? label + " [declared, not implemented]" : label + " [unknown]");
-            continue;
+          // Slice S33: bundled guest modules bind before the host PRX registry.
+          const std::uint64_t* guest_value = nullptr;
+          if (guest_exports)
+            for (auto it = guest_exports->rbegin(); it != guest_exports->rend(); ++it)
+              if (it->first == name) { guest_value = &it->second; break; }
+          if (guest_value) {
+            value = *guest_value;
+            report->bound.push_back(name + " [guest module export]");
+          } else {
+            SonySymbol ss;
+            const pnr::prx::PrxSymbol* sym = nullptr;
+            if (parse_sony_symbol(name, &ss)) sym = reg.find(ss.nid); else sym = reg.find_name(name);
+            const std::string label = (sym ? sym->name + " (" + (ss.nid.empty() ? sym->nid : ss.nid) + ")" : name);
+            if (!sym || !sym->implemented || !sym->invoke) {
+              report->missing.push_back(sym && !sym->implemented ? label + " [declared, not implemented]" : label + " [unknown]");
+              continue;
+            }
+            const int slot = claim_slot(sym->invoke);
+            if (slot < 0) return fail(49, "more than 64 bound imports in one process (current limit)");
+            img->slots.push_back(slot);
+            value = reinterpret_cast<std::uint64_t>(thunks()[slot]);
+            report->bound.push_back(label);
           }
-          const int slot = claim_slot(sym->invoke);
-          if (slot < 0) return fail(49, "more than 64 bound imports in one process (current limit)");
-          img->slots.push_back(slot);
-          value = reinterpret_cast<std::uint64_t>(thunks()[slot]);
-          report->bound.push_back(label);
         }
         if (type == 1) value += static_cast<std::uint64_t>(addend);
       } else {
@@ -328,29 +351,182 @@ pnr::Status load_module(const std::string& path, const pnr::prx::PrxRegistry& re
     if (!in_img(d.tls_vaddr, d.tls_memsz)) return fail(53, "PT_TLS outside the image");
     img->tls.init = at(d.tls_vaddr); img->tls.filesz = d.tls_filesz; img->tls.memsz = d.tls_memsz; img->tls.align = d.tls_align ? d.tls_align : 1;
   }
+  // Slice S33: module identity (DT_SONAME), needed names and the export table used to bind
+  // dependent modules. Exports are defined (st_shndx != 0), GLOBAL/WEAK dynamic symbols.
+  if (d.soname && !sym_name(b, d, static_cast<std::uint32_t>(d.soname), &img->soname)) img->soname.clear();
+  for (auto n : d.needed) {
+    std::string s;
+    if (sym_name(b, d, static_cast<std::uint32_t>(n), &s)) img->needed_names.push_back(s);
+  }
+  for (std::size_t i = 1; i < nsym; ++i) {
+    const std::size_t o = static_cast<std::size_t>(sy) + i * 24;
+    if (u16(b, o + 6) != 0 && (b[o + 4] >> 4) != 0) {  // defined, non-LOCAL
+      std::string nm;
+      if (sym_name(b, d, u32(b, o), &nm) && !nm.empty()) img->exports.emplace_back(nm, B + u64(b, o + 8));
+    }
+  }
   *out = std::move(img);
   return pnr::Status::Ok();
 }
 
-pnr::Status run_module(const std::string& path, const pnr::prx::PrxRegistry& reg, ModuleRunResult* result, ModuleLoadReport* report) {
-  *result = ModuleRunResult{};
-  std::unique_ptr<ModuleImage> img;
-  auto st = load_module(path, reg, &img, report);
+pnr::Status load_module(const std::string& path, const pnr::prx::PrxRegistry& reg, std::unique_ptr<ModuleImage>* out, ModuleLoadReport* report) {
+  return load_one(path, reg, nullptr, out, report);
+}
+
+// Slice S33 helpers -----------------------------------------------------------
+
+// Strips a PS module suffix (".prx"/".sprx", case-insensitive) for stem matching.
+std::string module_stem(const std::string& name) {
+  auto ends = [&](const char* suf) {
+    const std::size_t n = std::strlen(suf);
+    if (name.size() <= n) return false;
+    for (std::size_t i = 0; i < n; ++i)
+      if (std::tolower(static_cast<unsigned char>(name[name.size() - n + i])) != suf[i]) return false;
+    return true;
+  };
+  if (ends(".prx") || ends(".sprx")) return name.substr(0, name.find_last_of('.'));
+  return {};
+}
+
+// Finds the module file for a DT_NEEDED name: exact filename match first, then the PS stem
+// convention ("libSceFoo.sprx" matches needed "libSceFoo"). Matching two different files is an
+// ambiguity error. Returns an empty path when no file matches (firmware-provided).
+pnr::Status find_module_file(const std::string& name, const std::vector<std::string>& dirs, std::string* found) {
+  *found = {};
+  const std::string stem = module_stem(name);
+  std::string exact, stemmed;
+  std::error_code ec;
+  for (const auto& dir : dirs) {
+    for (const auto& ent : std::filesystem::directory_iterator(dir, ec)) {
+      if (ec || !ent.is_regular_file(ec)) continue;
+      const std::string fn = ent.path().filename().string();
+      if (fn == name) {
+        if (exact.empty()) exact = ent.path().string();
+        else if (ent.path().string() != exact)
+          return pnr::Status::Fail(70, "module", "ambiguous dependent module \"" + name + "\": " + exact + " and " + ent.path().string());
+      } else if (!stem.empty() && module_stem(fn) == stem) {
+        if (stemmed.empty()) stemmed = ent.path().string();
+        else if (ent.path().string() != stemmed)
+          return pnr::Status::Fail(70, "module", "ambiguous dependent module \"" + name + "\": " + stemmed + " and " + ent.path().string());
+      }
+    }
+  }
+  *found = !exact.empty() ? exact : stemmed;
+  return pnr::Status::Ok();
+}
+
+// Recursive loader state: post-order over DT_NEEDED files, cycle-safe.
+struct TreeLoad {
+  const pnr::prx::PrxRegistry* reg;
+  std::vector<std::string> dirs;
+  std::unique_ptr<ModuleTree> tree = std::make_unique<ModuleTree>();
+  GuestExports exports;  // all loaded modules so far, load order
+  std::map<std::string, bool> visiting;  // canonical path -> still on the DFS stack
+  std::set<std::string> done;
+};
+
+pnr::Status load_recursive(const std::string& path, bool is_main, TreeLoad* t, ModuleLoadReport* report) {
+  auto fail = [](int c, const std::string& m) { return pnr::Status::Fail(c, "module", m); };
+  std::error_code ec;
+  const std::string canon = std::filesystem::weakly_canonical(path, ec).string();
+  const std::string& key = ec ? path : canon;
+  if (t->done.count(key)) return pnr::Status::Ok();
+  if (t->visiting[key]) return fail(71, "cyclic module dependency involving " + key);
+  if (t->tree->images.size() >= 32) return fail(72, "more than 32 modules in one tree (current limit)");
+  t->visiting[key] = true;
+
+  // Read + parse once here for the needed names; load_one re-parses (cheap, bounds-checked).
+  std::vector<std::uint8_t> b;
+  {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return fail(40, "cannot read file: " + path);
+    b.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+  }
+  Dyn d;
+  auto st = parse_dyn(b, &d);
   if (!st) return st;
+  const std::int64_t so = (d.has_dyn && d.strtab) ? v2o(d, d.strtab, d.strsz) : -1;
+  if (d.has_dyn && d.strtab && so < 0) return fail(32, "string table out of bounds");
+
+  std::vector<std::string> dep_files;
+  for (auto n : d.needed) {
+    std::string name;
+    if (so >= 0 && !sym_name(b, d, static_cast<std::uint32_t>(n), &name)) return fail(34, "symbol name out of bounds");
+    if (name.empty()) continue;
+    std::string file;
+    st = find_module_file(name, t->dirs, &file);
+    if (!st) return st;
+    if (!file.empty()) {
+      // Load the dependency before this module (post-order).
+      st = load_recursive(file, false, t, report);
+      if (!st)
+        return fail(73, "dependent module \"" + name + "\" (" + file + ") needed by " + path + ": " + st.error.message);
+      dep_files.push_back(file);
+    }
+    // No matching file: firmware-provided module, bound through the host PRX registry below.
+  }
+
+  std::unique_ptr<ModuleImage> img;
+  st = load_one(path, *t->reg, &t->exports, &img, report);
+  if (!st) return st;
+  if (!is_main && img->tls.init)
+    return fail(74, "dependent module " + path + " has PT_TLS; only the main module's TLS is set up (current limit)");
+  t->exports.insert(t->exports.end(), img->exports.begin(), img->exports.end());
+  t->tree->images.push_back(std::move(img));
+  t->visiting[key] = false;
+  t->done.insert(key);
+  return pnr::Status::Ok();
+}
+
+pnr::Status load_module_tree(const std::string& main_path, const std::vector<std::string>& module_dirs,
+                             const pnr::prx::PrxRegistry& reg, std::unique_ptr<ModuleTree>* out, ModuleLoadReport* report) {
+  TreeLoad t;
+  t.reg = &reg;
+  t.dirs = module_dirs;
+  // Console convention: the module's own directory and its module subdirectories are searched.
+  const std::filesystem::path base = std::filesystem::path(main_path).parent_path();
+  t.dirs.push_back(base.empty() ? "." : base.string());
+  for (const char* sub : {"sce_module", "sce_modules", "prx"}) t.dirs.push_back((base / sub).string());
+  ModuleLoadReport local;
+  if (!report) report = &local;
+  *report = ModuleLoadReport{};
+  auto st = load_recursive(main_path, true, &t, report);
+  if (!st) return st;
+  *out = std::move(t.tree);
+  return pnr::Status::Ok();
+}
+
+pnr::Status run_module(const std::string& path, const pnr::prx::PrxRegistry& reg, ModuleRunResult* result, ModuleLoadReport* report) {
+  return run_module_tree(path, {}, reg, result, report);
+}
+
+pnr::Status run_module_tree(const std::string& main_path, const std::vector<std::string>& module_dirs,
+                            const pnr::prx::PrxRegistry& reg, ModuleRunResult* result, ModuleLoadReport* report) {
+  *result = ModuleRunResult{};
+  std::unique_ptr<ModuleTree> tree;
+  auto st = load_module_tree(main_path, module_dirs, reg, &tree, report);
+  if (!st) return st;
+  ModuleImage* img = tree->main();
   std::fflush(stdout);
   std::fflush(stderr);
   const pid_t pid = ::fork();
   if (pid < 0) return pnr::Status::Fail(60, "module", "fork failed");
   if (pid == 0) {
     // PlayStation-style entry: entry(args_block, exit_handler). The result is the process status.
-    // S32: DT_INIT then DT_INIT_ARRAY run before entry; atexit (LIFO), DT_FINI_ARRAY (reverse)
-    // and DT_FINI run after entry returns or when the guest calls exit().
-    auto args = pnr::loader::build_entry_args({path});
+    // S32/S33: dependencies' DT_INIT+DT_INIT_ARRAY run first (load order), then the main
+    // module's; on exit the atexit handlers run LIFO (one global list - a real dynamic loader
+    // interleaves them per module, a documented simplification), then every module's
+    // DT_FINI_ARRAY (reverse)+DT_FINI in exact reverse init order.
+    auto args = pnr::loader::build_entry_args({main_path});
     pnr::loader::GuestLifecycle lc;
-    if (img->init_fn) lc.init.push_back(img->init_fn);
-    for (const std::uint64_t v : img->init_array) lc.init.push_back(v);
-    for (auto it = img->fini_array.rbegin(); it != img->fini_array.rend(); ++it) lc.fini.push_back(*it);
-    if (img->fini_fn) lc.fini.push_back(img->fini_fn);
+    for (const auto& m : tree->images) {
+      if (m->init_fn) lc.init.push_back(m->init_fn);
+      for (const std::uint64_t v : m->init_array) lc.init.push_back(v);
+    }
+    for (auto mit = tree->images.rbegin(); mit != tree->images.rend(); ++mit) {
+      for (auto it = (*mit)->fini_array.rbegin(); it != (*mit)->fini_array.rend(); ++it) lc.fini.push_back(*it);
+      if ((*mit)->fini_fn) lc.fini.push_back((*mit)->fini_fn);
+    }
     using EntryFn = std::int64_t (*)(void*, void*);
     const std::int64_t rc = pnr::loader::run_guest_main(img->tls, reinterpret_cast<EntryFn>(img->entry()), args.data(),
                                                         reinterpret_cast<void*>(&pnr_guest_exit), lc);
