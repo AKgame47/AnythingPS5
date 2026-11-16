@@ -20,10 +20,11 @@ road, not the end of it.
 | Init/fini arrays and atexit: DT_INIT then DT_INIT_ARRAY (file order) run before the entry point; libc atexit handlers (LIFO), DT_FINI_ARRAY (reverse order) and DT_FINI run when the guest calls exit() or its entry returns. Ordering follows the System V gABI; PlayStation's exact init-argument convention is unverified on hardware, so init functions receive the same (args, exit) pair the entry gets | Implemented, Tested on synthetic modules only |
 | Dependent modules (loading the files named by DT_NEEDED) | Implemented, Tested on synthetic modules only |
 | libSceLibcInternal subset: memmove memcmp memchr strcpy strncpy strcat strncmp strchr strrchr strstr calloc realloc snprintf sprintf puts putchar atoi strtol abs labs toupper tolower isdigit isalpha isspace srand rand atexit exit, plus the earlier printf malloc free memcpy memset strlen strcmp (`prx/libc_abi`) | Implemented, Tested (unit and from machine code) |
-| C-style formatter: flags `-` and `0`, width, length h hh l ll z j t, conversions d i u x X o c s p | Implemented, Tested. Floating point formats are NOT supported and print literally |
+| C-style formatter: flags `-` and `0`, width, precision, length h hh l ll z j t, conversions d i u x X o c s p plus f F e E g G a A (host-libc rounding; long double refused, stays literal) | Implemented, Tested |
 | libSceSysmodule `LoadModule`, `IsLoaded`, `UnloadModule` | Experimental stubs: ids are recorded, nothing is loaded, id values unverified |
 | C++ ABI surface: `__cxa_atexit` and `__cxa_thread_atexit_impl` (one argument, thread destructors run before atexit handlers, glibc order), `qsort` with a guest comparator, `__cxa_guard_acquire/release/abort`, `__cxa_pure_virtual` | Implemented, Tested on synthetic modules only |
-| Libc imports beyond the subsets above, floating point arguments | Planned |
+| Floating point arguments: the thunk captures xmm0-7 alongside the 6 gp argument registers into a `GuestCallArgs` pair of pools, and the formatter's %f %e %g %a consume the xmm pool per the System V varargs rule (`loader/module_loader`, `prx/libc_abi`) | Implemented, Tested on synthetic modules only |
+| Libc imports beyond the subsets above, long double, arguments spilled to the stack past 6 gp / 8 xmm registers | Planned |
 | PM4 command buffer decode and register-state tracking: packet types 0, 2, 3, SET_*_REG windows, draw and dispatch capture with the register state at each draw, indirect buffers through an address resolver, `pnr gnm-decode <file>` (`graphics/pm4`) | Implemented, Tested on SYNTHETIC buffers only. Opcode numbers, header layout and register windows verified against the public Linux kernel header soc15d.h. Draw packet body layouts are from public driver usage and NOT verified on a PlayStation |
 | Register meaning and draw bindings (`graphics/amd_regs.hpp`, `graphics/gfx_state`): shader addresses, user data, viewport, color target 0, primitive type | Implemented, Tested on SYNTHETIC buffers. Per public AMD headers, unverified on PlayStation |
 | GPU virtual address map (`graphics/gpu_va`): range table to host memory, no stitching across regions, PM4 indirect-buffer resolver | Implemented, Tested on synthetic data. No page tables or coherency model |
@@ -929,3 +930,26 @@ failures, before more texture features land on the shim.
   while still covering empty depth; the same draws without a shared cache repaint the centre
   (control, per-draw behaviour); depth-write-off leaves depth untouched; a new z_base restarts
   the frame; Z16, tiled, stencil and separate-base bindings refused.
+
+## Slice S35 notes (floating point arguments + FP formatting)
+- The host-call thunk (`loader/module_loader.cpp`) declares the 8 xmm argument registers as
+  double parameters, so the System V ABI delivers floating point guest arguments (xmm0-7)
+  alongside the 6 gp registers and the compiler preserves both into `GuestCallArgs`
+  (`prx/prx.hpp`). Before this slice xmm0-7 were silently dropped: any guest call passing a
+  float or double (printf %f, math, future sce APIs) reached the host with the FP argument lost.
+- Disassembly-verified after build: thunk<0> packs and stores xmm0-7 to the argument struct
+  before the guest-to-host FS switch; the S34 FS switch/restore contract sequence
+  (guest_to_host -> bound call -> host_to_guest) is unchanged.
+- The formatter consumes the two pools independently, as the SysV varargs rule requires:
+  integer conversions advance the gp index, f F e E g G a A advance the xmm index. FP output is
+  produced by the host libc snprintf with the parsed (capped) flags/width/precision, so rounding
+  is the host's correct rounding. long double (L) is refused and prints literally; a format
+  conversion with no matching pool entry prints literally in the vector form used by host-side
+  tests, while the thunk-fed form always has 6 gp + 8 xmm slots (real callers pass live
+  registers; unset slots are whatever the registers held).
+- Arguments spilled to the stack past 6 gp / 8 xmm registers are NOT captured (documented thunk
+  limit, unchanged).
+- Tests: 12 formatter unit checks over the xmm pool (precision, width/flags, sign, zero,
+  missing-pool literal, long-double refusal, pool interleaving) and the C3 libc machine-code
+  module now calls printf("%.3f %g\n", 3.14159, 2.0) through the thunk; the run test and the
+  pnr_libc_run ctest assert the "3.142 2" output. The EGnQQbB lifecycle module is unchanged.
