@@ -24,7 +24,8 @@ road, not the end of it.
 | libSceSysmodule `LoadModule`, `IsLoaded`, `UnloadModule` | Experimental stubs: ids are recorded, nothing is loaded, id values unverified |
 | C++ ABI surface: `__cxa_atexit` and `__cxa_thread_atexit_impl` (one argument, thread destructors run before atexit handlers, glibc order), `qsort` with a guest comparator, `__cxa_guard_acquire/release/abort`, `__cxa_pure_virtual` | Implemented, Tested on synthetic modules only |
 | Floating point arguments and returns: the thunk captures xmm0-7 alongside the 6 gp argument registers into a `GuestCallArgs` pair of pools, the formatter's %f %e %g %a consume the xmm pool per the System V varargs rule, and symbols marked `returns_fp` bind a double-returning thunk so float/double results reach the guest in xmm0 (`loader/module_loader`, `prx/prx`) | Implemented, Tested on synthetic modules only |
-| Libc imports beyond the subsets above, long double, arguments spilled to the stack past 6 gp / 8 xmm registers | Planned |
+| Stack-spilled arguments: the thunk copies the first 8 spill slots verbatim (8-byte slots, argument order) into `GuestCallArgs::s`; the varargs formatter consumes them when a register pool is exhausted | Implemented, Tested on synthetic modules only |
+| Libc imports beyond the subsets above, long double, spills past 8 stack slots or wider than 8 bytes | Planned |
 | PM4 command buffer decode and register-state tracking: packet types 0, 2, 3, SET_*_REG windows, draw and dispatch capture with the register state at each draw, indirect buffers through an address resolver, `pnr gnm-decode <file>` (`graphics/pm4`) | Implemented, Tested on SYNTHETIC buffers only. Opcode numbers, header layout and register windows verified against the public Linux kernel header soc15d.h. Draw packet body layouts are from public driver usage and NOT verified on a PlayStation |
 | Register meaning and draw bindings (`graphics/amd_regs.hpp`, `graphics/gfx_state`): shader addresses, user data, viewport, color target 0, primitive type | Implemented, Tested on SYNTHETIC buffers. Per public AMD headers, unverified on PlayStation |
 | GPU virtual address map (`graphics/gpu_va`): range table to host memory, no stitching across regions, PM4 indirect-buffer resolver | Implemented, Tested on synthetic data. No page tables or coherency model |
@@ -44,9 +45,9 @@ makes the load fail with a message naming it, and nothing runs.
 ## Limits, stated plainly
 - PNR does not decrypt, unsign or unprotect anything. A SELF file is refused. The input is a plain
   ELF that the user already has.
-- Imports are called with up to 6 gp and 8 xmm register arguments and at most 64 imports are
-  bound per process. Arguments spilled to the stack past the registers are not captured, and
-  floating point coverage is limited to the fixed signatures actually tested (see S35 notes).
+- Imports are called with up to 6 gp and 8 xmm register arguments plus up to 8 stack-spill
+  slots (8 bytes each), and at most 64 imports are bound per process. Floating point coverage
+  is limited to the fixed signatures actually tested (see S35/S36 notes).
 - Imports are only mapped in the launcher process. Execution happens in a forked child.
 - The set of implemented system functions is small. `pnr imports` shows exactly what a given ELF still needs.
 
@@ -948,8 +949,8 @@ failures, before more texture features land on the shim.
   conversion with no matching pool entry prints literally in the vector form used by host-side
   tests, while the thunk-fed form always has 6 gp + 8 xmm slots (real callers pass live
   registers; unset slots are whatever the registers held).
-- Arguments spilled to the stack past 6 gp / 8 xmm registers are NOT captured (documented thunk
-  limit, unchanged).
+- Arguments spilled to the stack past 6 gp / 8 xmm registers were NOT captured at this point
+  (superseded by S36, which captures the first 8 spill slots).
 - Tests: 12 formatter unit checks over the xmm pool (precision, width/flags, sign, zero,
   missing-pool literal, long-double refusal, pool interleaving) and the C3 libc machine-code
   module now calls printf("%.3f %g\n", 3.14159, 2.0) through the thunk; the run test and the
@@ -968,3 +969,30 @@ failures, before more texture features land on the shim.
   slot). The pnr_fp_run ctest asserts the output and exit code. These are real libc bindings,
   and the claim stays scoped to them: varargs doubles, the three fixed FP signatures above, and
   xmm0 returns for symbols marked returns_fp - not arbitrary FP-calling binaries.
+
+## Slice S36 notes (stack-spilled arguments)
+- SysV overflow arguments (7th+ gp, 9th+ xmm) sit at [rsp+8...] at call time as a dense array of
+  8-byte slots in argument order, regardless of class. The thunks declare 8 trailing int64
+  parameters after the 6 gp + 8 xmm register parameters; per the class rules those declared
+  params are consecutive stack slots starting at [rsp+8], so the compiler copies exactly the
+  guest's overflow region into GuestCallArgs::s verbatim. Declaring one trailing run of a single
+  class is the load-bearing choice: interleaving typed overflow parameters would let each
+  class's own declared sequence pick different offsets than the guest's argument-order layout.
+- Disassembly-verified in the built object (thunk<0> and thunkf<0>): after the prologue the 8
+  incoming slots are loaded from consecutive 8-byte-strided offsets immediately above the
+  return address (rsp+0x180..0x1b8 in the current frame layout) into the argument struct BEFORE
+  the guest_to_host FS switch; the S34/S35 call sequence is unchanged and there are no
+  constprop/isra clones.
+- The varargs formatter consumes the spill window with a single shared cursor: when a
+  conversion's own pool is exhausted it takes the next stack slot, which is correct because
+  both the ABI layout and the conversion sequence follow argument order.
+- Regression: the --stkovf synthetic module calls printf with both register pools exhausted and
+  the overflow interleaved across classes (gp overflow i6, i7, i8, then the xmm-overflow 9th
+  double, in argument order); the exact output "1 11 2 12 3 13 4 14 5 15 6 16 7 17 8 18 9" and
+  the printf return count are asserted in guest code, plus formatter unit checks and the
+  pnr_stkovf_run ctest.
+- Bounds of the claim: up to 8 spill slots, 8 bytes wide each (no 16-byte types such as long
+  double), tested through the varargs printf path. Fixed-signature imports with overflowing
+  signatures share the same capture path, but no current binding has one, so that shape is not
+  separately exercised end-to-end. Spills past 8 slots stay literal in the formatter and are
+  undefined for fixed signatures.
