@@ -23,7 +23,7 @@ road, not the end of it.
 | C-style formatter: flags `-` and `0`, width, precision, length h hh l ll z j t, conversions d i u x X o c s p plus f F e E g G a A (host-libc rounding; long double refused, stays literal) | Implemented, Tested |
 | libSceSysmodule `LoadModule`, `IsLoaded`, `UnloadModule` | Experimental stubs: ids are recorded, nothing is loaded, id values unverified |
 | C++ ABI surface: `__cxa_atexit` and `__cxa_thread_atexit_impl` (one argument, thread destructors run before atexit handlers, glibc order), `qsort` with a guest comparator, `__cxa_guard_acquire/release/abort`, `__cxa_pure_virtual` | Implemented, Tested on synthetic modules only |
-| Floating point arguments: the thunk captures xmm0-7 alongside the 6 gp argument registers into a `GuestCallArgs` pair of pools, and the formatter's %f %e %g %a consume the xmm pool per the System V varargs rule (`loader/module_loader`, `prx/libc_abi`) | Implemented, Tested on synthetic modules only |
+| Floating point arguments and returns: the thunk captures xmm0-7 alongside the 6 gp argument registers into a `GuestCallArgs` pair of pools, the formatter's %f %e %g %a consume the xmm pool per the System V varargs rule, and symbols marked `returns_fp` bind a double-returning thunk so float/double results reach the guest in xmm0 (`loader/module_loader`, `prx/prx`) | Implemented, Tested on synthetic modules only |
 | Libc imports beyond the subsets above, long double, arguments spilled to the stack past 6 gp / 8 xmm registers | Planned |
 | PM4 command buffer decode and register-state tracking: packet types 0, 2, 3, SET_*_REG windows, draw and dispatch capture with the register state at each draw, indirect buffers through an address resolver, `pnr gnm-decode <file>` (`graphics/pm4`) | Implemented, Tested on SYNTHETIC buffers only. Opcode numbers, header layout and register windows verified against the public Linux kernel header soc15d.h. Draw packet body layouts are from public driver usage and NOT verified on a PlayStation |
 | Register meaning and draw bindings (`graphics/amd_regs.hpp`, `graphics/gfx_state`): shader addresses, user data, viewport, color target 0, primitive type | Implemented, Tested on SYNTHETIC buffers. Per public AMD headers, unverified on PlayStation |
@@ -44,8 +44,9 @@ makes the load fail with a message naming it, and nothing runs.
 ## Limits, stated plainly
 - PNR does not decrypt, unsign or unprotect anything. A SELF file is refused. The input is a plain
   ELF that the user already has.
-- Imports are called with up to 6 integer arguments and at most 64 imports are bound per process.
-  No floating point arguments and no varargs beyond the six registers.
+- Imports are called with up to 6 gp and 8 xmm register arguments and at most 64 imports are
+  bound per process. Arguments spilled to the stack past the registers are not captured, and
+  floating point coverage is limited to the fixed signatures actually tested (see S35 notes).
 - Imports are only mapped in the launcher process. Execution happens in a forked child.
 - The set of implemented system functions is small. `pnr imports` shows exactly what a given ELF still needs.
 
@@ -56,7 +57,7 @@ makes the load fail with a message naming it, and nothing runs.
   `--kernel-no-tls` drops PT_TLS and must exit 3.
 - Host calls need the host FS base (glibc keeps its own state there). Each import thunk switches FS to the host
   base, calls, and switches back. The guest TCB copies the host stack-protector canary so both sides agree.
-- `sceKernelMmap`-style 7-argument calls and floating point arguments are not supported by the thunks.
+- `sceKernelMmap`-style 7-argument calls are not supported by the thunks.
 - Linux only. Windows stays Blocked.
 
 ## Slice C3 notes
@@ -953,3 +954,17 @@ failures, before more texture features land on the shim.
   missing-pool literal, long-double refusal, pool interleaving) and the C3 libc machine-code
   module now calls printf("%.3f %g\n", 3.14159, 2.0) through the thunk; the run test and the
   pnr_libc_run ctest assert the "3.142 2" output. The EGnQQbB lifecycle module is unchanged.
+- Review follow-up (varargs doubles vs fixed-signature FP calls): the printf coverage above only
+  exercises varargs-promoted doubles. A second family of thunks (`thunkf<I>`) declares a double
+  return so the ABI hands results back in xmm0; bindings report the FP value's bit pattern
+  through the int64 channel and `PrxSymbol::returns_fp` selects the FP-return thunk per import.
+  Decoding is explicit: a double argument is the whole 64-bit lane; a float argument is the
+  lane's low 32 bits (the upper 32 are unspecified by the ABI and never read).
+- The `--fp` synthetic module proves the remaining cases from machine code with exact bit
+  expectations: printf with 8 doubles (xmm0 through xmm7 all live); fmod(double, double)
+  returning 1.5 in xmm0; fmaxf(float, float) returning 1.5f in xmm0 with deliberate garbage in
+  the upper 32 bits of both argument lanes, so only correct float32 decoding of the low 32
+  passes; and ldexp(double, int) mixing the pools (FP argument in xmm0, integer in the first GP
+  slot). The pnr_fp_run ctest asserts the output and exit code. These are real libc bindings,
+  and the claim stays scoped to them: varargs doubles, the three fixed FP signatures above, and
+  xmm0 returns for symbols marked returns_fp - not arbitrary FP-calling binaries.
