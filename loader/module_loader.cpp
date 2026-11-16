@@ -61,6 +61,30 @@ const std::array<ThunkPtr, kMaxSlots>& thunks() {
   return t;
 }
 
+// FP-return variant: same argument capture as thunk<I>, but the declared return type is double,
+// so the System V ABI hands the result back to the guest in xmm0. The host implementation still
+// reports its result through the int64 channel: the Fn returns the FP value's bit pattern and
+// the thunk moves those bits into the double return unchanged. Selected per import via
+// PrxSymbol::returns_fp.
+template <int I>
+__attribute__((optimize("no-stack-protector"))) double thunkf(std::int64_t a, std::int64_t b, std::int64_t c, std::int64_t d, std::int64_t e, std::int64_t f,
+                                                              double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7) {
+  const std::uint64_t g = pnr::loader::guest_to_host();
+  const std::int64_t r = slots().fn[I](pnr::prx::GuestCallArgs{{a, b, c, d, e, f}, {x0, x1, x2, x3, x4, x5, x6, x7}});
+  pnr::loader::host_to_guest(g);
+  double out;
+  std::memcpy(&out, &r, 8);
+  return out;
+}
+using ThunkFPtr = double (*)(std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t,
+                             double, double, double, double, double, double, double, double);
+template <int... I>
+std::array<ThunkFPtr, kMaxSlots> make_thunks_f(std::integer_sequence<int, I...>) { return {{&thunkf<I>...}}; }
+const std::array<ThunkFPtr, kMaxSlots>& thunks_f() {
+  static const auto t = make_thunks_f(std::make_integer_sequence<int, kMaxSlots>{});
+  return t;
+}
+
 int claim_slot(const Fn& fn) {
   auto& t = slots();
   std::lock_guard<std::mutex> l(t.mu);
@@ -306,7 +330,8 @@ pnr::Status load_one(const std::string& path, const pnr::prx::PrxRegistry& reg, 
             const int slot = claim_slot(sym->invoke);
             if (slot < 0) return fail(49, "more than 64 bound imports in one process (current limit)");
             img->slots.push_back(slot);
-            value = reinterpret_cast<std::uint64_t>(thunks()[slot]);
+            value = reinterpret_cast<std::uint64_t>(sym->returns_fp ? reinterpret_cast<const void*>(thunks_f()[slot])
+                                                                    : reinterpret_cast<const void*>(thunks()[slot]));
             report->bound.push_back(label);
           }
         }
