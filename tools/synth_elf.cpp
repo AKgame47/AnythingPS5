@@ -816,6 +816,72 @@ std::vector<std::uint8_t> build_synthetic_filepos_elf() {
   return b;
 }
 
+// Slice S40: prove the 7th scalar (stack) argument is captured end-to-end, using a CLEARLY
+// SYNTHETIC host import (libpnrtest pnrTestSevenScalarArgs), not an invented Sony API. The
+// guest puts 1..6 in rdi..r9, 700 on the stack, calls through the NID-bound import and
+// checks rax == 721 in guest code; prints "abi7 ok" and exits 0. Requires the module-run
+// side to install the synthetic imports (PNR_TEST_IMPORTS=1).
+std::vector<std::uint8_t> build_synthetic_abi7_elf() {
+  std::vector<std::uint8_t> b(0x780, 0);
+  const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
+  std::memcpy(b.data(), ident, 8);
+  p16(b, 0x10, 3); p16(b, 0x12, 62); p32(b, 0x14, 1);
+  p64(b, 0x18, 0x100); p64(b, 0x20, 0x40);
+  p16(b, 0x34, 64); p16(b, 0x36, 56); p16(b, 0x38, 2); p16(b, 0x3A, 64);
+  const std::size_t total = b.size();
+  p32(b, 0x40, 1); p32(b, 0x44, 7); p64(b, 0x48, 0); p64(b, 0x50, 0); p64(b, 0x58, 0); p64(b, 0x60, total); p64(b, 0x68, total); p64(b, 0x70, 0x1000);
+  p32(b, 0x78, 2); p32(b, 0x7C, 6); p64(b, 0x80, 0x700); p64(b, 0x88, 0x700); p64(b, 0x90, 0x700); p64(b, 0x98, 0x80); p64(b, 0xA0, 0x80); p64(b, 0xA8, 8);
+  auto str = [&](std::size_t at, const char* s) { std::memcpy(&b[at], s, std::strlen(s) + 1); };
+  const std::size_t OK = 0x400;
+  str(OK, "abi7 ok");
+  // 2 imports: symtab 3 entries -> strtab at 0x548 ((0x548-0x500)/24 == 3 symbols).
+  // NID strings are 16 bytes each; strtab ends 0x569, rela sits clear at 0x580.
+  enum { G_SEVEN, G_PRINTF, G_N };
+  std::size_t pc = 0x100;
+  std::vector<std::size_t> fails;
+  auto emit = [&](std::initializer_list<int> bytes) { for (int v : bytes) b[pc++] = static_cast<std::uint8_t>(v); };
+  auto imm32 = [&](std::uint32_t v) { p32(b, pc, v); pc += 4; };
+  auto call = [&](int g) { emit({0xFF, 0x15}); p32(b, pc, static_cast<std::uint32_t>(0x480 + 8 * g - (pc + 4))); pc += 4; };
+  auto rip = [&](std::initializer_list<int> op, std::size_t target) { emit(op); p32(b, pc, static_cast<std::uint32_t>(target - (pc + 4))); pc += 4; };
+  auto check = [&](int ok_jcc, int n) { emit({ok_jcc, 10, 0xB8}); imm32(n); emit({0xE9}); fails.push_back(pc); pc += 4; };
+
+  emit({0x53, 0x48, 0x83, 0xEC, 0x60});  // push rbx; sub rsp,0x60
+  // rdi..r9 = 1,2,3,4,5,6
+  emit({0xBF}); imm32(1); emit({0xBE}); imm32(2); emit({0xBA}); imm32(3);
+  emit({0xB9}); imm32(4); emit({0x41, 0xB8}); imm32(5); emit({0x41, 0xB9}); imm32(6);
+  // 7th arg on the stack (slot0 = [rsp] at the call); sub 16 keeps rsp 16-aligned.
+  emit({0x48, 0x83, 0xEC, 0x10});                      // sub rsp, 16
+  emit({0x48, 0xC7, 0x04, 0x24}); imm32(700);          // mov qword [rsp], 700
+  call(G_SEVEN);
+  emit({0x48, 0x83, 0xC4, 0x10});                      // add rsp, 16
+  // rax == 1+2+3+4+5+6+700 == 721
+  emit({0x48, 0x81, 0xF8}); imm32(721); check(0x74, 1);   // cmp rax, 721; je
+  // printf("abi7 ok\n")
+  rip({0x48, 0x8D, 0x3D}, OK); emit({0x31, 0xC0}); call(G_PRINTF);
+  emit({0x31, 0xC0});
+  const std::size_t epi = pc;
+  emit({0x48, 0x83, 0xC4, 0x60, 0x5B, 0xC3});
+  for (std::size_t f : fails) p32(b, f, static_cast<std::uint32_t>(epi - (f + 4)));
+
+  const char* names[G_N] = {"pnrTestSevenScalarArgs", "printf"};
+  std::size_t so = 0x548 + 1;
+  for (int i = 0; i < G_N; ++i) {
+    const std::string nm = pnr::loader::nid::compute_nid(names[i], "") + "#A#A";
+    const std::size_t sy = 0x500 + 24 * (i + 1);
+    p32(b, sy, static_cast<std::uint32_t>(so - 0x548)); b[sy + 4] = 0x12; p16(b, sy + 6, 0);
+    std::memcpy(&b[so], nm.c_str(), nm.size() + 1); so += nm.size() + 1;
+  }
+  const std::size_t strsz = so - 0x548;
+  for (int i = 0; i < G_N; ++i) {
+    const std::size_t r = 0x580 + 24 * i;
+    p64(b, r, 0x480 + 8 * i); p64(b, r + 8, (static_cast<std::uint64_t>(i + 1) << 32) | 6); p64(b, r + 16, 0);
+  }
+  std::size_t dy = 0x700;
+  auto dyn = [&](std::int64_t tag, std::uint64_t v) { p64(b, dy, static_cast<std::uint64_t>(tag)); p64(b, dy + 8, v); dy += 16; };
+  dyn(6, 0x500); dyn(5, 0x548); dyn(10, strsz); dyn(11, 24); dyn(7, 0x580); dyn(8, 24 * G_N); dyn(9, 24); dyn(0, 0);
+  return b;
+}
+
 std::vector<std::uint8_t> build_synthetic_lifecycle_elf(const LifecycleSpec& spec) {
   std::vector<std::uint8_t> b(0x4c0, 0);
   const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
