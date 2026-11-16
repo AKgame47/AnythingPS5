@@ -1165,3 +1165,17 @@ failures, before more texture features land on the shim.
   prevented copies/moves before this change).
 - Scope: normal descriptor ownership and table teardown, not concurrent destruction,
   allocation-failure injection, guest-pointer validation or Sony ABI verification.
+
+
+## Slice S47 notes (file-open ownership handoff)
+- A noncopyable/nonmovable pending descriptor guard now owns the host fd immediately
+  after successful open, through lock acquisition, path-string construction and map
+  insertion. Ownership transfers only after successful emplace. An insertion failure
+  or exception closes the pending fd without a catch that hides the exception.
+- Guest descriptor numbering advances only after insertion succeeds. The table's S46
+  destructor remains responsible for descriptors after transfer.
+- Nine runtime checks exercise guard scope exit, explicit exception unwinding with the
+  original exception preserved, and release/repeated release. Four compile-time checks
+  prohibit copying/moving the pending owner. Existing file/table tests cover successful
+  insertion and later teardown. Actual allocator or mutex failures are not injected;
+  exception coverage is the guard's explicit unwind probe, not the entire open path.
