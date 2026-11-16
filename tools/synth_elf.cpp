@@ -412,6 +412,94 @@ std::vector<std::uint8_t> build_synthetic_libc_elf() {
   return b;
 }
 
+// Slice S35 (review follow-up): fixed-signature floating point calls. Imports printf plus three
+// real-libc FP functions and exercises, with byte-checked expectations: printf with 8 doubles
+// (xmm0..xmm7, the full FP argument register set); fmod(double,double) returning double in xmm0;
+// fmaxf(float,float) with deliberate garbage in the upper 32 bits of each lane so only correct
+// low-32 float32 decoding produces the expected result; ldexp(double,int) mixing the FP and GP
+// argument pools (double in xmm0, int in the first GP slot); and xmm0 FP returns throughout.
+std::vector<std::uint8_t> build_synthetic_fp_elf() {
+  std::vector<std::uint8_t> b(0x780, 0);
+  const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
+  std::memcpy(b.data(), ident, 8);
+  p16(b, 0x10, 3); p16(b, 0x12, 62); p32(b, 0x14, 1);
+  p64(b, 0x18, 0x100); p64(b, 0x20, 0x40);
+  p16(b, 0x34, 64); p16(b, 0x36, 56); p16(b, 0x38, 2); p16(b, 0x3A, 64);
+  const std::size_t total = b.size();
+  p32(b, 0x40, 1); p32(b, 0x44, 7); p64(b, 0x48, 0); p64(b, 0x50, 0); p64(b, 0x58, 0); p64(b, 0x60, total); p64(b, 0x68, total); p64(b, 0x70, 0x1000);
+  p32(b, 0x78, 2); p32(b, 0x7C, 6); p64(b, 0x80, 0x700); p64(b, 0x88, 0x700); p64(b, 0x90, 0x700); p64(b, 0x98, 0x80); p64(b, 0xA0, 0x80); p64(b, 0xA8, 8);
+  auto str = [&](std::size_t at, const char* s) { std::memcpy(&b[at], s, std::strlen(s) + 1); };
+  const std::size_t FMT8 = 0x400;
+  str(FMT8, "%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f\n");
+  enum { G_PRINTF, G_FMOD, G_FMAXF, G_LDEXP, G_N };
+  std::size_t pc = 0x100;
+  std::vector<std::size_t> fails;
+  auto emit = [&](std::initializer_list<int> bytes) { for (int v : bytes) b[pc++] = static_cast<std::uint8_t>(v); };
+  auto imm32 = [&](std::uint32_t v) { p32(b, pc, v); pc += 4; };
+  auto call = [&](int g) { emit({0xFF, 0x15}); p32(b, pc, static_cast<std::uint32_t>(0x480 + 8 * g - (pc + 4))); pc += 4; };
+  auto rip = [&](std::initializer_list<int> op, std::size_t target) { emit(op); p32(b, pc, static_cast<std::uint32_t>(target - (pc + 4))); pc += 4; };
+  auto check = [&](int ok_jcc, int n) { emit({ok_jcc, 10, 0xB8}); imm32(n); emit({0xE9}); fails.push_back(pc); pc += 4; };
+  auto xmm_load = [&](int lane, std::uint64_t bits) {
+    emit({0x48, 0xB8}); p64(b, pc, bits); pc += 8;                 // mov rax, imm64
+    emit({0x66, 0x48, 0x0F, 0x6E, 0xC0 + 8 * lane});              // movq xmmK, rax
+  };
+
+  emit({0x53, 0x48, 0x83, 0xEC, 0x60});  // push rbx; sub rsp,0x60 (calls run 16-byte aligned)
+  // printf with 8 double arguments: xmm0..xmm7 all carry live values.
+  rip({0x48, 0x8D, 0x3D}, FMT8);
+  const std::uint64_t one_to_eight[8] = {0x3FF0000000000000ULL, 0x4000000000000000ULL, 0x4008000000000000ULL, 0x4010000000000000ULL,
+                                         0x4014000000000000ULL, 0x4018000000000000ULL, 0x401C000000000000ULL, 0x4020000000000000ULL};  // 1.0 .. 8.0
+  for (int k = 0; k < 8; ++k) xmm_load(k, one_to_eight[k]);
+  emit({0xB0, 0x08});                                            // mov al, 8 (vector register count)
+  call(G_PRINTF);
+  emit({0x48, 0x83, 0xF8, 0x20}); check(0x74, 1);                // "1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0\n" is 32 chars
+  // fmod(7.5, 2.0) == 1.5, returned in xmm0.
+  xmm_load(0, 0x401E000000000000ULL);                            // 7.5
+  xmm_load(1, 0x4000000000000000ULL);                            // 2.0
+  call(G_FMOD);
+  emit({0x66, 0x48, 0x0F, 0x7E, 0xC0});                          // movq rax, xmm0
+  emit({0x48, 0xBB}); p64(b, pc, 0x3FF8000000000000ULL); pc += 8;  // mov rbx, 1.5 bits
+  emit({0x48, 0x39, 0xD8}); check(0x74, 2);                      // cmp rax, rbx
+  // fmaxf(1.5f, 0.25f) == 1.5f with garbage in the upper 32 bits of both lanes: only decoding
+  // the low 32 bits as float32 yields the expected bits.
+  xmm_load(0, 0xDEADBEEF3FC00000ULL);                            // upper garbage | 1.5f
+  xmm_load(1, 0x123456783E800000ULL);                            // upper garbage | 0.25f
+  call(G_FMAXF);
+  emit({0x66, 0x48, 0x0F, 0x7E, 0xC0});                          // movq rax, xmm0
+  emit({0x3D}); imm32(0x3FC00000); check(0x74, 3);               // cmp eax, 1.5f bits (low 32)
+  // ldexp(3.0, 2) == 12.0: mixed pools (FP argument in xmm0, integer in the first GP slot).
+  xmm_load(0, 0x4008000000000000ULL);                            // 3.0
+  emit({0xBF}); imm32(2);                                        // mov edi, 2
+  call(G_LDEXP);
+  emit({0x66, 0x48, 0x0F, 0x7E, 0xC0});                          // movq rax, xmm0
+  emit({0x48, 0xBB}); p64(b, pc, 0x4028000000000000ULL); pc += 8;  // mov rbx, 12.0 bits
+  emit({0x48, 0x39, 0xD8}); check(0x74, 4);                      // cmp rax, rbx
+  emit({0x31, 0xC0});
+  const std::size_t epi = pc;
+  emit({0x48, 0x83, 0xC4, 0x60, 0x5B, 0xC3});
+  for (std::size_t f : fails) p32(b, f, static_cast<std::uint32_t>(epi - (f + 4)));
+
+  // Symbol table must sit immediately before the string table: the loader derives the symbol
+  // count as (strtab - symtab) / 24.
+  const char* names[G_N] = {"printf", "fmod", "fmaxf", "ldexp"};
+  std::size_t so = 0x580 + 1;
+  for (int i = 0; i < G_N; ++i) {
+    const std::string nm = pnr::loader::nid::compute_nid(names[i], "") + "#A#A";
+    const std::size_t sy = 0x500 + 24 * (i + 1);
+    p32(b, sy, static_cast<std::uint32_t>(so - 0x580)); b[sy + 4] = 0x12; p16(b, sy + 6, 0);
+    std::memcpy(&b[so], nm.c_str(), nm.size() + 1); so += nm.size() + 1;
+  }
+  const std::size_t strsz = so - 0x580;
+  for (int i = 0; i < G_N; ++i) {
+    const std::size_t r = 0x600 + 24 * i;
+    p64(b, r, 0x480 + 8 * i); p64(b, r + 8, (static_cast<std::uint64_t>(i + 1) << 32) | 6); p64(b, r + 16, 0);
+  }
+  std::size_t dy = 0x700;
+  auto dyn = [&](std::int64_t tag, std::uint64_t v) { p64(b, dy, static_cast<std::uint64_t>(tag)); p64(b, dy + 8, v); dy += 16; };
+  dyn(6, 0x500); dyn(5, 0x580); dyn(10, strsz); dyn(11, 24); dyn(7, 0x600); dyn(8, 24 * G_N); dyn(9, 24); dyn(0, 0);
+  return b;
+}
+
 std::vector<std::uint8_t> build_synthetic_lifecycle_elf(const LifecycleSpec& spec) {
   std::vector<std::uint8_t> b(0x4c0, 0);
   const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
