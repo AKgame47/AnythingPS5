@@ -787,6 +787,32 @@ int main() {
     CHECK(wfd >= 3, "fs: create file");
     CHECK(table.write(wfd, "abc", 3) == 3, "fs: write bytes");
     CHECK(table.close(wfd) == pnr::prx::SCE_OK, "fs: close write");
+    // S38: write -> close -> reopen -> read-back round trip through the table
+    const std::int64_t wfd2 = table.open(
+        "/out/round.bin", pnr::prx::SCE_KERNEL_O_WRONLY | pnr::prx::SCE_KERNEL_O_CREAT);
+    CHECK(wfd2 >= 3, "fs: create round-trip file");
+    CHECK(table.write(wfd2, "pnr-write-42", 12) == 12, "fs: write 12 bytes");
+    CHECK(table.close(wfd2) == pnr::prx::SCE_OK, "fs: close round-trip write");
+    const std::int64_t rfd2 = table.open("/out/round.bin",
+                                         pnr::prx::SCE_KERNEL_O_RDONLY);
+    CHECK(rfd2 >= 3, "fs: reopen written file");
+    char wb[16] = {};
+    CHECK(table.read(rfd2, wb, 12) == 12 && std::string(wb, 12) == "pnr-write-42",
+          "fs: read-back matches written bytes");
+    CHECK(table.write(rfd2, "zz", 2) < 0, "fs: write on read-only fd fails");
+    CHECK(table.close(rfd2) == pnr::prx::SCE_OK, "fs: close read-back fd");
+    CHECK(table.write(9999, "zz", 2) == pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+          "fs: write on unknown fd EINVAL");
+    // /app0 prefix also applies to creates (guest fixture writes /app0/out.bin)
+    const std::int64_t awfd = table.open(
+        "/app0/created.txt", pnr::prx::SCE_KERNEL_O_WRONLY | pnr::prx::SCE_KERNEL_O_CREAT);
+    CHECK(awfd >= 3, "fs: create through /app0 prefix");
+    CHECK(table.write(awfd, "ok", 2) == 2, "fs: write through /app0 fd");
+    CHECK(table.close(awfd) == pnr::prx::SCE_OK, "fs: close /app0 write fd");
+    std::ifstream created(fsroot + "/created.txt");
+    std::string created_body((std::istreambuf_iterator<char>(created)),
+                             std::istreambuf_iterator<char>());
+    CHECK(created_body == "ok", "fs: /app0 create landed at the jail root");
     // traversal rejected by the jail, never touches host
     CHECK(table.open("../../etc/passwd", pnr::prx::SCE_KERNEL_O_RDONLY) ==
               pnr::prx::SCE_KERNEL_ERROR_EINVAL,
