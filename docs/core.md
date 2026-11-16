@@ -17,8 +17,9 @@ road, not the end of it.
 | Entry parameters: `entry(args, exit_handler)`, args block with argc, argv, no envp | Implemented, Tested (PNR's own convention for the args block, not verified against a console) |
 | Sony protection and mmap flag translation, `mmap` (anonymous only), clock id translation and `sceKernelClockGettime` | Implemented, Tested. Only SHARED, PRIVATE, FIXED and ANON are FreeBSD-standard values. NO_OVERWRITE, NOCORE, NO_COALESCE, GPU bits and clock ids come from public homebrew knowledge, not verified on a console. Unknown bits are refused |
 | Guest threads and mutexes: `scePthreadCreate`, `scePthreadJoin`, `scePthreadSelf`, `scePthreadMutex{Init,Lock,Unlock,Destroy}` | Implemented, Tested (32 threads at once; no condition variables, rwlocks, TLS keys or thread attributes yet) |
-| Init/fini arrays, dependent modules | Planned |
-| libSceLibcInternal subset: memmove memcmp memchr strcpy strncpy strcat strncmp strchr strrchr strstr calloc realloc snprintf sprintf puts putchar atoi strtol abs labs toupper tolower isdigit isalpha isspace srand rand exit, plus the earlier printf malloc free memcpy memset strlen strcmp (`prx/libc_abi`) | Implemented, Tested (unit and from machine code) |
+| Init/fini arrays and atexit: DT_INIT then DT_INIT_ARRAY (file order) run before the entry point; libc atexit handlers (LIFO), DT_FINI_ARRAY (reverse order) and DT_FINI run when the guest calls exit() or its entry returns. Ordering follows the System V gABI; PlayStation's exact init-argument convention is unverified on hardware, so init functions receive the same (args, exit) pair the entry gets | Implemented, Tested on synthetic modules only |
+| Dependent modules (loading the files named by DT_NEEDED) | Planned |
+| libSceLibcInternal subset: memmove memcmp memchr strcpy strncpy strcat strncmp strchr strrchr strstr calloc realloc snprintf sprintf puts putchar atoi strtol abs labs toupper tolower isdigit isalpha isspace srand rand atexit exit, plus the earlier printf malloc free memcpy memset strlen strcmp (`prx/libc_abi`) | Implemented, Tested (unit and from machine code) |
 | C-style formatter: flags `-` and `0`, width, length h hh l ll z j t, conversions d i u x X o c s p | Implemented, Tested. Floating point formats are NOT supported and print literally |
 | libSceSysmodule `LoadModule`, `IsLoaded`, `UnloadModule` | Experimental stubs: ids are recorded, nothing is loaded, id values unverified |
 | Libc imports beyond this subset, floating point arguments, qsort and other callbacks into guest code | Planned |
@@ -62,6 +63,21 @@ makes the load fail with a message naming it, and nothing runs.
 - `%d` without `l` now has C semantics (32-bit), so a negative int passed in a register prints correctly.
 - These functions trust the guest's pointers like a real libc. A bad pointer crashes the guest child, not the launcher.
 - `sprintf` is capped at 4096 bytes. `rand` is PNR's own generator, not Sony's.
+
+## Slice S32 notes (module lifecycle)
+- `pnr_make_ps_elf OUT.elf --lifecycle` builds a module with DT_INIT, two DT_INIT_ARRAY entries, two
+  DT_FINI_ARRAY entries and DT_FINI. Each lifecycle function prints one letter through the bound putchar;
+  the entry registers two atexit handlers and returns 55. `--lifecycle-exit` makes the entry call exit(42)
+  instead. Both MUST print the letters in exactly the order `IABE21yxF`: DT_INIT, init array in file order,
+  entry, atexit handlers LIFO, fini array reversed, DT_FINI.
+- The init/fini array CONTENTS are relocated by R_X86_64_RELATIVE like any other data; the loader reads the
+  relocated (absolute) entries after its relocation pass. Malformed lifecycle tags (odd sizes, addresses
+  outside the image) refuse the load and nothing runs.
+- atexit takes a guest function pointer; the table holds 32 entries (a PNR limit, not a Sony value).
+  Handlers and fini functions run with the guest FS base, including when exit() is called from a thunk.
+- Ordering follows the System V gABI. PlayStation's own init-argument convention is unverified on hardware;
+  PNR passes init functions the same (args, exit) pair the entry point gets. Only the module's own functions
+  run: dependent modules named by DT_NEEDED are still not loaded (Planned).
 
 ## Slice C4a notes (PM4 decode)
 - PM4 is the AMD packet format. This slice only decodes packets and tracks registers; it submits nothing to Vulkan.
@@ -559,7 +575,7 @@ the full unit suite's negative tests) remains software-output verified only.
   VkMemoryAllocateInfo.sType (VUID-VkMemoryAllocateInfo-sType-sType). Fixed;
   the sweep now runs with zero layer errors.
 - ctest `pnr_vulkan_validation` runs the sweep and fails on any "Validation
-  Error" in its output (23/23 suites in the default build, 25/25 with the
+  Error" in its output (25/25 suites in the default build, 27/27 with the
   window build). CI gained a `linux-validation` job that installs
   vulkan-validationlayers and treats a SKIP as a failure, so the layer run
   is guaranteed real there.
