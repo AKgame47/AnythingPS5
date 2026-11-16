@@ -100,6 +100,8 @@ bool guest_active();
 // Guest threads. Handles are opaque.
 std::int64_t guest_thread_create(std::int64_t* out_handle, std::int64_t entry, std::int64_t arg);
 std::int64_t guest_thread_join(std::int64_t handle, std::int64_t* ret);
+// Mutex values are registry IDs, not host pointers. Storage pointers must still be valid.
+// Destroy refuses held/in-flight objects, and leaves the handle intact on failure.
 std::int64_t guest_mutex_op(int op, std::int64_t* handle);  // 0 init 1 lock 2 unlock 3 destroy
 std::int64_t guest_thread_self();
 
