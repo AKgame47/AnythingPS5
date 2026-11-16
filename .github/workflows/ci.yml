@@ -62,3 +62,23 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: ctest --test-dir build-asan --output-on-failure -R '^pnr_psgame_workflow$'
+
+  linux-validation:
+    name: Linux x86-64 Vulkan validation layer
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++ make libsqlite3-0 libcurl4 libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
+      - name: Configure (fresh Release, -Werror)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-Werror
+      - name: Build
+        run: cmake --build build -j2
+      - name: Validation sweep under VK_LAYER_KHRONOS_validation
+        run: |
+          ./build/pnr_validation_sweep 2>&1 | tee sweep.log
+          ! grep -q '^SKIP' sweep.log   # the layer is installed above; a skip here is a failure
+          ! grep -q 'Validation Error' sweep.log
