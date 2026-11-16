@@ -48,7 +48,9 @@ void pnr_cxx_tests(int& pass, int& fail) {
   auto call = [&](const char* name, std::vector<std::int64_t> a) -> std::int64_t {
     const pnr::prx::PrxSymbol* s = reg.find_name(name);
     if (!s || !s->implemented) return -999999;
-    return s->invoke(a);
+    pnr::prx::GuestCallArgs g{};
+    for (std::size_t k = 0; k < a.size() && k < 6; ++k) g.i[k] = a[k];
+    return s->invoke(g);
   };
   auto P = [](const void* p) { return reinterpret_cast<std::int64_t>(p); };
 
