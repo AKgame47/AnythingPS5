@@ -13,11 +13,20 @@
 //  - C2 added: PT_TLS setup (variant II TCB), entry(args, exit_handler), guest FS switching
 //    around host calls.
 //  - S32 added: DT_INIT/DT_INIT_ARRAY run before entry; atexit handlers (LIFO), DT_FINI_ARRAY
-//    (reverse) and DT_FINI run on exit. Dependent modules (DT_NEEDED files) are still not loaded.
+//    (reverse) and DT_FINI run on exit.
+//  - S33 added: dependent modules. A DT_NEEDED name matching a module file found in the search
+//    directories (the main module's directory, its sce_module/sce_modules/prx subdirectories,
+//    plus any directories the caller adds) is loaded as a guest module, recursively, before the
+//    module that needs it. Bundled modules take precedence over the host PRX registry (console
+//    semantics, same as AnyPS5's relinker); a needed name with no matching file is assumed
+//    firmware-provided and stays host-bound. Limits: dependent modules with PT_TLS are refused,
+//    at most 32 modules per tree, cyclic dependencies are refused, and a name matching two
+//    different files is an ambiguity error. Symbol exports are resolved first-loaded-wins.
 #pragma once
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/runtime.hpp"
@@ -42,7 +51,17 @@ class ModuleImage {
   // relocation, so RELATIVE entries in the file are already absolute here. File order kept.
   std::uint64_t init_fn = 0, fini_fn = 0;
   std::vector<std::uint64_t> init_array, fini_array;
+  // Slice S33: module identity and exports for dependent-module binding.
+  std::string soname;                             // DT_SONAME (empty when absent)
+  std::vector<std::string> needed_names;          // DT_NEEDED strings, file order
+  std::vector<std::pair<std::string, std::uint64_t>> exports;  // defined dynamic symbols, absolute
   std::uint8_t* entry() const { return base + entry_vaddr; }
+};
+
+// Slice S33: a loaded module tree. images holds dependencies first (post-order), main module last.
+struct ModuleTree {
+  std::vector<std::unique_ptr<ModuleImage>> images;
+  ModuleImage* main() const { return images.empty() ? nullptr : images.back().get(); }
 };
 
 struct ModuleLoadReport {
@@ -68,5 +87,21 @@ pnr::Status load_module(const std::string& path, const pnr::prx::PrxRegistry& re
 // Loads, then runs the entry point `int entry(void* args, void (*exit)(void))` in a forked child.
 pnr::Status run_module(const std::string& path, const pnr::prx::PrxRegistry& reg, ModuleRunResult* result,
                        ModuleLoadReport* report);
+
+// Slice S33: loads the main module and every dependent module named by its DT_NEEDED entries
+// (recursively) that exists as a file in the search directories. Search order: caller's
+// module_dirs first, then the main module's own directory, then its sce_module, sce_modules and
+// prx subdirectories. A needed name matches a file by exact name or by name without a .prx/.sprx
+// suffix (PS module stem convention); matching two files is an ambiguity error. Bundled guest
+// modules are bound BEFORE the host PRX registry. Dependencies' init runs before the dependent's,
+// fini in exact reverse order; atexit handlers still run first, as one global LIFO list (a real
+// dynamic loader interleaves them per module; PNR does not track the dso handle, so this
+// ordering is a documented simplification).
+pnr::Status load_module_tree(const std::string& main_path, const std::vector<std::string>& module_dirs,
+                             const pnr::prx::PrxRegistry& reg, std::unique_ptr<ModuleTree>* out, ModuleLoadReport* report);
+
+// Loads the tree, then runs the main module's entry point in a forked child.
+pnr::Status run_module_tree(const std::string& main_path, const std::vector<std::string>& module_dirs,
+                            const pnr::prx::PrxRegistry& reg, ModuleRunResult* result, ModuleLoadReport* report);
 
 }  // namespace pnr::loader
