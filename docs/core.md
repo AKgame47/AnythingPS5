@@ -468,6 +468,41 @@ makes the load fail with a message naming it, and nothing runs.
 - Limits: thin (2D, single-slice) modes only - no thick/3D modes, arrays or depth
   sampling; sampling is still not translated RDNA; hardware GPU untested.
 
+## Slice S29 notes (Vulkan validation-layer coverage)
+Evidence levels are now stated separately, per policy: **software-output
+verified** = byte-exact renders on lavapipe (tolerates wrong-but-plausible
+configuration); **validation-layer clean** = the same paths also ran under
+VK_LAYER_KHRONOS_validation with zero layer errors. Only the paths listed
+below hold the second level; everything else in PNR (swapchain/present,
+depth/stencil, blending, multi-frame surfaces, non-default sampler modes,
+the full unit suite's negative tests) remains software-output verified only.
+
+- `tests/validation_sweep.cpp` (`pnr_validation_sweep`): one instance/device
+  with the layer explicitly requested, then each shipped texture/draw path
+  once: untextured PVS1 `execute_draw` (base pipeline + translated-RDNA
+  compute vertex stage + colour-target copyback), plain 2D texture,
+  mip-chain 2D texture, sRGB 2D texture, 2D array (2D_ARRAY view), cubemap
+  (CUBE_COMPATIBLE image + CUBE view). It SKIPs honestly when the layer or a
+  Vulkan device is absent: the loader only warns about a missing env-forced
+  layer, so the sweep checks vkEnumerateInstanceLayerProperties itself
+  before claiming coverage.
+- First real run caught a live bug the rasterizer never cared about:
+  render.cpp's colour-target allocation never set
+  VkMemoryAllocateInfo.sType (VUID-VkMemoryAllocateInfo-sType-sType). Fixed;
+  the sweep now runs with zero layer errors.
+- ctest `pnr_vulkan_validation` runs the sweep and fails on any "Validation
+  Error" in its output (23/23 suites in the default build, 25/25 with the
+  window build). CI gained a `linux-validation` job that installs
+  vulkan-validationlayers and treats a SKIP as a failure, so the layer run
+  is guaranteed real there.
+- Local run without system packages: extract the jammy
+  vulkan-validationlayers deb anywhere and point the loader at it:
+  `VK_LAYER_PATH=<dir>/usr/share/vulkan/explicit_layer.d
+  LD_LIBRARY_PATH=<dir>/usr/lib/x86_64-linux-gnu ./pnr_validation_sweep`.
+- Compile-time companion: tests/vulkan_enum_check_tests.cpp (S28) audits
+  constant VALUES; this slice audits API CALLS at runtime. Neither covers a
+  real hardware GPU.
+
 ## Slice S28 notes (cubemaps)
 - Cube T# images (type 11, value from public shadPS4 resource.h ImageType)
   are accepted: a single cubemap = exactly 6 faces, square extent, linear
