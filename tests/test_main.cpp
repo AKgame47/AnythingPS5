@@ -609,11 +609,11 @@ int main() {
     {
       const std::string nid_sleep =
           pnr::loader::nid::compute_nid("sceKernelUsleep", "libkernel");
-      std::function<std::int64_t(const std::vector<std::int64_t>&)> fn;
+      std::function<std::int64_t(const pnr::prx::GuestCallArgs&)> fn;
       std::string err;
       CHECK(reg.bind(nid_sleep, &fn, &err) == pnr::prx::SCE_OK,
             "prx: bind implemented NID");
-      CHECK(fn({1000}) == pnr::prx::SCE_OK, "prx: bound trampoline runs");
+      CHECK(fn({{1000}}) == pnr::prx::SCE_OK, "prx: bound trampoline runs");
       const std::string nid_mmap =
           pnr::loader::nid::compute_nid("sceKernelReserveVirtualRange", "libkernel");
       CHECK(reg.find(nid_mmap) != nullptr, "prx: reserveVirtualRange in taxonomy");
@@ -674,19 +674,19 @@ int main() {
 
     // bounded printf core (subset is documented, others literal)
     CHECK(pnr::prx::sce_libc_printf("v=%d x=%x s=%s c=%c %% q=%q",
-                                    {42, 255, reinterpret_cast<std::int64_t>("hi"),
-                                     'Z'}) == 0 ||
+                                    {{42, 255, reinterpret_cast<std::int64_t>("hi"),
+                                     'Z'}}, 0) == 0 ||
           true, "libc: printf runs");  // return is length; output checked below
     // NID binding now resolves these as implemented
     pnr::prx::PrxRegistry reg;
-    std::function<std::int64_t(const std::vector<std::int64_t>&)> fn;
+    std::function<std::int64_t(const pnr::prx::GuestCallArgs&)> fn;
     std::string err;
     const std::string nid_strlen =
         pnr::loader::nid::compute_nid("strlen", "libSceLibcInternal");
     CHECK(reg.bind(nid_strlen, &fn, &err) == pnr::prx::SCE_OK,
           "libc: strlen binds implemented");
     const char* probe = "abcdef";
-    CHECK(fn({reinterpret_cast<std::int64_t>(probe)}) == 6,
+    CHECK(fn({{reinterpret_cast<std::int64_t>(probe)}}) == 6,
           "libc: bound strlen returns 6");
     const std::string nid_memcmp_unknown =
         pnr::loader::nid::compute_nid("sceKernelNotARealSymbol", "libkernel");
@@ -732,19 +732,19 @@ int main() {
           "mm: query foreign EINVAL");
     // NID-bound path
     pnr::prx::PrxRegistry reg;
-    std::function<std::int64_t(const std::vector<std::int64_t>&)> fn;
+    std::function<std::int64_t(const pnr::prx::GuestCallArgs&)> fn;
     std::string err;
     CHECK(reg.bind(pnr::loader::nid::compute_nid("sceKernelMapMemory",
                                                  "libkernel"),
                    &fn, &err) == pnr::prx::SCE_OK,
           "mm: mapMemory binds implemented");
-    const std::int64_t mapped = fn({4096, pnr::prx::SCE_KERNEL_PROT_READ |
-                                            pnr::prx::SCE_KERNEL_PROT_WRITE});
+    const std::int64_t mapped = fn({{4096, pnr::prx::SCE_KERNEL_PROT_READ |
+                                            pnr::prx::SCE_KERNEL_PROT_WRITE}});
     CHECK(mapped != 0, "mm: bound map works");
     CHECK(reg.bind(pnr::loader::nid::compute_nid("sceKernelMunmap", "libkernel"),
                    &fn, &err) == pnr::prx::SCE_OK,
           "mm: munmap binds");
-    CHECK(fn({mapped, 4096}) == pnr::prx::SCE_OK, "mm: bound unmap works");
+    CHECK(fn({{mapped, 4096}}) == pnr::prx::SCE_OK, "mm: bound unmap works");
   }
 
   // --- libkernel file calls over the jailed filesystem ---
@@ -759,7 +759,7 @@ int main() {
 
     // declared-only until installed (honest)
     pnr::prx::PrxRegistry reg;
-    std::function<std::int64_t(const std::vector<std::int64_t>&)> fn;
+    std::function<std::int64_t(const pnr::prx::GuestCallArgs&)> fn;
     std::string err;
     const std::string nid_open =
         pnr::loader::nid::compute_nid("sceKernelOpen", "libkernel");
@@ -800,14 +800,14 @@ int main() {
     CHECK(reg.bind(nid_open, &fn, &err) == pnr::prx::SCE_OK,
           "fs: open binds after install");
     const std::string path = "/data/hello.txt";
-    const std::int64_t bfd = fn({reinterpret_cast<std::int64_t>(path.c_str()),
-                                 pnr::prx::SCE_KERNEL_O_RDONLY});
+    const std::int64_t bfd = fn({{reinterpret_cast<std::int64_t>(path.c_str()),
+                                 pnr::prx::SCE_KERNEL_O_RDONLY}});
     CHECK(bfd >= 3, "fs: bound open");
     CHECK(reg.bind(pnr::loader::nid::compute_nid("sceKernelRead", "libkernel"),
                    &fn, &err) == pnr::prx::SCE_OK,
           "fs: read binds");
     char b2[16] = {};
-    CHECK(fn({bfd, reinterpret_cast<std::int64_t>(b2), 5}) == 5 &&
+    CHECK(fn({{bfd, reinterpret_cast<std::int64_t>(b2), 5}}) == 5 &&
               std::string(b2, 5) == "hello",
           "fs: bound read");
     table.close(bfd);
