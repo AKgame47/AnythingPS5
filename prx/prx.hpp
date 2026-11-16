@@ -92,6 +92,12 @@ class PrxRegistry {
   // once during setup.
   void install_file_calls(PsFileTable* table);
 
+  // Test-only ABI scaffolding for the regression suite: clearly synthetic host
+  // imports (library "libpnrtest"), NOT Sony APIs. Used to prove ABI capture
+  // properties (e.g. the 7th scalar stack argument) without inventing a Sony
+  // signature. Installed only on explicit request (PNR_TEST_IMPORTS).
+  void install_synthetic_test_calls();
+
  private:
   std::vector<PrxSymbol> symbols_;
 };
