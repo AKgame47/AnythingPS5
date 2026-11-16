@@ -5,6 +5,8 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <cerrno>
+#include <fcntl.h>
 #include <string>
 #if defined(_WIN32)
   #include <windows.h>
@@ -897,6 +899,59 @@ int main() {
       CHECK(invoke(p, 0, start, end, prot) == SCE_KERNEL_ERROR_EINVAL,
             "query: absent outputs do not bypass mapping validation");
     }
+  }
+
+  // --- S46: table destruction closes only descriptors it still owns ---
+  {
+    const std::string root = "/tmp/pnr_fd_lifetime_" + std::to_string(::getpid());
+    std::filesystem::remove_all(root);
+    pnr::compat::FileSystemService fs(root);
+    CHECK(fs.write_file("/one", "one") && fs.write_file("/two", "two"),
+          "fd lifetime: unique files seeded");
+    auto host_fd_for = [&](const std::string& path) {
+      std::error_code ec;
+      for (const auto& item : std::filesystem::directory_iterator("/proc/self/fd")) {
+        const auto target = std::filesystem::read_symlink(item.path(), ec);
+        if (!ec && target == std::filesystem::path(path))
+          return std::stoi(item.path().filename().string());
+        ec.clear();
+      }
+      return -1;
+    };
+    const int unrelated = ::open("/dev/null", O_RDONLY);
+    CHECK(unrelated >= 0, "fd lifetime: unrelated host fd opened");
+    int first = -1, outstanding = -1, reused = -1;
+    {
+      pnr::prx::PsFileTable table(fs);
+      const auto one = table.open("/one", pnr::prx::SCE_KERNEL_O_RDONLY);
+      const auto two = table.open("/two", pnr::prx::SCE_KERNEL_O_RDONLY);
+      CHECK(one >= 3 && two >= 3, "fd lifetime: guest opens succeed");
+      first = host_fd_for(root + "/one");
+      outstanding = host_fd_for(root + "/two");
+      CHECK(first >= 0 && outstanding >= 0 && first != outstanding,
+            "fd lifetime: exact owned host fds identified");
+      CHECK(table.close(one) == pnr::prx::SCE_OK, "fd lifetime: explicit close succeeds");
+      errno = 0;
+      CHECK(first >= 0 && ::fcntl(first, F_GETFD) == -1 && errno == EBADF,
+            "fd lifetime: explicit close releases host fd");
+      // Reuse that exact number for an unrelated descriptor. Destructor must not close it.
+      if (first >= 0 && unrelated >= 0) reused = ::dup2(unrelated, first);
+      CHECK(reused == first && reused >= 0, "fd lifetime: explicitly closed fd number reused");
+      CHECK(table.close(one) == pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+            "fd lifetime: repeated guest close refused");
+      CHECK(reused >= 0 && ::fcntl(reused, F_GETFD) >= 0,
+            "fd lifetime: repeated guest close preserves reused host fd");
+    }
+    errno = 0;
+    CHECK(outstanding >= 0 && ::fcntl(outstanding, F_GETFD) == -1 && errno == EBADF,
+          "fd lifetime: destructor releases outstanding host fd");
+    CHECK(unrelated >= 0 && ::fcntl(unrelated, F_GETFD) >= 0,
+          "fd lifetime: destructor preserves unrelated host fd");
+    CHECK(reused >= 0 && ::fcntl(reused, F_GETFD) >= 0,
+          "fd lifetime: destructor preserves reused explicitly closed number");
+    if (reused >= 0) ::close(reused);
+    if (unrelated >= 0) ::close(unrelated);
+    std::filesystem::remove_all(root);
   }
 
   // --- libkernel file calls over the jailed filesystem ---
