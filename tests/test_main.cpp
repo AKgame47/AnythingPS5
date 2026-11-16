@@ -846,6 +846,59 @@ int main() {
           "range: allocation rounding overflow refused");
   }
 
+  // --- S44: NID-bound query must honor the helper's optional outputs ---
+  {
+    using namespace pnr::prx;
+    PrxRegistry reg;
+    std::function<std::int64_t(const GuestCallArgs&)> query;
+    std::string err;
+    CHECK(reg.bind(pnr::loader::nid::compute_nid("sceKernelQueryMemoryProtection",
+                                                 "libkernel"), &query, &err) == SCE_OK,
+          "query: bound wrapper available");
+    const auto page = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+    auto* p = static_cast<unsigned char*>(sceKernelMapMemory(page, 3));
+    CHECK(p != nullptr, "query: mapped page available");
+    if (p && query) {
+      void* const sentinel = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x1234));
+      auto invoke = [&](void* address, int mask, void*& start, void*& end,
+                        std::int64_t& prot) {
+        GuestCallArgs args{};
+        args.i[0] = reinterpret_cast<std::int64_t>(address);
+        args.i[1] = (mask & 1) ? reinterpret_cast<std::int64_t>(&start) : 0;
+        args.i[2] = (mask & 2) ? reinterpret_cast<std::int64_t>(&end) : 0;
+        args.i[3] = (mask & 4) ? reinterpret_cast<std::int64_t>(&prot) : 0;
+        return query(args);
+      };
+      // Every output combination, including all absent; interior input is valid.
+      for (int mask = 0; mask < 8; ++mask) {
+        void* start = sentinel; void* end = sentinel; std::int64_t prot = -77;
+        CHECK(invoke(p + 1, mask, start, end, prot) == SCE_OK,
+              "query: every optional-output combination succeeds");
+        CHECK(start == ((mask & 1) ? p : sentinel) &&
+                  end == ((mask & 2) ? p + page : sentinel) &&
+                  prot == ((mask & 4) ? 3 : -77),
+              "query: requested outputs accurate, omitted outputs untouched");
+      }
+      int foreign = 0;
+      void* start = sentinel; void* end = sentinel; std::int64_t prot = -77;
+      CHECK(invoke(&foreign, 7, start, end, prot) == SCE_KERNEL_ERROR_EINVAL,
+            "query: foreign address refused through binding");
+      CHECK(start == sentinel && end == sentinel && prot == -77,
+            "query: foreign failure leaves outputs untouched");
+      CHECK(invoke(nullptr, 7, start, end, prot) == SCE_KERNEL_ERROR_EINVAL,
+            "query: null address refused through binding");
+      CHECK(start == sentinel && end == sentinel && prot == -77,
+            "query: null failure leaves outputs untouched");
+      CHECK(sceKernelMunmap(p, page) == SCE_OK, "query: cleanup mapped page");
+      CHECK(invoke(p, 7, start, end, prot) == SCE_KERNEL_ERROR_EINVAL,
+            "query: removed mapping refused through binding");
+      CHECK(start == sentinel && end == sentinel && prot == -77,
+            "query: removed mapping leaves outputs untouched");
+      CHECK(invoke(p, 0, start, end, prot) == SCE_KERNEL_ERROR_EINVAL,
+            "query: absent outputs do not bypass mapping validation");
+    }
+  }
+
   // --- libkernel file calls over the jailed filesystem ---
   {
     const std::string fsroot =
