@@ -58,7 +58,9 @@ makes the load fail with a message naming it, and nothing runs.
   `--kernel-no-tls` drops PT_TLS and must exit 3.
 - Host calls need the host FS base (glibc keeps its own state there). Each import thunk switches FS to the host
   base, calls, and switches back. The guest TCB copies the host stack-protector canary so both sides agree.
-- `sceKernelMmap`-style 7-argument calls are not supported by the thunks.
+- No Sony 7-argument API signature is verified, so no Sony 7-arg call is bound. The thunks do capture the
+  7th scalar stack slot verbatim - proven end-to-end from guest machine code against a synthetic
+  test-only import (slice S40); binding any real Sony 7-arg API stays open until its signature is verified.
 - Linux only. Windows stays Blocked.
 
 ## Slice C3 notes
@@ -1048,3 +1050,20 @@ failures, before more texture features land on the shim.
 - Bounds of the claim: lseek (all three whences, negative offsets) and fstat (size +
   is_directory) are proven from guest machine code for regular files inside the jail.
   Directories, sockets and other fd kinds remain uncovered at module level.
+
+## Slice S40 notes (7th scalar argument proven via a synthetic import)
+- No Sony API has a verified 7-argument signature here, so the end-to-end proof uses a
+  clearly synthetic host import: libpnrtest pnrTestSevenScalarArgs, registered by
+  PrxRegistry::install_synthetic_test_calls() and installed in module-run ONLY when
+  PNR_TEST_IMPORTS=1. It is test scaffolding, not a Sony API, and production module runs
+  never expose it.
+- The --abi7 synthetic module puts 1..6 in rdi..r9, 700 in the first stack slot, calls the
+  import through its NID-bound PLT slot and checks rax == 721 in guest machine code, then
+  prints "abi7 ok" and exits 0. The host import sums the six register arguments and s[0]
+  (the first captured stack slot), so 721 only results when the 7th argument crosses the
+  boundary verbatim.
+- Table-level check: binding the synthetic NID and invoking with i[0..5]=1..6, s[0]=700 and
+  s[1] poisoned returns 721, so only the first stack slot feeds the 7th parameter.
+- Bounds of the claim: this proves capture of one 7th scalar 8-byte stack argument for a
+  known signature, per the SysV slot layout the thunk already copies. It says nothing about
+  any real Sony 7-arg API, whose signatures remain unverified and unbound.
