@@ -200,6 +200,9 @@ add_test(NAME pnr_filepos_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CM
 # Slice S40: 7th scalar (stack) argument end-to-end via the synthetic libpnrtest import
 # (test-only scaffolding installed under PNR_TEST_IMPORTS=1, not a Sony API).
 add_test(NAME pnr_abi7_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_abi7.elf --abi7 && out=$(PNR_TEST_IMPORTS=1 $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_abi7.elf) && echo \"$out\" | grep -q \"abi7 ok\" && echo \"$out\" | grep -q \"MODULE FINISHED: exit 0\"")
+# Slice S41: guest anonymous mmap/munmap through the existing 6-arg "mmap" binding
+# (Sony constants translated host-side); pattern write/read checked in guest code.
+add_test(NAME pnr_mmap_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_mmap.elf --mmap && out=$($<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_mmap.elf) && echo \"$out\" | grep -q \"mmap ok\" && echo \"$out\" | grep -q \"MODULE FINISHED: exit 0\"")
 add_test(NAME pnr_gnm_decode COMMAND sh -c "$<TARGET_FILE:pnr> gnm-synth ${CMAKE_BINARY_DIR}/synth_pm4.bin && $<TARGET_FILE:pnr> gnm-decode ${CMAKE_BINARY_DIR}/synth_pm4.bin | grep -q \"2 draws\"")
 add_test(NAME pnr_module_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_ok.elf && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_ok.elf")
 set_tests_properties(pnr_module_run PROPERTIES PASS_REGULAR_EXPRESSION "MODULE FINISHED: exit 30")
