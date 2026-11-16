@@ -11,7 +11,9 @@
 //  - up to 64 bound imports per process, each called with up to 6 integer arguments.
 //    No floating point arguments, no varargs beyond the 6 registers.
 //  - C2 added: PT_TLS setup (variant II TCB), entry(args, exit_handler), guest FS switching
-//    around host calls. Still no init/fini arrays and no dependent modules.
+//    around host calls.
+//  - S32 added: DT_INIT/DT_INIT_ARRAY run before entry; atexit handlers (LIFO), DT_FINI_ARRAY
+//    (reverse) and DT_FINI run on exit. Dependent modules (DT_NEEDED files) are still not loaded.
 #pragma once
 #include <cstdint>
 #include <memory>
@@ -36,6 +38,10 @@ class ModuleImage {
   std::uint64_t entry_vaddr = 0;
   TlsTemplate tls;
   std::vector<int> slots;  // thunk slots held by this image
+  // Slice S32 lifecycle: absolute addresses (0 = absent). Array contents are read AFTER
+  // relocation, so RELATIVE entries in the file are already absolute here. File order kept.
+  std::uint64_t init_fn = 0, fini_fn = 0;
+  std::vector<std::uint64_t> init_array, fini_array;
   std::uint8_t* entry() const { return base + entry_vaddr; }
 };
 
