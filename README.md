@@ -47,7 +47,7 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **3098/3098 unit tests, 22/22 CTest suites** on a fresh Linux
+Test state: **3098/3098 unit tests, 23/23 CTest suites** on a fresh Linux
 Release `-Werror` build with `spirv-val` configured (3003 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
@@ -248,6 +248,11 @@ are claimed.
 
 - `linux-release`: fresh Release `-Werror` build, the unit suite, then CTest.
 - `linux-asan`: ASan+UBSan build, unit suite and CTest with leak detection off.
+- `linux-validation` (slice S29): installs vulkan-validationlayers and runs
+  `pnr_validation_sweep` under VK_LAYER_KHRONOS_validation; a layer SKIP is a
+  failure there. This makes the listed texture/draw paths validation-layer
+  clean, which is a stronger claim than the software-output-verified renders
+  the rest of the graphics evidence rests on (see docs/core.md, S29).
   The one known artifact `pnr_psgame_workflow` runs in a separate step that
   cannot fail the job.
 
