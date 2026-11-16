@@ -1,6 +1,7 @@
 // PNR Graphics - draw from tracked GNM state (Core slice C4d), GPL-2.0. See gfx_draw.hpp for the ABI.
 #include "graphics/gfx_draw.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -359,7 +360,14 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
         return fail(r, "PPS2 blob version does not match the T# image type (v1 = Color2DArray, v2 = Cube, v3 = Color3D)");
       // For a 3D image the "slices" are the level-0 z-planes; per-level plane
       // counts shrink with the mip level (see `planes` inside the loops).
-      const std::uint32_t nslices = ts.type == 13 || ts.type == 11 ? ts.last_array + 1 : ts.type == 10 ? ts.depth : 1;
+      // Slice S31: an array's DEPTH field is the ALLOCATION layer count and
+      // base/last_array select the sampled view window (base must be 0); the
+      // guest holds the full allocation level-major, the host image gets the
+      // window. A cube is one 6-face cube (cube arrays refused at the T#).
+      const std::uint32_t nslices = ts.type == 13 ? std::min(ts.last_array + 1, ts.depth)
+                                    : ts.type == 11 ? 6 : ts.type == 10 ? ts.depth : 1;
+      const std::uint32_t alloc_slices = ts.type == 13 ? ts.depth
+                                         : ts.type == 11 ? ts.depth * 6 : nslices;
       if (ts.width > 256 || ts.height > 256)
         return fail(r, "T# extent is over 256x256 (this slice's rasterizer staging cap)");
       if (!mem.read(s_va, sw, sizeof sw)) return fail(r, "S# descriptor is not mapped: " + mem.last_error());
@@ -477,7 +485,10 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
                             texels.data() + off + std::size_t(s) * std::uint64_t(lw) * lh * 4, ts.num_format == 5);
           }
         }
-        src += src_row * rows * planes;
+        // The guest level stride spans the full ALLOCATION; only the view
+        // window's planes were copied out of it.
+        const std::uint32_t alloc_planes = want_3d ? planes : alloc_slices;
+        src += src_row * rows * alloc_planes;
         off += std::uint64_t(lw) * lh * 4 * planes;
       }
       tex.rgba = texels.data(); tex.w = ts.width; tex.h = ts.height;
