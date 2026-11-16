@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <string>
 
 #include "loader/guest_runtime.hpp"
@@ -159,6 +160,21 @@ void pnr_kernel_tests(int& pass, int& fail) {
     for (const char* n : {"scePthreadCondInit", "scePthreadCondWait", "scePthreadCondTimedwait", "scePthreadCondSignal", "scePthreadCondBroadcast", "scePthreadCondDestroy", "sceKernelCreateSema", "sceKernelWaitSema", "sceKernelSignalSema", "sceKernelDeleteSema"}) {
       const auto* sy = r2.find_name(n); if (!sy || !sy->implemented) all = false; }
     check(all, "sync: all 10 condition-variable and semaphore symbols are registered as implemented"); }
+
+  // S50: reject an extreme positive signal without evaluating overflowing addition.
+  {
+    std::int64_t h = 0;
+    check(guest_sema_create(&h, 1, 2) == 0, "sema-overflow: create with one available permit");
+    check(guest_sema_signal(h, std::numeric_limits<std::int64_t>::max()) == -3,
+          "sema-overflow: INT64_MAX signal refuses rather than overflowing count");
+    check(guest_sema_wait(h, 1, 0) == 0 && guest_sema_wait(h, 1, 0) == -4,
+          "sema-overflow: refused extreme signal preserves exactly one permit");
+    check(guest_sema_signal(h, 2) == 0 && guest_sema_wait(h, 2, 0) == 0,
+          "sema-overflow: exact remaining capacity still succeeds");
+    check(guest_sema_signal(h, 0) == -2 && guest_sema_signal(h, -1) == -2,
+          "sema-overflow: nonpositive signals remain invalid");
+    check(guest_sema_destroy(&h) == 0 && h == 0, "sema-overflow: cleanup clears the handle");
+  }
 
   // Entry args.
   auto args = build_entry_args({"/game/eboot.elf", "-x"});
