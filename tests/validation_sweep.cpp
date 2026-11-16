@@ -33,6 +33,7 @@
 #include "graphics/demo/tex_shaders.hpp"
 #include "graphics/demo/texarr_shaders.hpp"
 #include "graphics/demo/texcube_shaders.hpp"
+#include "graphics/demo/tex3d_shaders.hpp"
 #include "graphics/gfx_draw.hpp"
 #include "graphics/gpu_va.hpp"
 #include "graphics/pm4.hpp"
@@ -185,6 +186,15 @@ void sweep_array_and_cube(VulkanBackend& vk) {
     auto vb = quad10(0.0f, 0.0f, 1.0f);  // direction (0.25*, 0.25*, 1) after quad10 offsets
     auto st = vk.render_textured_array_clip_mesh_rgba(W, H, vert, frag, vb, kQuadIndices, false, tex, clear, &img);
     report(st.ok && img.size() == W * H * 4, "texture-cube", st.ok ? "" : st.error.message);
+  }
+  // 3D: 8x8x4 volume, sample w = 0.5 (S30).
+  {
+    const std::vector<std::uint32_t> frag(tex3d_frag, tex3d_frag + sizeof(tex3d_frag) / 4);
+    auto data = solid_tex(8 * 8, 4, 255, 255, 0);
+    TexInput tex; tex.rgba = data.data(); tex.w = 8; tex.h = 8; tex.depth = 4;
+    auto vb = quad10(0.0f, 0.0f, 0.5f);
+    auto st = vk.render_textured_array_clip_mesh_rgba(W, H, vert, frag, vb, kQuadIndices, false, tex, clear, &img);
+    report(st.ok && img.size() == W * H * 4, "texture-3d", st.ok ? "" : st.error.message);
   }
 }
 
