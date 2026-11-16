@@ -907,6 +907,41 @@ int main() {
     }
   }
 
+  // --- S47: pending fd ownership survives early exits and unwinding ---
+  {
+    using Pending = pnr::prx::detail::PendingFileDescriptor;
+    static_assert(!std::is_copy_constructible_v<Pending>);
+    static_assert(!std::is_copy_assignable_v<Pending>);
+    static_assert(!std::is_move_constructible_v<Pending>);
+    static_assert(!std::is_move_assignable_v<Pending>);
+    const int scoped = ::open("/dev/null", O_RDONLY);
+    CHECK(scoped >= 0, "pending fd: host open succeeds");
+    { Pending owner(scoped); }
+    errno = 0;
+    CHECK(scoped >= 0 && ::fcntl(scoped, F_GETFD) == -1 && errno == EBADF,
+          "pending fd: normal scope exit closes descriptor");
+    const int unwound = ::open("/dev/null", O_RDONLY);
+    CHECK(unwound >= 0, "pending fd: unwind probe opens");
+    bool caught = false;
+    try { Pending owner(unwound); throw 47; }
+    catch (int value) { caught = value == 47; }
+    CHECK(caught, "pending fd: original exception propagates");
+    errno = 0;
+    CHECK(unwound >= 0 && ::fcntl(unwound, F_GETFD) == -1 && errno == EBADF,
+          "pending fd: exception unwinding closes descriptor");
+    const int transferred = ::open("/dev/null", O_RDONLY);
+    CHECK(transferred >= 0, "pending fd: release probe opens");
+    {
+      Pending owner(transferred);
+      CHECK(owner.release() == transferred, "pending fd: release returns owned descriptor");
+      CHECK(owner.release() == -1, "pending fd: repeated release has no ownership");
+    }
+    CHECK(transferred >= 0 && ::fcntl(transferred, F_GETFD) >= 0,
+          "pending fd: released descriptor survives guard destruction");
+    if (transferred >= 0) ::close(transferred);
+    { Pending empty(-1); }
+  }
+
   // --- S46: table destruction closes only descriptors it still owns ---
   {
     const std::string root = "/tmp/pnr_fd_lifetime_" + std::to_string(::getpid());
