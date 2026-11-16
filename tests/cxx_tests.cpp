@@ -3,10 +3,13 @@
 // No PlayStation file is used.
 #include <unistd.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
 #include <fstream>
 #include <string>
+#include <thread>
 
 #include "loader/guest_runtime.hpp"
 #include "loader/module_loader.hpp"
@@ -49,13 +52,25 @@ void pnr_cxx_tests(int& pass, int& fail) {
   };
   auto P = [](const void* p) { return reinterpret_cast<std::int64_t>(p); };
 
-  // __cxa_guard_*: first acquire takes it, second does not, release sets the byte, abort clears.
-  { std::uint8_t g = 0;
-    check(call("__cxa_guard_acquire", {P(&g)}) == 1, "cxx: guard acquire on an uninitialized guard takes it");
-    check(call("__cxa_guard_acquire", {P(&g)}) == 1, "cxx: guard acquire during an in-progress init does not block (documented simplification)");
-    check(call("__cxa_guard_abort", {P(&g)}) == 0 && g == 0, "cxx: guard abort leaves the guard uninitialized");
-    check(call("__cxa_guard_release", {P(&g)}) == 0 && g == 1, "cxx: guard release marks the guard initialized");
-    check(call("__cxa_guard_acquire", {P(&g)}) == 0, "cxx: guard acquire after release does not take it");
+  // __cxa_guard_*: first acquire takes it; a concurrent acquire BLOCKS until the initializer
+  // releases (one static is never initialized twice); abort clears and re-arms.
+  { std::uint8_t g[8] = {};
+    check(call("__cxa_guard_acquire", {P(g)}) == 1, "cxx: guard acquire on an uninitialized guard takes it");
+    std::atomic<int> other{-1};
+    std::thread t([&] { other.store(static_cast<int>(call("__cxa_guard_acquire", {P(g)}))); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    check(other.load() == -1, "cxx: guard acquire during an in-progress init blocks");
+    check(call("__cxa_guard_release", {P(g)}) == 0 && g[0] == 1, "cxx: guard release marks the guard initialized");
+    for (int i = 0; i < 100 && other.load() == -1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const int woke = other.load();
+    if (woke == -1) t.detach(); else t.join();
+    check(woke == 0, "cxx: blocked acquirer wakes after release and does not take it");
+    check(call("__cxa_guard_acquire", {P(g)}) == 0, "cxx: guard acquire after release does not take it");
+    std::uint8_t h[8] = {};
+    check(call("__cxa_guard_acquire", {P(h)}) == 1, "cxx: second guard is independent");
+    check(call("__cxa_guard_abort", {P(h)}) == 0 && h[0] == 0 && h[1] == 0, "cxx: guard abort clears initialized and pending");
+    check(call("__cxa_guard_acquire", {P(h)}) == 1, "cxx: guard acquire after abort takes it again");
+    check(call("__cxa_guard_release", {P(h)}) == 0 && h[0] == 1, "cxx: re-armed guard releases normally");
     check(call("__cxa_guard_acquire", {0}) == pnr::prx::SCE_KERNEL_ERROR_EINVAL, "cxx: guard acquire with a null guard is EINVAL"); }
 
   // qsort argument validation (the comparator path itself is exercised by the module run below:
@@ -65,13 +80,17 @@ void pnr_cxx_tests(int& pass, int& fail) {
     check(call("qsort", {0, 4, 4, P(arr)}) == pnr::prx::SCE_KERNEL_ERROR_EINVAL, "cxx: qsort with a null base and nonzero count is EINVAL");
     check(call("qsort", {0, 0, 4, P(arr)}) == 0 && arr[0] == 5 && arr[3] == 1, "cxx: qsort with zero elements is a no-op"); }
 
-  // Run for real: guard, qsort with a guest comparator, and the glibc exit order
-  // (thread destructors before atexit handlers) - order "EGQQB" on stdout, exit 55.
+  // Run for real: guard, qsort with a guest comparator that makes a NESTED host call on its
+  // first invocation ('n'), and the glibc exit order (thread destructors before atexit
+  // handlers). The last destructor hard-verifies (UD2 -> signaled run) that the nested call
+  // happened exactly once, that the thread dtor ran first with its registered argument, and
+  // that its own argument arrived intact - then branches on that argument and makes two more
+  // host calls. Expected order "EGnQQbB" on stdout, exit 55.
   fflush(stdout);
   ModuleRunResult rr;
   st = run_module(dir + "/cxx.elf", reg, &rr, &rep);
   check(st.ok && rr.finished && !rr.signaled && rr.exit_code == pnr::tools::kCxxExitReturn,
-        "cxx: guard + qsort + __cxa_thread_atexit_impl/__cxa_atexit run in order EGQQB, exit 55");
+        "cxx: guard + nested-callback qsort + dtors (branching, multi-call, arg-checked) run in order EGnQQbB, exit 55");
 
   cmd = "rm -rf " + dir;
   if (std::system(cmd.c_str()) != 0) {}
