@@ -10,7 +10,7 @@ road, not the end of it.
 | `NID#lib#mod` symbol names parsed and decoded (`loader/sony_symbols`) | Implemented, Tested |
 | Import coverage report for ELF files with or without section headers (`pnr imports <elf>`) | Implemented, Tested |
 | In-process module loader: maps PT_LOAD, applies RELATIVE, 64, GLOB_DAT and JUMP_SLOT relocations, binds imports by NID to PRX host functions (`loader/module_loader`) | Implemented, Tested on synthetic modules only |
-| Run a loaded module's entry in a forked child (`pnr module-run <elf>`) | Implemented, Tested on synthetic modules only |
+| Run a loaded module's entry in a forked child (`pnr module-run <elf>`), with the jailed file calls installed (PNR_JAIL_ROOT, default ./pnr_data/jail; /app0 maps to the jail root) | Implemented, Tested on synthetic modules only |
 | Refuse a SELF container with a clear message | Implemented, Tested |
 | Real PlayStation executables | Untested: no real file has been loaded |
 | TLS and TCB: PT_TLS image copied per thread, x86-64 variant II layout, FS base set for guest code and switched back to the host base around every host call (`loader/guest_runtime`) | Implemented, Tested on synthetic modules only |
@@ -998,3 +998,18 @@ failures, before more texture features land on the shim.
   signatures share the same capture path, but no current binding has one, so that shape is not
   separately exercised end-to-end. Spills past 8 slots stay literal in the formatter and are
   undefined for fixed signatures.
+
+## Slice S37 notes (guest asset reads through the jailed file calls)
+- `pnr module-run` now installs the libkernel file calls (sceKernelOpen/Read/Write/Close/Lseek/
+  Fstat over the jailed FileSystemService) the way the launch path already did: jail root from
+  PNR_JAIL_ROOT, default ./pnr_data/jail. Before this slice a module run through the ELF loader
+  saw those symbols as declared-only and could not open files at all.
+- PsFileTable::open translates a leading "/app0/" to the jail root, the PlayStation app-data
+  mount semantics; other absolute paths resolve inside the jail unchanged and traversal is
+  still rejected (unit-tested, including traversal through the /app0 prefix).
+- Regression: the --file synthetic module opens "/app0/asset.txt", reads 12 bytes and
+  byte-compares "pnr-asset-42" in guest machine code, prints "asset ok" through the bound
+  printf; the pnr_file_run ctest seeds the jail, runs it and asserts the output and exit code.
+- Bounds of the claim: the read path (open/read/close plus /app0 translation) is proven from
+  guest machine code. The write path (write/lseek/fstat) remains covered by the existing
+  table-level and NID-bind tests only, not by a new module-level fixture.
