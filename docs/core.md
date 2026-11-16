@@ -468,6 +468,37 @@ makes the load fail with a message naming it, and nothing runs.
 - Limits: thin (2D, single-slice) modes only - no thick/3D modes, arrays or depth
   sampling; sampling is still not translated RDNA; hardware GPU untested.
 
+## Slice S30 notes (3D / volume textures)
+- **Implemented, Tested (software-output verified; texture-3d sweep path
+  also validation-layer clean).** Color3D T# (type 10): the q2 bits 0-12
+  field is the volume depth-1 (values from shadPS4's resource.h; usage only,
+  no code taken). A 3D texture has no array slices and cannot be a cubemap;
+  linear tiling only, uncompressed only, depth <= 256; anything else is
+  refused with a named reason. Mip chains shrink width, height AND depth per
+  level (max(1, d>>mip), same rule shadPS4's tile.h applies), packed
+  level-major with each level's z-planes together.
+- Host side: VK_IMAGE_TYPE_3D image + VK_IMAGE_VIEW_TYPE_3D view (enum
+  values 2 and 2, audited by the S28 compile-time enum check), extent depth
+  from the T#, per-level copy regions with the level's own depth.
+- New PPS2 v3 test blob (magic, 3) marks a draw as 3D-sampling: vertex
+  records grow to 9 floats (xyz, rgb, uv, w); a v0/v1/v2 blob with a 3D T#
+  or a v3 blob with a 2D/array/cube T# is refused as a type mismatch. The
+  fragment shader samples `texture3D(uvw)` (hand-written SPIR-V,
+  spirv-val clean) and multiplies by the varying colour; sampling itself is
+  still the host rasterizer's, not translated RDNA.
+- Byte-exact tests: 8x8x4 volume with red/green/blue/white z-planes, point
+  sampling at each plane centre draws that plane's colour exactly; mip level
+  1 of a depth-4 volume is 4x4x2 and samples correctly through T# min_lod.
+  Refusals covered: blob/T# type mismatch both directions, tiled 3D, depth
+  beyond the cap, array fields set on a 3D T#, BC-compressed 3D.
+- The validation sweep (S29) gained a texture-3d path: 7 paths, zero layer
+  errors under VK_LAYER_KHRONOS_validation on lavapipe.
+- Open grounding question: shadPS4's NumLayers() comment implies the same
+  q2 depth field doubles as layers-1 for arrays; PNR's S27/S28 arrays use
+  base/last_array instead and their behaviour is unchanged. Unresolved
+  against real GNM docs; flagged, not blocking (3D and array types are
+  disjoint in PNR's validator).
+
 ## Slice S29 notes (Vulkan validation-layer coverage)
 Evidence levels are now stated separately, per policy: **software-output
 verified** = byte-exact renders on lavapipe (tolerates wrong-but-plausible
