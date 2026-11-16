@@ -192,9 +192,15 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   // ---- slice S27: Color2DArray (type 13), linear tiling only ----
   // type = q1 bits 60-63 (w[3] bits 28-31); base_array = q2 bits 32-44 and
   // last_array = q2 bits 45-57 (w[5] bits 0-12 / 13-25).
-  auto make_array = [&](std::uint32_t tiling, std::uint32_t base_arr, std::uint32_t last_arr) {
+  // Slice S31: the DEPTH field (w[4] bits 0-12) is the allocation layer
+  // count - 1; typical descriptors set it equal to last_array, and the
+  // helper defaults to that. bounds cover the allocation, not the view.
+  auto make_array = [&](std::uint32_t tiling, std::uint32_t base_arr, std::uint32_t last_arr,
+                        std::uint32_t depth_field = 0xFFFFFFFFu) {
     make_tsharp(w, 0x100000, 64, 32, 64, tiling);
     w[3] = (w[3] & 0x0FFFFFFFu) | (13u << 28);
+    if (depth_field == 0xFFFFFFFFu) depth_field = last_arr;
+    w[4] = (w[4] & ~0x1FFFu) | (depth_field & 0x1FFFu);
     w[5] = (w[5] & ~0x1FFFu) | base_arr;
     w[5] = (w[5] & ~(0x1FFFu << 13)) | (last_arr << 13);
     decode_tsharp(w, &t);
@@ -220,6 +226,25 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   decode_tsharp(w, &t);
   check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("type") != std::string::npos,
         "tsharp: a Color2D descriptor with slices is refused (S27)");
+
+  // Slice S31: allocation (DEPTH field) vs sampled view (base/last_array).
+  make_array(0, 0, 3, 7);  // 8-layer allocation, 4-slice view
+  check(validate_tsharp_sample(t, 0x100000 + 64ull * 32 * 4 * 8, &why),
+        "tsharp: a windowed view into a wider allocation validates (S31)");
+  check(!validate_tsharp_sample(t, 0x100000 + 64ull * 32 * 4 * 8 - 1, &why) && why.find("outside") != std::string::npos,
+        "tsharp: bounds cover the full allocation, not just the view (S31)");
+  make_array(0, 0, 9, 3);  // view claims 10 slices, allocation has 4: clamp
+  check(validate_tsharp_sample(t, 0x100000 + 64ull * 32 * 4 * 4, &why),
+        "tsharp: a view wider than the allocation clamps to the allocation (S31)");
+  check(!validate_tsharp_sample(t, 0x100000 + 64ull * 32 * 4 * 4 - 1, &why) && why.find("outside") != std::string::npos,
+        "tsharp: the clamped allocation still bounds (S31)");
+  make_tsharp(w, 0x100000, 64, 64, 64, 0);  // cubemap with two cubes
+  w[3] = (w[3] & 0x0FFFFFFFu) | (11u << 28);
+  w[4] = (w[4] & ~0x1FFFu) | 1u;  // DEPTH field = 1: two cubes
+  w[5] = (w[5] & ~(0x1FFFu << 13)) | (5u << 13);  // last_array = 5
+  decode_tsharp(w, &t);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("cube") != std::string::npos,
+        "tsharp: a cubemap with more than one cube is refused (S31)");
 
   // ---- slice S28: Cube (type 11), exactly 6 faces, square, linear ----
   auto make_cube = [&](std::uint32_t tiling, std::uint32_t last_arr,
