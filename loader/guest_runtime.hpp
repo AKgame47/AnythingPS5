@@ -58,9 +58,33 @@ struct EntryArgs {
 // Builds a block with real pointers into itself.
 std::vector<std::uint8_t> build_entry_args(const std::vector<std::string>& argv);
 
+// ---- Module lifecycle (slice S32): DT_INIT, DT_INIT_ARRAY, DT_FINI_ARRAY, DT_FINI, libc atexit.
+// Ordering follows the System V gABI: DT_INIT first, then DT_INIT_ARRAY in file order; on exit the
+// atexit handlers run LIFO, then DT_FINI_ARRAY in reverse file order, then DT_FINI. PlayStation's
+// exact init-argument convention is UNVERIFIED on hardware; PNR passes the same (args, exit)
+// pair the entry point receives.
+struct GuestLifecycle {
+  std::vector<std::uint64_t> init;  // absolute guest addresses, in call order
+  std::vector<std::uint64_t> fini;  // absolute guest addresses, in call order (already reversed)
+};
+
 // ---- Process-level guest runtime (call in the forked child only)
 // Installs TLS for the calling thread, runs fn(rdi=a, rsi=b), restores FS. Returns rax.
 std::int64_t run_guest_main(const TlsTemplate& t, std::int64_t (*fn)(void*, void*), void* a, void* b);
+// Lifecycle variant: runs lc.init (in order) before fn, and the exit sequence (atexit handlers
+// LIFO, then lc.fini in order) after fn returns, all with the guest FS base.
+std::int64_t run_guest_main(const TlsTemplate& t, std::int64_t (*fn)(void*, void*), void* a, void* b,
+                            const GuestLifecycle& lc);
+// libc atexit binding: registers a guest function pointer for the exit sequence. 0 on success,
+// -1 when the table is full (32 entries, a PNR limit), -2 when no guest module is running.
+std::int64_t guest_atexit_register(std::uint64_t fn);
+// Runs the exit sequence (atexit handlers LIFO, then the module fini list) with the guest FS base,
+// then _exit(code). With no active guest module this is a plain _exit(code).
+[[noreturn]] void guest_exit_with(int code);
+// Calls a guest function from host code on a thread that has a registered guest FS base (for import
+// implementations that call back into guest code). Returns fn's rax, or -2 when this thread has no
+// registered guest FS base.
+std::int64_t call_guest_function(std::uint64_t addr, std::int64_t a, std::int64_t b);
 // Used by import thunks: switch to the host FS if the current FS is a registered guest FS.
 std::uint64_t guest_to_host();          // returns the guest FS that was active (0 when none)
 void host_to_guest(std::uint64_t fs);   // restore after the host call
