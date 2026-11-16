@@ -1,5 +1,7 @@
 #include "tools/synth_elf.hpp"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "loader/nid.hpp"
@@ -13,6 +15,140 @@ void p16(std::vector<std::uint8_t>& b, std::size_t o, std::uint16_t v) { b[o] = 
 void p32(std::vector<std::uint8_t>& b, std::size_t o, std::uint32_t v) { for (int i = 0; i < 4; ++i) b[o + i] = (v >> (8 * i)) & 0xff; }
 void p64(std::vector<std::uint8_t>& b, std::size_t o, std::uint64_t v) { for (int i = 0; i < 8; ++i) b[o + i] = (v >> (8 * i)) & 0xff; }
 }  // namespace
+
+// ---- Slice S34: C++ ABI module ----------------------------------------------------
+// Layout: helper code after the program headers (0xb0 comparator, 0xb8/0xd8 dtors),
+// entry 0x100, ptr slots 0x200/0x208 (RELATIVE), GOT 0x210 (6), guard byte 0x240,
+// int[4] {5,3,8,1} at 0x248, RELA 0x260 (8 entries), dynsym 0x320 (7), dynstr 0x3c8,
+// dynamic at 0x440 (8 entries). Failures exit 61 (guard/registration) or 62 (qsort result).
+std::vector<std::uint8_t> build_synthetic_cxx_elf() {
+  std::vector<std::uint8_t> b(0x4c0, 0);
+  const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
+  std::memcpy(b.data(), ident, 8);
+  p16(b, 0x10, 3);       // ET_DYN
+  p16(b, 0x12, 62);      // x86-64
+  p32(b, 0x14, 1);
+  p64(b, 0x18, 0x100);   // entry
+  p64(b, 0x20, 0x40);    // phoff
+  p16(b, 0x34, 64); p16(b, 0x36, 56); p16(b, 0x38, 2); p16(b, 0x3A, 64);
+  const std::size_t total = b.size();
+  p32(b, 0x40, 1); p32(b, 0x44, 7); p64(b, 0x48, 0); p64(b, 0x50, 0); p64(b, 0x58, 0); p64(b, 0x60, total); p64(b, 0x68, total); p64(b, 0x70, 0x1000);
+  p32(b, 0x78, 2); p32(b, 0x7C, 6); p64(b, 0x80, 0x440); p64(b, 0x88, 0x440); p64(b, 0x90, 0x440); p64(b, 0x98, 0x80); p64(b, 0xA0, 0x80); p64(b, 0xA8, 8);
+
+  constexpr std::uint64_t G_PUTCHAR = 0x210, G_CXA_ATEXIT = 0x218, G_TLS_ATEXIT = 0x220;
+  constexpr std::uint64_t G_QSORT = 0x228, G_GUARD_ACQ = 0x230, G_GUARD_REL = 0x238;
+  std::size_t at = 0xb0;
+  auto ins = [&](std::initializer_list<int> bs) { for (int x : bs) b[at++] = static_cast<std::uint8_t>(x); };
+  auto d32 = [&](std::int64_t disp) { p32(b, at, static_cast<std::uint32_t>(disp)); at += 4; };
+  auto callgot = [&](std::uint64_t got) { ins({0xff, 0x15}); d32(static_cast<std::int64_t>(got) - static_cast<std::int64_t>(at + 4)); };
+  // comparator (descending): mov eax,[rsi]; sub eax,[rdi]; ret  (returns *b - *a)
+  ins({0x8b, 0x06, 0x2b, 0x07, 0xc3});
+  // dtor_t at 0xb8: prints the low byte of its argument ('Q' when arg==0x51)
+  at = 0xb8;
+  ins({0x50});
+  callgot(G_PUTCHAR);
+  ins({0x59, 0xc3});
+  // dtor_c at 0xd8: prints 'c' when arg==0x42 else 'C'
+  at = 0xd8;
+  // dtor_c: prints the low byte of its argument ('B' when arg==0x42)
+  ins({0x50});
+  callgot(G_PUTCHAR);
+  ins({0x59, 0xc3});
+  // entry, assembled with labels so every RIP-relative displacement is computed, never typed.
+  {
+    std::vector<std::uint8_t> code;
+    auto e8 = [&](int x) { code.push_back(static_cast<std::uint8_t>(x)); };
+    auto e32 = [&](std::uint32_t v) { for (int i = 0; i < 4; ++i) e8((v >> (8 * i)) & 0xff); };
+    struct Patch { std::size_t at; std::uint64_t target; std::size_t next; };
+    std::vector<Patch> patches;
+    auto rel32 = [&](std::uint64_t target) { patches.push_back({code.size(), target, code.size() + 4}); e32(0); };
+    auto cg = [&](std::uint64_t got) { e8(0xff); e8(0x15); rel32(got); };          // call [rip+rel32]
+    auto movrdi = [&](std::uint64_t slot) { e8(0x48); e8(0x8b); e8(0x3d); rel32(slot); };
+    auto movrsi = [&](std::uint64_t slot) { e8(0x48); e8(0x8b); e8(0x35); rel32(slot); };
+    auto leardi = [&](std::uint64_t t) { e8(0x48); e8(0x8d); e8(0x3d); rel32(t); };
+    auto learcx = [&](std::uint64_t t) { e8(0x48); e8(0x8d); e8(0x0d); rel32(t); };
+    std::vector<std::size_t> fail_a;  // patch indices jumping to the guard/registration stub
+    std::vector<std::size_t> fail_b;  // patch indices jumping to the qsort-result stub
+    auto jcc = [&](std::vector<std::size_t>& which) { e8(0x0f); e8(0x85); which.push_back(patches.size()); patches.push_back({code.size(), 0, code.size() + 4}); e32(0); };
+    for (int x : {0x53, 0xbf, 0x45, 0x00, 0x00, 0x00}) e8(x);   // push rbx; mov edi,'E'
+    cg(G_PUTCHAR);
+    movrdi(0x200); cg(G_GUARD_ACQ);                             // acquire must take it
+    for (int x : {0x83, 0xf8, 0x01}) e8(x);                     // cmp eax,1
+    jcc(fail_a);
+    movrdi(0x200); cg(G_GUARD_REL);                             // release marks it initialized
+    e8(0x85); e8(0xc0);                                         // test eax,eax
+    jcc(fail_a);
+    movrdi(0x200); cg(G_GUARD_ACQ);                             // acquire now declines
+    e8(0x85); e8(0xc0);
+    jcc(fail_a);
+    for (int x : {0xbf, 0x47, 0x00, 0x00, 0x00}) e8(x);         // mov edi,'G'
+    cg(G_PUTCHAR);
+    movrdi(0x208);
+    for (int x : {0xbe, 0x04, 0x00, 0x00, 0x00}) e8(x);         // mov esi,4
+    for (int x : {0xba, 0x04, 0x00, 0x00, 0x00}) e8(x);         // mov edx,4
+    learcx(0xb0);                                               // comparator
+    cg(G_QSORT);
+    movrsi(0x208);
+    for (int x : {0x83, 0x3e, 0x08}) e8(x);                     // cmp [rsi],8
+    jcc(fail_b);
+    for (int x : {0x83, 0x7e, 0x04, 0x05}) e8(x);               // cmp [rsi+4],5
+    jcc(fail_b);
+    for (int x : {0x83, 0x7e, 0x08, 0x03}) e8(x);               // cmp [rsi+8],3
+    jcc(fail_b);
+    for (int x : {0x83, 0x7e, 0x0c, 0x01}) e8(x);               // cmp [rsi+12],1
+    jcc(fail_b);
+    for (int x : {0xbf, 0x51, 0x00, 0x00, 0x00}) e8(x);         // mov edi,'Q'
+    cg(G_PUTCHAR);
+    leardi(0xb8);                                               // dtor_t
+    for (int x : {0xbe, 0x51, 0x00, 0x00, 0x00}) e8(x);         // mov esi,0x51
+    e8(0x31); e8(0xd2);                                         // xor edx,edx
+    cg(G_TLS_ATEXIT);
+    e8(0x85); e8(0xc0);
+    jcc(fail_a);
+    leardi(0xd8);                                               // dtor_c
+    for (int x : {0xbe, 0x42, 0x00, 0x00, 0x00}) e8(x);         // mov esi,0x42
+    e8(0x31); e8(0xd2);
+    cg(G_CXA_ATEXIT);
+    e8(0x85); e8(0xc0);
+    jcc(fail_a);
+    for (int x : {0xb8, 0x37, 0x00, 0x00, 0x00, 0x5b, 0xc3}) e8(x);  // mov eax,55; pop rbx; ret
+    const std::size_t stub_a = code.size();
+    for (int x : {0xb8, 61, 0x00, 0x00, 0x00, 0x5b, 0xc3}) e8(x);
+    const std::size_t stub_b = code.size();
+    for (int x : {0xb8, 62, 0x00, 0x00, 0x00, 0x5b, 0xc3}) e8(x);
+    for (const std::size_t i : fail_a) patches[i].target = 0x100 + stub_a;
+    for (const std::size_t i : fail_b) patches[i].target = 0x100 + stub_b;
+    for (const Patch& p : patches) {
+      const std::int64_t disp = static_cast<std::int64_t>(p.target) - static_cast<std::int64_t>(0x100 + p.next);
+      for (int i = 0; i < 4; ++i) code[p.at + i] = static_cast<std::uint8_t>((disp >> (8 * i)) & 0xff);
+    }
+    if (0x100 + code.size() > 0x200) { std::fprintf(stderr, "cxx synth overflow\n"); std::abort(); }
+    std::memcpy(&b[0x100], code.data(), code.size());
+  }
+  // data
+  p64(b, 0x200, 0x240);                               // ptr_guard -> guard byte
+  p64(b, 0x208, 0x248);                               // ptr_arr -> int[4]
+  p32(b, 0x248, 5); p32(b, 0x24c, 3); p32(b, 0x250, 8); p32(b, 0x254, 1);
+  const char* names[6] = {"putchar", "__cxa_atexit", "__cxa_thread_atexit_impl", "qsort", "__cxa_guard_acquire", "__cxa_guard_release"};
+  std::vector<std::string> nids;
+  for (const char* n : names) nids.push_back(pnr::loader::nid::compute_nid(n, "") + "#A#A");
+  std::size_t so = 0x3c8 + 1;
+  std::uint32_t off[6];
+  for (int i = 0; i < 6; ++i) { off[i] = static_cast<std::uint32_t>(so - 0x3c8); std::memcpy(&b[so], nids[i].c_str(), nids[i].size() + 1); so += nids[i].size() + 1; }
+  const std::uint64_t strsz = so - 0x3c8;
+  for (int i = 0; i < 6; ++i) { const std::size_t s = 0x320 + 24 * (i + 1); p32(b, s, off[i]); b[s + 4] = 0x12; /* GLOBAL FUNC */ p16(b, s + 6, 0); }
+  std::size_t r = 0x260;
+  auto rela = [&](std::uint64_t o, std::uint64_t info, std::int64_t addend) { p64(b, r, o); p64(b, r + 8, info); p64(b, r + 16, static_cast<std::uint64_t>(addend)); r += 24; };
+  rela(0x200, 8, 0x240);   // RELATIVE -> guard byte
+  rela(0x208, 8, 0x248);   // RELATIVE -> int[4]
+  for (int i = 0; i < 6; ++i) rela(G_PUTCHAR + 8 * i, (static_cast<std::uint64_t>(i + 1) << 32) | 6, 0);  // GLOB_DAT
+  const std::uint64_t relasz = r - 0x260;
+  std::size_t dy = 0x440;
+  auto dyn = [&](std::int64_t tag, std::uint64_t v) { p64(b, dy, static_cast<std::uint64_t>(tag)); p64(b, dy + 8, v); dy += 16; };
+  dyn(6, 0x320); dyn(5, 0x3c8); dyn(10, strsz); dyn(11, 24); dyn(7, 0x260); dyn(8, relasz); dyn(9, 24); dyn(0, 0);
+  return b;
+}
+
 
 std::vector<std::uint8_t> build_synthetic_ps_elf(const SynthSpec& spec) {
   std::vector<std::uint8_t> b(0x340, 0);
