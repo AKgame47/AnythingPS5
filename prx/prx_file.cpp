@@ -10,6 +10,12 @@ namespace pnr::prx {
 
 PsFileTable::PsFileTable(compat::FileSystemService fs) : fs_(std::move(fs)) {}
 
+PsFileTable::~PsFileTable() {
+  // Only entries still owned by this table: close() erases explicitly closed fds.
+  // Do not retry close on EINTR: the host may already have released/reused the fd.
+  for (const auto& entry : entries_) ::close(entry.second.host_fd);
+}
+
 std::int64_t PsFileTable::open(const std::string& path, std::int64_t flags) {
   const std::int64_t known = SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC |
                              SCE_KERNEL_O_APPEND;
