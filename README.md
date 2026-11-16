@@ -47,8 +47,8 @@ Not done: verification of live PSN sync against real Sony (Untested), game downl
 testing, audio output, a desktop launcher UI, untrusted-code isolation.
 No benchmarks exist; none are claimed.
 
-Test state: **3117/3117 unit tests, 23/23 CTest suites** on a fresh Linux
-Release `-Werror` build with `spirv-val` configured (3022 unit checks without it; the
+Test state: **3126/3126 unit tests, 23/23 CTest suites** on a fresh Linux
+Release `-Werror` build with `spirv-val` configured (3031 unit checks without it; the
 rest skip). Details in the capability section below. CI exists (see [CI](#ci)).
 
 ## Rendered output
