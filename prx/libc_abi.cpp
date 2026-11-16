@@ -43,10 +43,15 @@ namespace {
 // up to 6 general-purpose slots (gp) and up to 8 xmm slots (fp). Conversions d i u x X o c s p
 // consume gp in order; f F e E g G a A consume fp in order (the System V varargs rule: FP
 // arguments travel in xmm registers, independently of the gp sequence).
+// Slice S36: stk/nstk is the raw stack-spill window (GuestCallArgs::s). Overflow arguments
+// sit there in argument order regardless of class, and conversions also consume them in
+// argument order, so a single shared cursor serves both pools: when a conversion's own pool
+// is exhausted it takes the next stack slot.
 std::string format_c_pools(const char* fmt, const std::int64_t* gp, std::size_t ngp,
-                           const double* fp, std::size_t nfp) {
+                           const double* fp, std::size_t nfp,
+                           const std::int64_t* stk = nullptr, std::size_t nstk = 0) {
   std::string out;
-  std::size_t ai = 0, fi = 0;
+  std::size_t ai = 0, fi = 0, si = 0;
   if (!fmt) return out;
   for (const char* p = fmt; *p; ++p) {
     if (*p != '%') { out.push_back(*p); continue; }
@@ -68,8 +73,8 @@ std::string format_c_pools(const char* fmt, const std::int64_t* gp, std::size_t 
     if (c == '%') { out.push_back('%'); continue; }
     std::string body;
     bool ok = true;
-    auto next = [&](std::int64_t* v) { if (ai < ngp) { *v = gp[ai++]; return true; } return false; };
-    auto nextf = [&](double* v) { if (fi < nfp) { *v = fp[fi++]; return true; } return false; };
+    auto next = [&](std::int64_t* v) { if (ai < ngp) { *v = gp[ai++]; return true; } if (si < nstk) { *v = stk[si++]; return true; } return false; };
+    auto nextf = [&](double* v) { if (fi < nfp) { *v = fp[fi++]; return true; } if (si < nstk) { std::memcpy(v, &stk[si++], 8); return true; } return false; };
     if (c == 'f' || c == 'F' || c == 'e' || c == 'E' || c == 'g' || c == 'G' || c == 'a' || c == 'A') {
       // Floating point conversion: long double (L) is refused (stays literal); l is plain double.
       double dv = 0;
@@ -138,7 +143,7 @@ std::string format_c(const char* fmt, const std::vector<std::int64_t>& args) {
 
 std::string format_c_guest(const char* fmt, const GuestCallArgs& a, std::size_t gp0) {
   const std::size_t n = gp0 < 6 ? 6 - gp0 : 0;
-  return format_c_pools(fmt, a.i + gp0, n, a.x, 8);
+  return format_c_pools(fmt, a.i + gp0, n, a.x, 8, a.s, 8);
 }
 
 bool sysmodule_is_loaded(std::int64_t id) { std::lock_guard<std::mutex> l(g_sys_mu); return sys_set().count(id) != 0; }
