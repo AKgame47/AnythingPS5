@@ -485,7 +485,9 @@ std::int64_t guest_sema_signal(std::int64_t sema, std::int64_t count) {
   auto s = find_sema(sema);
   if (!s || count <= 0) return -2;
   std::lock_guard<std::mutex> l(s->m);
-  if (s->count + count > s->max) return -3;   // would exceed the maximum: refused, count unchanged
+  // count is untrusted and can be INT64_MAX. Check remaining capacity before addition;
+  // the invariant 0 <= s->count <= s->max makes this subtraction nonnegative and safe.
+  if (count > s->max - s->count) return -3;  // refused, count unchanged
   s->count += count; s->cv.notify_all(); return 0;
 }
 std::int64_t guest_sema_destroy(std::int64_t* handle) {
