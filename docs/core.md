@@ -1150,3 +1150,15 @@ failures, before more texture features land on the shim.
 - Scope remains this finite synthetic fixture and repository shim semantics. It does
   not verify Sony signatures, arbitrary non-null guest output pointers, write-fault
   enforcement or general game compatibility. S44's all-eight-mask host tests remain.
+
+
+## Slice S46 notes (jailed descriptor table lifetime)
+- PsFileTable now closes its still-owned host descriptors on destruction. Explicit
+  close already erases entries, so a later unrelated descriptor reusing that host
+  number is not closed again. Callers must end table use before destruction.
+- Linux regressions identify exact descriptors via unique temporary-file paths in
+  /proc/self/fd, then check F_GETFD/EBADF after explicit close and destruction. dup2
+  reuses an explicitly closed number to prove repeated guest close and destruction
+  do not touch the replacement. A separate unrelated host descriptor also survives.
+- Scope: normal descriptor ownership and table teardown, not concurrent destruction,
+  allocation-failure injection, guest-pointer validation or Sony ABI verification.
