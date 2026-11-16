@@ -30,6 +30,11 @@ std::vector<std::uint8_t> build_synthetic_kernel_elf(const KernelSpec& spec);
 // "C3 libc ok 42" through the bound printf.
 std::vector<std::uint8_t> build_synthetic_libc_elf();
 
+// Slice S35 (review follow-up): a module calling fixed-signature FP functions through NID-bound
+// imports. Returns 0 when all checks pass, else the failing check number (1..4), and prints
+// "1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0" through printf (8 xmm argument lanes live).
+std::vector<std::uint8_t> build_synthetic_fp_elf();
+
 // Slice S32: a module with DT_INIT, DT_INIT_ARRAY (2), DT_FINI_ARRAY (2), DT_FINI and two
 // atexit handlers registered from its entry point. Every lifecycle function prints one letter
 // through the bound putchar; the exact stdout order "IABE21yxF" proves the call order:
