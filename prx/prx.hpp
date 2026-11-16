@@ -30,6 +30,12 @@ constexpr SceInt32 SCE_KERNEL_ERROR_UNKNOWN = -3;
 struct GuestCallArgs {
   std::int64_t i[6] = {};
   double x[8] = {};
+  // Slice S36: raw stack-spill window. Per the SysV ABI, arguments past the register pools
+  // (7th+ gp, 9th+ xmm) sit at [rsp+8...] at call time as a dense array of 8-byte slots in
+  // argument order, regardless of class. The thunk copies the first 8 slots verbatim; bindings
+  // and the varargs formatter decode them per their own signature/conversion order. Supported
+  // slot width is 8 bytes (no 16-byte types); calls spilling more than 8 slots are unsupported.
+  std::int64_t s[8] = {};
 };
 
 // Lane decoding. x[] holds the raw 64-bit xmm lane contents bit-exactly. A DOUBLE argument is
