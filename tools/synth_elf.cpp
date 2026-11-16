@@ -966,7 +966,7 @@ std::vector<std::uint8_t> build_synthetic_mmap_elf() {
 // read-only with sceKernelMTypeprotect, queries again (prot must now be READ)
 // and confirms the data survived, restores RW and rewrites, then unmaps with
 // sceKernelMunmap. Prints "mprotect ok" and exits 0 on success; a distinct
-// nonzero stage code (1-14) on any deviation. This proves the host mprotect
+// nonzero stage code (1-19) on any deviation (15-19 added in S45). This proves the host mprotect
 // round-trip and mapping-table bookkeeping as observed through the query call;
 // it does not prove fault semantics (no guest SIGSEGV handler exists yet).
 std::vector<std::uint8_t> build_synthetic_mprotect_elf() {
@@ -1045,16 +1045,35 @@ std::vector<std::uint8_t> build_synthetic_mprotect_elf() {
   emit({0x49, 0xBA}); p64(b, pc, PAT2); pc += 8;     // mov r10, PAT2
   emit({0x4C, 0x89, 0x13});                          // mov [rbx], r10
   emit({0x4C, 0x39, 0x13}); check(0x74, 13);         // cmp [rbx], r10; je ok
+  // S45: query with every output omitted, then protection-only output.
+  emit({0x48, 0x89, 0xDF, 0x31, 0xF6, 0x31, 0xD2, 0x31, 0xC9});
+  call(G_QUERY);
+  emit({0x48, 0x85, 0xC0}); check(0x74, 15);
+  // Initialize output to an impossible protection so a skipped write cannot pass.
+  emit({0x48, 0xC7, 0x44, 0x24, 0x20}); imm32(0xFFFFFFFFu);
+  emit({0x48, 0x89, 0xDF, 0x31, 0xF6, 0x31, 0xD2});
+  emit({0x48, 0x8D, 0x4C, 0x24, 0x20});
+  call(G_QUERY);
+  emit({0x48, 0x85, 0xC0}); check(0x74, 16);
+  emit({0x48, 0x83, 0x7C, 0x24, 0x20, 0x03}); check(0x74, 17);
   // sceKernelMunmap(page, 4096) == 0
   emit({0x48, 0x89, 0xDF});                          // mov rdi, rbx
   emit({0xBE}); imm32(4096);                         // mov esi, 4096
   call(G_MUNMAP);
   emit({0x48, 0x85, 0xC0}); check(0x74, 14);         // test rax,rax; jz ok
+  // After unmap: EINVAL (-2) and the supplied protection sentinel unchanged.
+  emit({0x48, 0xC7, 0x44, 0x24, 0x20}); imm32(0x12345678);
+  emit({0x48, 0x89, 0xDF, 0x31, 0xF6, 0x31, 0xD2});
+  emit({0x48, 0x8D, 0x4C, 0x24, 0x20});
+  call(G_QUERY);
+  emit({0x48, 0x83, 0xF8, 0xFE}); check(0x74, 18);  // cmp rax,-2
+  emit({0x48, 0x81, 0x7C, 0x24, 0x20}); imm32(0x12345678); check(0x74, 19);
   // printf("mprotect ok\n")
   rip({0x48, 0x8D, 0x3D}, OK); emit({0x31, 0xC0}); call(G_PRINTF);
   emit({0x31, 0xC0});
   const std::size_t epi = pc;
   emit({0x48, 0x83, 0xC4, 0x60, 0x5B, 0xC3});
+  if (pc > OK) { std::fprintf(stderr, "mprotect fixture code overlaps data\n"); std::abort(); }
   for (std::size_t f : fails) p32(b, f, static_cast<std::uint32_t>(epi - (f + 4)));
 
   const char* names[G_N] = {"sceKernelMapMemory", "sceKernelMTypeprotect",
