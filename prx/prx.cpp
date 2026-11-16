@@ -156,8 +156,8 @@ void* sce_libc_malloc(std::size_t size) {
   return std::malloc(size);
 }
 void sce_libc_free(void* ptr) { std::free(ptr); }
-int sce_libc_printf(const char* fmt, const std::vector<std::int64_t>& args) {
-  const std::string out = format_c(fmt, args);
+int sce_libc_printf(const char* fmt, const GuestCallArgs& args, std::size_t gp0) {
+  const std::string out = format_c_guest(fmt, args, gp0);
   std::fputs(out.c_str(), stdout);
   return static_cast<int>(out.size());
 }
@@ -167,7 +167,7 @@ PrxSymbol decl_only(const char* lib, const char* name) {
   return PrxSymbol{lib, name, loader::nid::compute_nid(name, lib), false, nullptr};
 }
 PrxSymbol impl(const char* lib, const char* name,
-               std::function<std::int64_t(const std::vector<std::int64_t>&)> fn) {
+               std::function<std::int64_t(const GuestCallArgs&)> fn) {
   return PrxSymbol{lib, name, loader::nid::compute_nid(name, lib), true, std::move(fn)};
 }
 }  // namespace
@@ -175,87 +175,83 @@ PrxSymbol impl(const char* lib, const char* name,
 PrxRegistry::PrxRegistry() {
   // Implemented libkernel subset (matches the loader seed-table symbols).
   symbols_.push_back(impl("libkernel", "sceKernelUsleep",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        return a.empty() ? SCE_KERNEL_ERROR_EINVAL
-                         : sceKernelUsleep(static_cast<std::uint32_t>(a[0]));
+      [](const GuestCallArgs& a) -> std::int64_t {
+        return sceKernelUsleep(static_cast<std::uint32_t>(a.i[0]));
       }));
   symbols_.push_back(impl("libkernel", "sceKernelSleep",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        return a.empty() ? SCE_KERNEL_ERROR_EINVAL
-                         : sceKernelSleep(static_cast<std::uint32_t>(a[0]));
+      [](const GuestCallArgs& a) -> std::int64_t {
+        return sceKernelSleep(static_cast<std::uint32_t>(a.i[0]));
       }));
   symbols_.push_back(impl("libkernel", "sceKernelAlloc",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
+      [](const GuestCallArgs& a) -> std::int64_t {
         return reinterpret_cast<std::int64_t>(
-            sceKernelAlloc(static_cast<std::size_t>(a[0])));
+            sceKernelAlloc(static_cast<std::size_t>(a.i[0])));
       }));
   symbols_.push_back(impl("libkernel", "sceKernelFree",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        return a.empty() ? SCE_KERNEL_ERROR_EINVAL
-                         : sceKernelFree(reinterpret_cast<void*>(a[0]));
+      [](const GuestCallArgs& a) -> std::int64_t {
+        return sceKernelFree(reinterpret_cast<void*>(a.i[0]));
       }));
   symbols_.push_back(impl("libkernel", "sceKernelCreateThread",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
-        auto* entry = reinterpret_cast<void (*)(void*)>(a[0]);
-        void* arg = a.size() > 1 ? reinterpret_cast<void*>(a[1]) : nullptr;
+      [](const GuestCallArgs& a) -> std::int64_t {
+        if ((2 > 6)) return SCE_KERNEL_ERROR_EINVAL;
+        auto* entry = reinterpret_cast<void (*)(void*)>(a.i[0]);
+        void* arg = true ? reinterpret_cast<void*>(a.i[1]) : nullptr;
         return sceKernelCreateThread("pnr-prx-thread", entry, arg);
       }));
   // C2: libkernel ABI subset (Sony constants translated in loader/guest_runtime).
-  using V = const std::vector<std::int64_t>&;
+  using V = const GuestCallArgs&;
   symbols_.push_back(impl("libkernel", "mmap", [](V a) -> std::int64_t {
-    if (a.size() < 6) return -1;
-    return loader::sony_mmap(a[0], a[1], a[2], a[3], a[4], a[5]);
+    if ((6 > 6)) return -1;
+    return loader::sony_mmap(a.i[0], a.i[1], a.i[2], a.i[3], a.i[4], a.i[5]);
   }));
   symbols_.push_back(impl("libkernel", "sceKernelClockGettime", [](V a) -> std::int64_t {
-    return a.size() < 2 ? SCE_KERNEL_ERROR_EINVAL : loader::sony_clock_gettime(a[0], a[1]);
+    return (2 > 6) ? SCE_KERNEL_ERROR_EINVAL : loader::sony_clock_gettime(a.i[0], a.i[1]);
   }));
   symbols_.push_back(impl("libkernel", "scePthreadMutexInit", [](V a) -> std::int64_t {
-    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_mutex_op(0, reinterpret_cast<std::int64_t*>(a[0]));
+    return loader::guest_mutex_op(0, reinterpret_cast<std::int64_t*>(a.i[0]));
   }));
   symbols_.push_back(impl("libkernel", "scePthreadMutexLock", [](V a) -> std::int64_t {
-    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_mutex_op(1, reinterpret_cast<std::int64_t*>(a[0]));
+    return loader::guest_mutex_op(1, reinterpret_cast<std::int64_t*>(a.i[0]));
   }));
   symbols_.push_back(impl("libkernel", "scePthreadMutexUnlock", [](V a) -> std::int64_t {
-    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_mutex_op(2, reinterpret_cast<std::int64_t*>(a[0]));
+    return loader::guest_mutex_op(2, reinterpret_cast<std::int64_t*>(a.i[0]));
   }));
   symbols_.push_back(impl("libkernel", "scePthreadMutexDestroy", [](V a) -> std::int64_t {
-    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_mutex_op(3, reinterpret_cast<std::int64_t*>(a[0]));
+    return loader::guest_mutex_op(3, reinterpret_cast<std::int64_t*>(a.i[0]));
   }));
   symbols_.push_back(impl("libkernel", "scePthreadCreate", [](V a) -> std::int64_t {
-    if (a.size() < 4) return SCE_KERNEL_ERROR_EINVAL;
-    return loader::guest_thread_create(reinterpret_cast<std::int64_t*>(a[0]), a[2], a[3]);
+    if ((4 > 6)) return SCE_KERNEL_ERROR_EINVAL;
+    return loader::guest_thread_create(reinterpret_cast<std::int64_t*>(a.i[0]), a.i[2], a.i[3]);
   }));
   symbols_.push_back(impl("libkernel", "scePthreadJoin", [](V a) -> std::int64_t {
-    if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
-    return loader::guest_thread_join(a[0], reinterpret_cast<std::int64_t*>(a[1]));
+    if ((2 > 6)) return SCE_KERNEL_ERROR_EINVAL;
+    return loader::guest_thread_join(a.i[0], reinterpret_cast<std::int64_t*>(a.i[1]));
   }));
   symbols_.push_back(impl("libkernel", "scePthreadSelf", [](V) -> std::int64_t { return loader::guest_thread_self(); }));
   // S1: condition variables and semaphores (registry handles; see loader/guest_runtime.hpp).
   symbols_.push_back(impl("libkernel", "scePthreadCondInit", [](V a) -> std::int64_t {
-    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_init(reinterpret_cast<std::int64_t*>(a[0])); }));
+    return loader::guest_cond_init(reinterpret_cast<std::int64_t*>(a.i[0])); }));
   symbols_.push_back(impl("libkernel", "scePthreadCondWait", [](V a) -> std::int64_t {
-    return a.size() < 2 ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_wait(*reinterpret_cast<std::int64_t*>(a[0]), reinterpret_cast<std::int64_t*>(a[1]), -1); }));
+    return (2 > 6) ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_wait(*reinterpret_cast<std::int64_t*>(a.i[0]), reinterpret_cast<std::int64_t*>(a.i[1]), -1); }));
   symbols_.push_back(impl("libkernel", "scePthreadCondTimedwait", [](V a) -> std::int64_t {
-    return a.size() < 3 ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_wait(*reinterpret_cast<std::int64_t*>(a[0]), reinterpret_cast<std::int64_t*>(a[1]), a[2]); }));
+    return (3 > 6) ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_wait(*reinterpret_cast<std::int64_t*>(a.i[0]), reinterpret_cast<std::int64_t*>(a.i[1]), a.i[2]); }));
   symbols_.push_back(impl("libkernel", "scePthreadCondSignal", [](V a) -> std::int64_t {
-    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_wake(*reinterpret_cast<std::int64_t*>(a[0]), false); }));
+    return loader::guest_cond_wake(*reinterpret_cast<std::int64_t*>(a.i[0]), false); }));
   symbols_.push_back(impl("libkernel", "scePthreadCondBroadcast", [](V a) -> std::int64_t {
-    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_wake(*reinterpret_cast<std::int64_t*>(a[0]), true); }));
+    return loader::guest_cond_wake(*reinterpret_cast<std::int64_t*>(a.i[0]), true); }));
   symbols_.push_back(impl("libkernel", "scePthreadCondDestroy", [](V a) -> std::int64_t {
-    return a.empty() ? SCE_KERNEL_ERROR_EINVAL : loader::guest_cond_destroy(reinterpret_cast<std::int64_t*>(a[0])); }));
+    return loader::guest_cond_destroy(reinterpret_cast<std::int64_t*>(a.i[0])); }));
   symbols_.push_back(impl("libkernel", "sceKernelCreateSema", [](V a) -> std::int64_t {
-    return a.size() < 5 ? SCE_KERNEL_ERROR_EINVAL : loader::guest_sema_create(reinterpret_cast<std::int64_t*>(a[0]), a[3], a[4]); }));
+    return (5 > 6) ? SCE_KERNEL_ERROR_EINVAL : loader::guest_sema_create(reinterpret_cast<std::int64_t*>(a.i[0]), a.i[3], a.i[4]); }));
   symbols_.push_back(impl("libkernel", "sceKernelWaitSema", [](V a) -> std::int64_t {
-    if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
+    if ((3 > 6)) return SCE_KERNEL_ERROR_EINVAL;
     std::int64_t us = -1;
-    if (a[2]) us = static_cast<std::int64_t>(*reinterpret_cast<std::uint32_t*>(a[2]));
-    return loader::guest_sema_wait(a[0], a[1], us); }));
+    if (a.i[2]) us = static_cast<std::int64_t>(*reinterpret_cast<std::uint32_t*>(a.i[2]));
+    return loader::guest_sema_wait(a.i[0], a.i[1], us); }));
   symbols_.push_back(impl("libkernel", "sceKernelSignalSema", [](V a) -> std::int64_t {
-    return a.size() < 2 ? SCE_KERNEL_ERROR_EINVAL : loader::guest_sema_signal(a[0], a[1]); }));
+    return (2 > 6) ? SCE_KERNEL_ERROR_EINVAL : loader::guest_sema_signal(a.i[0], a.i[1]); }));
   symbols_.push_back(impl("libkernel", "sceKernelDeleteSema", [](V a) -> std::int64_t {
-    std::int64_t h = a.empty() ? 0 : a[0]; return loader::guest_sema_destroy(&h); }));
+    std::int64_t h = a.i[0]; return loader::guest_sema_destroy(&h); }));
   add_libc_abi_symbols(symbols_);  // C3
   add_hw_abi_symbols(symbols_);    // C5
   // Declared-only taxonomy entries (honest: no host implementation yet).
@@ -269,114 +265,108 @@ PrxRegistry::PrxRegistry() {
   symbols_.push_back(decl_only("libkernel", "sceKernelAvailableFlexibleMemorySize"));
   // libkernel memory management (over POSIX mmap/mprotect/munmap).
   symbols_.push_back(impl("libkernel", "sceKernelMapMemory",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
+      [](const GuestCallArgs& a) -> std::int64_t {
+        if ((2 > 6)) return SCE_KERNEL_ERROR_EINVAL;
         return reinterpret_cast<std::int64_t>(sceKernelMapMemory(
-            static_cast<std::size_t>(a[0]), a[1]));
+            static_cast<std::size_t>(a.i[0]), a.i[1]));
       }));
   symbols_.push_back(impl("libkernel", "sceKernelMunmap",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
-        return sceKernelMunmap(reinterpret_cast<void*>(a[0]),
-                               static_cast<std::size_t>(a[1]));
+      [](const GuestCallArgs& a) -> std::int64_t {
+        if ((2 > 6)) return SCE_KERNEL_ERROR_EINVAL;
+        return sceKernelMunmap(reinterpret_cast<void*>(a.i[0]),
+                               static_cast<std::size_t>(a.i[1]));
       }));
   symbols_.push_back(impl("libkernel", "sceKernelMTypeprotect",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
-        return sceKernelMTypeprotect(reinterpret_cast<void*>(a[0]),
-                                     static_cast<std::size_t>(a[1]), a[2]);
+      [](const GuestCallArgs& a) -> std::int64_t {
+        if ((3 > 6)) return SCE_KERNEL_ERROR_EINVAL;
+        return sceKernelMTypeprotect(reinterpret_cast<void*>(a.i[0]),
+                                     static_cast<std::size_t>(a.i[1]), a.i[2]);
       }));
   symbols_.push_back(impl("libkernel", "sceKernelQueryMemoryProtection",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
+      [](const GuestCallArgs& a) -> std::int64_t {
         void* s = nullptr; void* e = nullptr; std::int64_t prot = 0;
         const auto rc = sceKernelQueryMemoryProtection(
-            reinterpret_cast<void*>(a[0]), &s, &e, &prot);
-        if (rc == SCE_OK && a.size() >= 4) {
-          *reinterpret_cast<void**>(a[1]) = s;
-          *reinterpret_cast<void**>(a[2]) = e;
-          *reinterpret_cast<std::int64_t*>(a[3]) = prot;
+            reinterpret_cast<void*>(a.i[0]), &s, &e, &prot);
+        if (rc == SCE_OK) {
+          *reinterpret_cast<void**>(a.i[1]) = s;
+          *reinterpret_cast<void**>(a.i[2]) = e;
+          *reinterpret_cast<std::int64_t*>(a.i[3]) = prot;
         }
         return rc;
       }));
   // libSceLibcInternal subset, implemented over host equivalents.
   symbols_.push_back(impl("libSceLibcInternal", "printf",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
-        const auto* fmt = reinterpret_cast<const char*>(a[0]);
-        return sce_libc_printf(fmt, {a.begin() + 1, a.end()});
+      [](const GuestCallArgs& a) -> std::int64_t {
+        const auto* fmt = reinterpret_cast<const char*>(a.i[0]);
+        return sce_libc_printf(fmt, a, 1);
       }));
   symbols_.push_back(impl("libSceLibcInternal", "malloc",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
-        return reinterpret_cast<std::int64_t>(sce_libc_malloc(static_cast<std::size_t>(a[0])));
+      [](const GuestCallArgs& a) -> std::int64_t {
+        return reinterpret_cast<std::int64_t>(sce_libc_malloc(static_cast<std::size_t>(a.i[0])));
       }));
   symbols_.push_back(impl("libSceLibcInternal", "free",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
-        sce_libc_free(reinterpret_cast<void*>(a[0]));
+      [](const GuestCallArgs& a) -> std::int64_t {
+        sce_libc_free(reinterpret_cast<void*>(a.i[0]));
         return SCE_OK;
       }));
   symbols_.push_back(impl("libSceLibcInternal", "memcpy",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
+      [](const GuestCallArgs& a) -> std::int64_t {
+        if ((3 > 6)) return SCE_KERNEL_ERROR_EINVAL;
         return reinterpret_cast<std::int64_t>(sce_libc_memcpy(
-            reinterpret_cast<void*>(a[0]), reinterpret_cast<const void*>(a[1]),
-            static_cast<std::size_t>(a[2])));
+            reinterpret_cast<void*>(a.i[0]), reinterpret_cast<const void*>(a.i[1]),
+            static_cast<std::size_t>(a.i[2])));
       }));
   symbols_.push_back(impl("libSceLibcInternal", "memset",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
+      [](const GuestCallArgs& a) -> std::int64_t {
+        if ((3 > 6)) return SCE_KERNEL_ERROR_EINVAL;
         return reinterpret_cast<std::int64_t>(sce_libc_memset(
-            reinterpret_cast<void*>(a[0]), static_cast<int>(a[1]),
-            static_cast<std::size_t>(a[2])));
+            reinterpret_cast<void*>(a.i[0]), static_cast<int>(a.i[1]),
+            static_cast<std::size_t>(a.i[2])));
       }));
   symbols_.push_back(impl("libSceLibcInternal", "strlen",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
+      [](const GuestCallArgs& a) -> std::int64_t {
         return static_cast<std::int64_t>(
-            sce_libc_strlen(reinterpret_cast<const char*>(a[0])));
+            sce_libc_strlen(reinterpret_cast<const char*>(a.i[0])));
       }));
   symbols_.push_back(impl("libSceLibcInternal", "strcmp",
-      [](const std::vector<std::int64_t>& a) -> std::int64_t {
-        if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
-        return sce_libc_strcmp(reinterpret_cast<const char*>(a[0]),
-                               reinterpret_cast<const char*>(a[1]));
+      [](const GuestCallArgs& a) -> std::int64_t {
+        if ((2 > 6)) return SCE_KERNEL_ERROR_EINVAL;
+        return sce_libc_strcmp(reinterpret_cast<const char*>(a.i[0]),
+                               reinterpret_cast<const char*>(a.i[1]));
       }));
 }
 
 void PrxRegistry::install_file_calls(PsFileTable* t) {
   if (t == nullptr) return;
   auto set_impl = [this, t](const char* name,
-      std::function<std::int64_t(const std::vector<std::int64_t>&)> fn) {
+      std::function<std::int64_t(const GuestCallArgs&)> fn) {
     for (auto& s : symbols_)
       if (s.name == name) { s.implemented = true; s.invoke = std::move(fn); }
   };
-  set_impl("sceKernelOpen", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
-    if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
-    return t->open(reinterpret_cast<const char*>(a[0]), a[1]);
+  set_impl("sceKernelOpen", [t](const GuestCallArgs& a) -> std::int64_t {
+    if ((2 > 6)) return SCE_KERNEL_ERROR_EINVAL;
+    return t->open(reinterpret_cast<const char*>(a.i[0]), a.i[1]);
   });
-  set_impl("sceKernelRead", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
-    if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
-    return t->read(a[0], reinterpret_cast<void*>(a[1]),
-                   static_cast<std::size_t>(a[2]));
+  set_impl("sceKernelRead", [t](const GuestCallArgs& a) -> std::int64_t {
+    if ((3 > 6)) return SCE_KERNEL_ERROR_EINVAL;
+    return t->read(a.i[0], reinterpret_cast<void*>(a.i[1]),
+                   static_cast<std::size_t>(a.i[2]));
   });
-  set_impl("sceKernelWrite", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
-    if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
-    return t->write(a[0], reinterpret_cast<const void*>(a[1]),
-                    static_cast<std::size_t>(a[2]));
+  set_impl("sceKernelWrite", [t](const GuestCallArgs& a) -> std::int64_t {
+    if ((3 > 6)) return SCE_KERNEL_ERROR_EINVAL;
+    return t->write(a.i[0], reinterpret_cast<const void*>(a.i[1]),
+                    static_cast<std::size_t>(a.i[2]));
   });
-  set_impl("sceKernelClose", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
-    if (a.empty()) return SCE_KERNEL_ERROR_EINVAL;
-    return t->close(a[0]);
+  set_impl("sceKernelClose", [t](const GuestCallArgs& a) -> std::int64_t {
+    return t->close(a.i[0]);
   });
-  set_impl("sceKernelLseek", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
-    if (a.size() < 3) return SCE_KERNEL_ERROR_EINVAL;
-    return t->lseek(a[0], a[1], a[2]);
+  set_impl("sceKernelLseek", [t](const GuestCallArgs& a) -> std::int64_t {
+    if ((3 > 6)) return SCE_KERNEL_ERROR_EINVAL;
+    return t->lseek(a.i[0], a.i[1], a.i[2]);
   });
-  set_impl("sceKernelFstat", [t](const std::vector<std::int64_t>& a) -> std::int64_t {
-    if (a.size() < 2) return SCE_KERNEL_ERROR_EINVAL;
-    return t->fstat(a[0], reinterpret_cast<SceKernelStat*>(a[1]));
+  set_impl("sceKernelFstat", [t](const GuestCallArgs& a) -> std::int64_t {
+    if ((2 > 6)) return SCE_KERNEL_ERROR_EINVAL;
+    return t->fstat(a.i[0], reinterpret_cast<SceKernelStat*>(a.i[1]));
   });
 }
 
@@ -394,7 +384,7 @@ const PrxSymbol* PrxRegistry::find_name(const std::string& name) const {
 
 SceInt32 PrxRegistry::bind(
     const std::string& nid,
-    std::function<std::int64_t(const std::vector<std::int64_t>&)>* fn,
+    std::function<std::int64_t(const GuestCallArgs&)>* fn,
     std::string* error) const {
   const PrxSymbol* s = find(nid);
   if (s == nullptr) {
