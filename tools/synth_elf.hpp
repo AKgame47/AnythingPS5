@@ -35,6 +35,11 @@ std::vector<std::uint8_t> build_synthetic_libc_elf();
 // "1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0" through printf (8 xmm argument lanes live).
 std::vector<std::uint8_t> build_synthetic_fp_elf();
 
+// Slice S36: a module calling printf with both register pools exhausted and the stack overflow
+// interleaved across classes (i6, i7, i8, then the 9th double, in argument order). Returns 0
+// only when the host consumes the spill window correctly; prints "1 11 2 12 ... 8 18 9".
+std::vector<std::uint8_t> build_synthetic_stkovf_elf();
+
 // Slice S32: a module with DT_INIT, DT_INIT_ARRAY (2), DT_FINI_ARRAY (2), DT_FINI and two
 // atexit handlers registered from its entry point. Every lifecycle function prints one letter
 // through the bound putchar; the exact stdout order "IABE21yxF" proves the call order:
