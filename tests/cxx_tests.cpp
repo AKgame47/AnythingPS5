@@ -94,6 +94,15 @@ void pnr_cxx_tests(int& pass, int& fail) {
   check(st.ok && rr.finished && !rr.signaled && rr.exit_code == pnr::tools::kCxxExitReturn,
         "cxx: guard + nested-callback qsort + dtors (branching, multi-call, arg-checked) run in order EGnQQbB, exit 55");
 
+  // S48: the outer descending comparator starts an inner ascending sort exactly once.
+  // The guest checks all four inner values, then the original entry checks all four outer
+  // values. A leaked inner comparator makes the outer check fail with exit 62.
+  write(dir + "/nested.elf", pnr::tools::build_synthetic_nested_qsort_elf());
+  fflush(stdout);
+  st = run_module(dir + "/nested.elf", reg, &rr, &rep);
+  check(st.ok && rr.finished && !rr.signaled && rr.exit_code == pnr::tools::kCxxExitReturn,
+        "cxx: nested ascending qsort preserves outer descending comparator, both arrays exact");
+
   cmd = "rm -rf " + dir;
   if (std::system(cmd.c_str()) != 0) {}
 }
