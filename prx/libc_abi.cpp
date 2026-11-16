@@ -26,6 +26,14 @@ std::mutex g_sys_mu;
 std::set<std::int64_t>& sys_set() { static std::set<std::int64_t> s; return s; }
 std::uint32_t g_rand = 1;
 constexpr std::int64_t kSceEinval = SCE_KERNEL_ERROR_EINVAL;
+// Slice S34: qsort's guest comparator (thread-local so nested/concurrent sorts do not race)
+// and the __cxa_guard_* lock.
+thread_local std::uint64_t s_qsort_cmp = 0;
+int qsort_guest_cmp(const void* x, const void* y) {
+  return static_cast<int>(pnr::loader::call_guest_function(s_qsort_cmp, reinterpret_cast<std::int64_t>(x),
+                                                           reinterpret_cast<std::int64_t>(y)));
+}
+std::mutex& guard_mu() { static std::mutex m; return m; }
 }  // namespace
 
 std::string format_c(const char* fmt, const std::vector<std::int64_t>& args) {
@@ -156,6 +164,49 @@ void add_libc_abi_symbols(std::vector<PrxSymbol>& out) {
   add(L, "exit", [need](Args a) -> std::int64_t {
     pnr::loader::guest_exit_with(need(a, 1) ? static_cast<int>(a[0]) & 0xff : 0);
     return 0;
+  });
+  // Slice S34: C++ ABI + qsort. __cxa_atexit/__cxa_thread_atexit_impl register GUEST function
+  // pointers with one argument; the dso argument is accepted and ignored (no per-module unload).
+  add(L, "__cxa_atexit", [need](Args a) -> std::int64_t {
+    return need(a, 3) && a[0] ? pnr::loader::guest_cxa_atexit_register(static_cast<std::uint64_t>(a[0]), static_cast<std::uint64_t>(a[1]))
+                              : kSceEinval;
+  });
+  add(L, "__cxa_thread_atexit_impl", [need](Args a) -> std::int64_t {
+    return need(a, 3) && a[0] ? pnr::loader::guest_cxa_thread_atexit_register(static_cast<std::uint64_t>(a[0]), static_cast<std::uint64_t>(a[1]))
+                              : kSceEinval;
+  });
+  // qsort with a GUEST comparator: the trampoline calls back into guest code through
+  // call_guest_function (S32), which switches FS. Pointers are guest addresses = host addresses
+  // (same process). The comparator's int result passes through unchanged.
+  add(L, "qsort", [need](Args a) -> std::int64_t {
+    if (!need(a, 4) || !a[3] || (a[1] != 0 && (!a[0] || !a[2]))) return kSceEinval;
+    s_qsort_cmp = static_cast<std::uint64_t>(a[3]);
+    std::qsort(M(a[0]), static_cast<std::size_t>(a[1]), static_cast<std::size_t>(a[2]), &qsort_guest_cmp);
+    return 0;
+  });
+  // __cxa_guard_* for function-local statics: first byte of the guard object is the initialized
+  // flag (Itanium ABI). Simplified semantics: no blocking wait for an in-progress init on another
+  // thread (documented); a plain mutex keeps concurrent checks consistent.
+  add(L, "__cxa_guard_acquire", [need](Args a) -> std::int64_t {
+    if (!need(a, 1) || !a[0]) return kSceEinval;
+    std::lock_guard<std::mutex> l(guard_mu());
+    return *reinterpret_cast<std::uint8_t*>(M(a[0])) != 0 ? 0 : 1;
+  });
+  add(L, "__cxa_guard_release", [need](Args a) -> std::int64_t {
+    if (!need(a, 1) || !a[0]) return kSceEinval;
+    std::lock_guard<std::mutex> l(guard_mu());
+    *reinterpret_cast<std::uint8_t*>(M(a[0])) = 1;
+    return 0;
+  });
+  add(L, "__cxa_guard_abort", [need](Args a) -> std::int64_t {
+    if (!need(a, 1) || !a[0]) return kSceEinval;
+    std::lock_guard<std::mutex> l(guard_mu());
+    *reinterpret_cast<std::uint8_t*>(M(a[0])) = 0;
+    return 0;
+  });
+  add(L, "__cxa_pure_virtual", [](Args) -> std::int64_t {
+    std::fprintf(stderr, "pnr: pure virtual function called in guest module\n");
+    ::_exit(70);  // abort semantics: no atexit/fini, matching the host C++ runtime
   });
 
   // libSceSysmodule: STUBS. Ids are recorded, nothing is loaded.
