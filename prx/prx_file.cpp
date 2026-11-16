@@ -15,8 +15,15 @@ std::int64_t PsFileTable::open(const std::string& path, std::int64_t flags) {
                              SCE_KERNEL_O_APPEND;
   if ((flags & ~known & ~0x3) != 0 || (flags & 0x3) > SCE_KERNEL_O_RDWR)
     return SCE_KERNEL_ERROR_EINVAL;
+  // PlayStation modules address their installed assets through the /app0 mount. Map that
+  // prefix to the jail root (the jail IS the game's data area); every other path resolves
+  // inside the jail unchanged. This is a path-prefix translation only, no host filesystem
+  // semantics are widened.
+  std::string vpath = path;
+  if (vpath.rfind("/app0/", 0) == 0) vpath = vpath.substr(5);
+  else if (vpath == "/app0") vpath = "/";
   std::string host;
-  if (!fs_.resolve(path, host)) return SCE_KERNEL_ERROR_EINVAL;  // jail says no
+  if (!fs_.resolve(vpath, host)) return SCE_KERNEL_ERROR_EINVAL;  // jail says no
   int hflags = 0;
   switch (flags & 0x3) {
     case SCE_KERNEL_O_RDONLY: hflags = O_RDONLY; break;
