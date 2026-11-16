@@ -326,9 +326,9 @@ PrxRegistry::PrxRegistry() {
         const auto rc = sceKernelQueryMemoryProtection(
             reinterpret_cast<void*>(a.i[0]), &s, &e, &prot);
         if (rc == SCE_OK) {
-          *reinterpret_cast<void**>(a.i[1]) = s;
-          *reinterpret_cast<void**>(a.i[2]) = e;
-          *reinterpret_cast<std::int64_t*>(a.i[3]) = prot;
+          if (a.i[1]) *reinterpret_cast<void**>(a.i[1]) = s;
+          if (a.i[2]) *reinterpret_cast<void**>(a.i[2]) = e;
+          if (a.i[3]) *reinterpret_cast<std::int64_t*>(a.i[3]) = prot;
         }
         return rc;
       }));
