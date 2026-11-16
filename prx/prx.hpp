@@ -22,13 +22,22 @@ constexpr SceInt32 SCE_KERNEL_ERROR_ENOMEM = -1;
 constexpr SceInt32 SCE_KERNEL_ERROR_EINVAL = -2;
 constexpr SceInt32 SCE_KERNEL_ERROR_UNKNOWN = -3;
 
+// Slice S35: the arguments a guest-to-host thunk captures at the call boundary, per the
+// System V AMD64 ABI: up to 6 integer/pointer arguments (rdi, rsi, rdx, rcx, r8, r9) in i[],
+// and up to 8 floating point arguments (xmm0-7) in x[]. Arguments beyond the register counts
+// (stack spill) are NOT captured - a documented thunk limit.
+struct GuestCallArgs {
+  std::int64_t i[6] = {};
+  double x[8] = {};
+};
+
 // One exported symbol of a PS-style system library.
 struct PrxSymbol {
   std::string library;   // e.g. "libkernel"
   std::string name;      // e.g. "sceKernelUsleep"
   std::string nid;       // computed via loader::nid::compute_nid
   bool implemented;      // false => declared in taxonomy, no host impl yet
-  std::function<std::int64_t(const std::vector<std::int64_t>&)> invoke;
+  std::function<std::int64_t(const GuestCallArgs&)> invoke;
 };
 
 // The registry a loader consults to bind imports by NID.
@@ -50,7 +59,7 @@ class PrxRegistry {
   // SCE_KERNEL_ERROR_UNKNOWN when the NID is not in the taxonomy;
   // SCE_KERNEL_ERROR_EINVAL when known but not yet implemented (honest).
   SceInt32 bind(const std::string& nid,
-                std::function<std::int64_t(const std::vector<std::int64_t>&)>* fn,
+                std::function<std::int64_t(const GuestCallArgs&)>* fn,
                 std::string* error) const;
 
   // Installs the libkernel file calls (open/read/write/close/lseek/fstat)
@@ -84,14 +93,15 @@ SceInt32 sceKernelQueryMemoryProtection(void* addr, void** start, void** end,
                                         std::int64_t* prot);
 
 // Host implementations (libSceLibcInternal subset). printf is a bounded
-// formatter: %d %i %u %x %s %c %% only, at most 8 variadic args - the
-// honest limit of a NID trampoline; anything else prints literally.
+// formatter: integer conversions plus %f %e %g %a (slice S35), consuming the
+// SysV gp/xmm argument pools captured by the thunk; anything else prints
+// literally. gp0 is the index of the first variadic gp slot (1 for printf).
 void* sce_libc_memcpy(void* dst, const void* src, std::size_t n);
 void* sce_libc_memset(void* dst, int c, std::size_t n);
 std::size_t sce_libc_strlen(const char* s);
 int sce_libc_strcmp(const char* a, const char* b);
 void* sce_libc_malloc(std::size_t size);
 void sce_libc_free(void* ptr);
-int sce_libc_printf(const char* fmt, const std::vector<std::int64_t>& args);
+int sce_libc_printf(const char* fmt, const GuestCallArgs& args, std::size_t gp0);
 
 }  // namespace pnr::prx
