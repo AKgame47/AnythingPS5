@@ -43,17 +43,31 @@ SlotTable& slots() { static SlotTable t; return t; }
 // the System V ABI delivers floating point guest arguments (xmm0-7) alongside the 6 gp registers
 // and the compiler preserves both pools into GuestCallArgs. Guests passing fewer FP arguments
 // leave the remaining slots with arbitrary values; consumers read only what their contract needs.
+// Slice S36: the 8 trailing int64 parameters are, per the SysV class rules, the 7th-14th
+// INTEGER-class arguments, so the ABI places them on the caller's stack as consecutive 8-byte
+// slots in declared order starting at [rsp+8] - exactly the region where any guest call spills
+// its overflow arguments (7th+ gp, 9th+ xmm, interleaved in the guest's argument order). The
+// thunk copies the window verbatim into GuestCallArgs::s and never interprets it; bindings and
+// the varargs formatter decode slots per their own signature/conversion order. Declaring them
+// as one trailing run of the same class is what makes this a verbatim copy: interleaving typed
+// overflow parameters would let each class's declared sequence choose different offsets than
+// the guest's argument-order layout.
 template <int I>
 __attribute__((optimize("no-stack-protector"))) std::int64_t thunk(std::int64_t a, std::int64_t b, std::int64_t c, std::int64_t d, std::int64_t e, std::int64_t f,
-                                                                   double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7) {
+                                                                   double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7,
+                                                                   std::int64_t s0, std::int64_t s1, std::int64_t s2, std::int64_t s3,
+                                                                   std::int64_t s4, std::int64_t s5, std::int64_t s6, std::int64_t s7) {
   // Guest code runs with its own FS base (TLS/TCB). Host code needs the host FS, so switch for the call.
   const std::uint64_t g = pnr::loader::guest_to_host();
-  const std::int64_t r = slots().fn[I](pnr::prx::GuestCallArgs{{a, b, c, d, e, f}, {x0, x1, x2, x3, x4, x5, x6, x7}});
+  const std::int64_t r = slots().fn[I](pnr::prx::GuestCallArgs{{a, b, c, d, e, f}, {x0, x1, x2, x3, x4, x5, x6, x7},
+                                                               {s0, s1, s2, s3, s4, s5, s6, s7}});
   pnr::loader::host_to_guest(g);
   return r;
 }
 using ThunkPtr = std::int64_t (*)(std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t,
-                                  double, double, double, double, double, double, double, double);
+                                  double, double, double, double, double, double, double, double,
+                                  std::int64_t, std::int64_t, std::int64_t, std::int64_t,
+                                  std::int64_t, std::int64_t, std::int64_t, std::int64_t);
 template <int... I>
 std::array<ThunkPtr, kMaxSlots> make_thunks(std::integer_sequence<int, I...>) { return {{&thunk<I>...}}; }
 const std::array<ThunkPtr, kMaxSlots>& thunks() {
@@ -68,16 +82,21 @@ const std::array<ThunkPtr, kMaxSlots>& thunks() {
 // PrxSymbol::returns_fp.
 template <int I>
 __attribute__((optimize("no-stack-protector"))) double thunkf(std::int64_t a, std::int64_t b, std::int64_t c, std::int64_t d, std::int64_t e, std::int64_t f,
-                                                              double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7) {
+                                                              double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7,
+                                                              std::int64_t s0, std::int64_t s1, std::int64_t s2, std::int64_t s3,
+                                                              std::int64_t s4, std::int64_t s5, std::int64_t s6, std::int64_t s7) {
   const std::uint64_t g = pnr::loader::guest_to_host();
-  const std::int64_t r = slots().fn[I](pnr::prx::GuestCallArgs{{a, b, c, d, e, f}, {x0, x1, x2, x3, x4, x5, x6, x7}});
+  const std::int64_t r = slots().fn[I](pnr::prx::GuestCallArgs{{a, b, c, d, e, f}, {x0, x1, x2, x3, x4, x5, x6, x7},
+                                                               {s0, s1, s2, s3, s4, s5, s6, s7}});
   pnr::loader::host_to_guest(g);
   double out;
   std::memcpy(&out, &r, 8);
   return out;
 }
 using ThunkFPtr = double (*)(std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t,
-                             double, double, double, double, double, double, double, double);
+                             double, double, double, double, double, double, double, double,
+                             std::int64_t, std::int64_t, std::int64_t, std::int64_t,
+                             std::int64_t, std::int64_t, std::int64_t, std::int64_t);
 template <int... I>
 std::array<ThunkFPtr, kMaxSlots> make_thunks_f(std::integer_sequence<int, I...>) { return {{&thunkf<I>...}}; }
 const std::array<ThunkFPtr, kMaxSlots>& thunks_f() {
