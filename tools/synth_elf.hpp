@@ -44,6 +44,7 @@ std::vector<std::uint8_t> build_synthetic_stkovf_elf();
 // reads 12 bytes, byte-compares "pnr-asset-42", prints "asset ok", exits 0 on success (1..5
 // otherwise). Needs a jail with asset.txt seeded; module-run uses PNR_JAIL_ROOT.
 std::vector<std::uint8_t> build_synthetic_file_elf();
+std::vector<std::uint8_t> build_synthetic_filew_elf();
 
 // Slice S32: a module with DT_INIT, DT_INIT_ARRAY (2), DT_FINI_ARRAY (2), DT_FINI and two
 // atexit handlers registered from its entry point. Every lifecycle function prints one letter
