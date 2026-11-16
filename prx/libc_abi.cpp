@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -34,6 +35,7 @@ int qsort_guest_cmp(const void* x, const void* y) {
                                                            reinterpret_cast<std::int64_t>(y)));
 }
 std::mutex& guard_mu() { static std::mutex m; return m; }
+std::condition_variable& guard_cv() { static std::condition_variable c; return c; }
 }  // namespace
 
 std::string format_c(const char* fmt, const std::vector<std::int64_t>& args) {
@@ -184,24 +186,34 @@ void add_libc_abi_symbols(std::vector<PrxSymbol>& out) {
     std::qsort(M(a[0]), static_cast<std::size_t>(a[1]), static_cast<std::size_t>(a[2]), &qsort_guest_cmp);
     return 0;
   });
-  // __cxa_guard_* for function-local statics: first byte of the guard object is the initialized
+  // __cxa_guard_* for function-local statics (Itanium layout): byte 0 of the guard object is the
+  // initialized flag, byte 1 is the initialization-pending flag. A thread that finds the pending
+  // flag set BLOCKS until the initializing thread releases or aborts, so one static is never
+  // initialized twice. (Recursive acquisition by the initializing thread itself deadlocks, as
+  // with glibc; guest code must not do that.)
   // flag (Itanium ABI). Simplified semantics: no blocking wait for an in-progress init on another
   // thread (documented); a plain mutex keeps concurrent checks consistent.
   add(L, "__cxa_guard_acquire", [need](Args a) -> std::int64_t {
     if (!need(a, 1) || !a[0]) return kSceEinval;
-    std::lock_guard<std::mutex> l(guard_mu());
-    return *reinterpret_cast<std::uint8_t*>(M(a[0])) != 0 ? 0 : 1;
+    auto* g = reinterpret_cast<std::uint8_t*>(M(a[0]));
+    std::unique_lock<std::mutex> l(guard_mu());
+    while ((g[1] & 1) != 0) guard_cv().wait(l);  // another thread is initializing: wait for it
+    if (g[0] != 0) return 0;                     // already initialized
+    g[1] = 1;                                    // claim the initialization
+    return 1;
   });
   add(L, "__cxa_guard_release", [need](Args a) -> std::int64_t {
     if (!need(a, 1) || !a[0]) return kSceEinval;
-    std::lock_guard<std::mutex> l(guard_mu());
-    *reinterpret_cast<std::uint8_t*>(M(a[0])) = 1;
+    auto* g = reinterpret_cast<std::uint8_t*>(M(a[0]));
+    { std::lock_guard<std::mutex> l(guard_mu()); g[0] = 1; g[1] = 0; }
+    guard_cv().notify_all();
     return 0;
   });
   add(L, "__cxa_guard_abort", [need](Args a) -> std::int64_t {
     if (!need(a, 1) || !a[0]) return kSceEinval;
-    std::lock_guard<std::mutex> l(guard_mu());
-    *reinterpret_cast<std::uint8_t*>(M(a[0])) = 0;
+    auto* g = reinterpret_cast<std::uint8_t*>(M(a[0]));
+    { std::lock_guard<std::mutex> l(guard_mu()); g[0] = 0; g[1] = 0; }
+    guard_cv().notify_all();
     return 0;
   });
   add(L, "__cxa_pure_virtual", [](Args) -> std::int64_t {
