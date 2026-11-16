@@ -10,7 +10,7 @@
 
 namespace pnr::prx {
 namespace {
-using Args = const std::vector<std::int64_t>&;
+using Args = const GuestCallArgs&;
 constexpr std::int32_t kErrInvalid = -2;  // PNR's generic invalid-argument code, not a Sony error value
 
 struct Port { AudioPortInfo info; std::vector<std::int16_t> captured; };
@@ -75,8 +75,8 @@ void add_hw_abi_symbols(std::vector<PrxSymbol>& out) {
   add(A, "sceAudioOutInit", [](Args) -> std::int64_t { std::lock_guard<std::mutex> l(st().mu); st().audio_init = true; return 0; });
   // sceAudioOutOpen(userId, type, index, len, freq, param) -> handle > 0, or a negative error.
   add(A, "sceAudioOutOpen", [](Args a) -> std::int64_t {
-    if (a.size() < 6) return kErrInvalid;
-    const std::uint32_t len = static_cast<std::uint32_t>(a[3]), freq = static_cast<std::uint32_t>(a[4]), fmt = static_cast<std::uint32_t>(a[5]);
+    if ((6 > 6)) return kErrInvalid;
+    const std::uint32_t len = static_cast<std::uint32_t>(a.i[3]), freq = static_cast<std::uint32_t>(a.i[4]), fmt = static_cast<std::uint32_t>(a.i[5]);
     if (len == 0 || len > 4096 || (freq != 48000 && freq != 44100) || fmt > 3) return kErrInvalid;
     std::lock_guard<std::mutex> l(st().mu);
     if (!st().audio_init) return kErrInvalid;
@@ -91,18 +91,18 @@ void add_hw_abi_symbols(std::vector<PrxSymbol>& out) {
   });
   // sceAudioOutOutput(handle, ptr) -> frames consumed (len), or negative. ptr may be null (a flush): then 0.
   add(A, "sceAudioOutOutput", [](Args a) -> std::int64_t {
-    if (a.size() < 2) return kErrInvalid;
+    if ((2 > 6)) return kErrInvalid;
     std::lock_guard<std::mutex> l(st().mu);
-    auto it = st().ports.find(static_cast<std::int32_t>(a[0]));
+    auto it = st().ports.find(static_cast<std::int32_t>(a.i[0]));
     if (it == st().ports.end()) return kErrInvalid;
-    if (!a[1]) return 0;
+    if (!a.i[1]) return 0;
     Port& p = it->second;
     const std::size_t n = std::size_t(p.info.frames_per_buffer) * p.info.channels;
     std::vector<std::int16_t> s(n);
     if (p.info.format == AudioFormat::S16Mono || p.info.format == AudioFormat::S16Stereo) {
-      std::memcpy(s.data(), reinterpret_cast<const void*>(a[1]), n * 2);
+      std::memcpy(s.data(), reinterpret_cast<const void*>(a.i[1]), n * 2);
     } else {
-      const float* f = reinterpret_cast<const float*>(a[1]);
+      const float* f = reinterpret_cast<const float*>(a.i[1]);
       for (std::size_t i = 0; i < n; ++i) { float v; std::memcpy(&v, f + i, 4); s[i] = clip16(v); }
     }
     p.captured.insert(p.captured.end(), s.begin(), s.end());
@@ -110,36 +110,34 @@ void add_hw_abi_symbols(std::vector<PrxSymbol>& out) {
     return p.info.frames_per_buffer;
   });
   add(A, "sceAudioOutClose", [](Args a) -> std::int64_t {
-    if (a.empty()) return kErrInvalid;
     std::lock_guard<std::mutex> l(st().mu);
-    return st().ports.erase(static_cast<std::int32_t>(a[0])) ? 0 : kErrInvalid;
+    return st().ports.erase(static_cast<std::int32_t>(a.i[0])) ? 0 : kErrInvalid;
   });
 
   add(P, "scePadInit", [](Args) -> std::int64_t { std::lock_guard<std::mutex> l(st().mu); st().pad_init = true; return 0; });
   // scePadOpen(userId, type, index, param) -> handle > 0. Only index 0 (one pad) exists.
   add(P, "scePadOpen", [](Args a) -> std::int64_t {
-    if (a.size() < 3) return kErrInvalid;
+    if ((3 > 6)) return kErrInvalid;
     std::lock_guard<std::mutex> l(st().mu);
-    if (!st().pad_init || a[2] != 0 || !st().pads.empty()) return kErrInvalid;
+    if (!st().pad_init || a.i[2] != 0 || !st().pads.empty()) return kErrInvalid;
     const std::int32_t h = st().next_pad++;
     st().pads[h] = true;
     return h;
   });
   // scePadReadState(handle, ptr): writes PadData fields at offsets 0..9 only.
   add(P, "scePadReadState", [](Args a) -> std::int64_t {
-    if (a.size() < 2 || !a[1]) return kErrInvalid;
+    if ((2 > 6) || !a.i[1]) return kErrInvalid;
     std::lock_guard<std::mutex> l(st().mu);
-    if (!st().pads.count(static_cast<std::int32_t>(a[0]))) return kErrInvalid;
-    std::uint8_t* d = reinterpret_cast<std::uint8_t*>(a[1]);
+    if (!st().pads.count(static_cast<std::int32_t>(a.i[0]))) return kErrInvalid;
+    std::uint8_t* d = reinterpret_cast<std::uint8_t*>(a.i[1]);
     const PadData& p = st().pad;
     std::memcpy(d, &p.buttons, 4);
     d[4] = p.lx; d[5] = p.ly; d[6] = p.rx; d[7] = p.ry; d[8] = p.l2; d[9] = p.r2;
     return 0;
   });
   add(P, "scePadClose", [](Args a) -> std::int64_t {
-    if (a.empty()) return kErrInvalid;
     std::lock_guard<std::mutex> l(st().mu);
-    return st().pads.erase(static_cast<std::int32_t>(a[0])) ? 0 : kErrInvalid;
+    return st().pads.erase(static_cast<std::int32_t>(a.i[0])) ? 0 : kErrInvalid;
   });
 }
 
