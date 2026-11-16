@@ -773,11 +773,24 @@ int main() {
     CHECK(table.read(fd, buf, 9) == 9 && std::string(buf, 9) == "hello pnr",
           "fs: read bytes");
     CHECK(table.lseek(fd, 0, pnr::prx::SCE_KERNEL_SEEK_SET) == 0, "fs: lseek");
+    // S39: the other whences and their returned positions
+    CHECK(table.lseek(fd, 4, pnr::prx::SCE_KERNEL_SEEK_SET) == 4,
+          "fs: lseek SET returns position");
+    CHECK(table.lseek(fd, 1, pnr::prx::SCE_KERNEL_SEEK_CUR) == 5,
+          "fs: lseek CUR returns position");
+    CHECK(table.lseek(fd, -2, pnr::prx::SCE_KERNEL_SEEK_END) == 7,
+          "fs: lseek END negative offset returns position");
+    CHECK(table.lseek(fd, 0, 99) == pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+          "fs: lseek bad whence EINVAL");
+    CHECK(table.lseek(fd, 0, pnr::prx::SCE_KERNEL_SEEK_SET) == 0, "fs: lseek reset");
     pnr::prx::SceKernelStat st{};
     CHECK(table.fstat(fd, &st) == pnr::prx::SCE_OK && st.size == 9 &&
               !st.is_directory,
           "fs: fstat size");
     CHECK(table.read(fd, buf, 4) == 4, "fs: read after seek");
+    pnr::prx::SceKernelStat st2{};
+    CHECK(table.fstat(9999, &st2) == pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+          "fs: fstat unknown fd EINVAL");
     CHECK(table.close(fd) == pnr::prx::SCE_OK, "fs: close");
     CHECK(table.close(fd) == pnr::prx::SCE_KERNEL_ERROR_EINVAL,
           "fs: double close EINVAL");
