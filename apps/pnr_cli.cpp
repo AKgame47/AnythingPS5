@@ -6,6 +6,7 @@
 #include "graphics/pm4.hpp"
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -462,6 +463,12 @@ int cmd_imports(const std::string& path) {
 // Loads a Sony-style ELF in-process, binds its imports by NID and runs it in a child process.
 int cmd_module_run(const std::string& path) {
   pnr::prx::PrxRegistry reg;
+  // File calls ride the same jailed table as the launch path: PNR_JAIL_ROOT picks the jail,
+  // default ./pnr_data/jail (matching launch and the psabi convention). /app0 maps to the root.
+  const char* jr = std::getenv("PNR_JAIL_ROOT");
+  pnr::compat::FileSystemService jail(jr != nullptr && jr[0] != '\0' ? jr : "./pnr_data/jail");
+  pnr::prx::PsFileTable files(jail);
+  reg.install_file_calls(&files);
   pnr::loader::ModuleLoadReport rep;
   pnr::loader::ModuleRunResult rr;
   const auto st = pnr::loader::run_module(path, reg, &rr, &rep);
