@@ -204,7 +204,7 @@ add_test(NAME pnr_depmod_run COMMAND sh -c "mkdir -p ${CMAKE_BINARY_DIR}/depmod/
 # through a guest comparator sorted {5,3,8,1} descending); the exit sequence then runs the
 # thread destructor BEFORE the __cxa_atexit handler (glibc order), each printing the low byte
 # of its registered argument (0x51='Q', 0x42='B'), and exits 55.
-add_test(NAME pnr_cxx_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_cxx.elf --cxx && out=$($<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_cxx.elf) && echo \"$out\" && echo \"$out\" | grep -q EGQQB && echo \"$out\" | grep -q \"MODULE FINISHED: exit 55\"")
+add_test(NAME pnr_cxx_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_cxx.elf --cxx && out=$($<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_cxx.elf) && echo \"$out\" && echo \"$out\" | grep -q EGnQQbB && echo \"$out\" | grep -q \"MODULE FINISHED: exit 55\"")
 # The CLI runs a game that renders a rotating 3D cube through pnrGfx* calls.
 add_test(NAME pnr_launcher_list COMMAND pnr-launcher list)
 set_tests_properties(pnr_launcher_list PROPERTIES
