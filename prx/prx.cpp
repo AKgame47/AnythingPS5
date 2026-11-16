@@ -7,6 +7,7 @@
 #include "prx/hw_abi.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -167,8 +168,8 @@ PrxSymbol decl_only(const char* lib, const char* name) {
   return PrxSymbol{lib, name, loader::nid::compute_nid(name, lib), false, nullptr};
 }
 PrxSymbol impl(const char* lib, const char* name,
-               std::function<std::int64_t(const GuestCallArgs&)> fn) {
-  return PrxSymbol{lib, name, loader::nid::compute_nid(name, lib), true, std::move(fn)};
+               std::function<std::int64_t(const GuestCallArgs&)> fn, bool returns_fp = false) {
+  return PrxSymbol{lib, name, loader::nid::compute_nid(name, lib), true, std::move(fn), returns_fp};
 }
 }  // namespace
 
@@ -300,6 +301,24 @@ PrxRegistry::PrxRegistry() {
         const auto* fmt = reinterpret_cast<const char*>(a.i[0]);
         return sce_libc_printf(fmt, a, 1);
       }));
+  // Fixed-signature FP probes: these are the functions whose float32 decoding, mixed GP/FP
+  // argument pools, and xmm0 return path the S35 regression suite exercises. They are ordinary
+  // real-libc bindings, not fixtures: fmod reads two full double lanes, fmaxf reads the low
+  // 32 bits of each lane (float32; upper lane bits are unspecified by the ABI and the test
+  // passes deliberate garbage there), ldexp mixes one FP argument (xmm0) with one integer
+  // argument (the first GP slot), and all three return their result in xmm0.
+  symbols_.push_back(impl("libSceLibcInternal", "fmod",
+      [](const GuestCallArgs& a) -> std::int64_t {
+        return fp_ret_bits(std::fmod(arg_double(a, 0), arg_double(a, 1)));
+      }, true));
+  symbols_.push_back(impl("libSceLibcInternal", "fmaxf",
+      [](const GuestCallArgs& a) -> std::int64_t {
+        return fp_ret_bits(std::fmax(arg_float(a, 0), arg_float(a, 1)));
+      }, true));
+  symbols_.push_back(impl("libSceLibcInternal", "ldexp",
+      [](const GuestCallArgs& a) -> std::int64_t {
+        return fp_ret_bits(std::ldexp(arg_double(a, 0), static_cast<int>(a.i[0])));
+      }, true));
   symbols_.push_back(impl("libSceLibcInternal", "malloc",
       [](const GuestCallArgs& a) -> std::int64_t {
         return reinterpret_cast<std::int64_t>(sce_libc_malloc(static_cast<std::size_t>(a.i[0])));
