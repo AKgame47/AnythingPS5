@@ -174,6 +174,17 @@ target_compile_definitions(pnr_tests PRIVATE
 target_link_libraries(pnr_tests PRIVATE pnr_synth pnr_ui_model pnr_core pnr_loader pnr_compat pnr_package pnr_library pnr_platform pnr_ape pnr_laptop pnr_services pnr_prx pnr_graphics pnr_shader pnr_launcher pnr_psn pnr_store pnr_sandbox pnr_plugin)
 
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
+
+# Slice S29: validation-layer sweep. Runs each shipped texture/draw path once
+# under an explicitly requested VK_LAYER_KHRONOS_validation; SKIPs (passes)
+# when no Vulkan device or the layer is not installed, so this stays green on
+# machines without the layer. Any layer error fails the suite.
+add_executable(pnr_validation_sweep tests/validation_sweep.cpp)
+# pnr_shader and pnr_graphics are circular (execute_draw translates RDNA);
+# repeat pnr_shader so the static link rescans it.
+target_link_libraries(pnr_validation_sweep PRIVATE pnr_shader pnr_graphics pnr_shader pnr_core)
+add_test(NAME pnr_vulkan_validation COMMAND pnr_validation_sweep)
+set_tests_properties(pnr_vulkan_validation PROPERTIES FAIL_REGULAR_EXPRESSION "Validation Error")
 add_test(NAME pnr_kernel_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_kernel.elf --kernel && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_kernel.elf | grep -q \"MODULE FINISHED: exit 0\"")
 add_test(NAME pnr_libc_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_libc.elf --libc && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_libc.elf | grep -q \"C3 libc ok 42\"")
 add_test(NAME pnr_gnm_decode COMMAND sh -c "$<TARGET_FILE:pnr> gnm-synth ${CMAKE_BINARY_DIR}/synth_pm4.bin && $<TARGET_FILE:pnr> gnm-decode ${CMAKE_BINARY_DIR}/synth_pm4.bin | grep -q \"2 draws\"")
