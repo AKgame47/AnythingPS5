@@ -500,6 +500,81 @@ std::vector<std::uint8_t> build_synthetic_fp_elf() {
   return b;
 }
 
+// Slice S36: stack-spilled arguments. Calls printf with both register pools exhausted and the
+// overflow interleaved: 8 doubles fill xmm0-7, fmt + 5 ints fill the gp registers, and the
+// remaining args spill to the stack in argument order: i6, i7, i8 (gp overflow), then the 9th
+// double (xmm overflow). The expected output only appears if the host consumes the spill window
+// in argument order across both classes.
+std::vector<std::uint8_t> build_synthetic_stkovf_elf() {
+  std::vector<std::uint8_t> b(0x780, 0);
+  const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
+  std::memcpy(b.data(), ident, 8);
+  p16(b, 0x10, 3); p16(b, 0x12, 62); p32(b, 0x14, 1);
+  p64(b, 0x18, 0x100); p64(b, 0x20, 0x40);
+  p16(b, 0x34, 64); p16(b, 0x36, 56); p16(b, 0x38, 2); p16(b, 0x3A, 64);
+  const std::size_t total = b.size();
+  p32(b, 0x40, 1); p32(b, 0x44, 7); p64(b, 0x48, 0); p64(b, 0x50, 0); p64(b, 0x58, 0); p64(b, 0x60, total); p64(b, 0x68, total); p64(b, 0x70, 0x1000);
+  p32(b, 0x78, 2); p32(b, 0x7C, 6); p64(b, 0x80, 0x700); p64(b, 0x88, 0x700); p64(b, 0x90, 0x700); p64(b, 0x98, 0x80); p64(b, 0xA0, 0x80); p64(b, 0xA8, 8);
+  auto str = [&](std::size_t at, const char* s) { std::memcpy(&b[at], s, std::strlen(s) + 1); };
+  const std::size_t FMT = 0x400;
+  str(FMT, "%.0f %d %.0f %d %.0f %d %.0f %d %.0f %d %.0f %d %.0f %d %.0f %d %.0f\n");
+  std::size_t pc = 0x100;
+  std::vector<std::size_t> fails;
+  auto emit = [&](std::initializer_list<int> bytes) { for (int v : bytes) b[pc++] = static_cast<std::uint8_t>(v); };
+  auto imm32 = [&](std::uint32_t v) { p32(b, pc, v); pc += 4; };
+  auto call = [&](int g) { emit({0xFF, 0x15}); p32(b, pc, static_cast<std::uint32_t>(0x480 + 8 * g - (pc + 4))); pc += 4; };
+  auto rip = [&](std::initializer_list<int> op, std::size_t target) { emit(op); p32(b, pc, static_cast<std::uint32_t>(target - (pc + 4))); pc += 4; };
+  auto check = [&](int ok_jcc, int n) { emit({ok_jcc, 10, 0xB8}); imm32(n); emit({0xE9}); fails.push_back(pc); pc += 4; };
+  auto xmm_load = [&](int lane, std::uint64_t bits) {
+    emit({0x48, 0xB8}); p64(b, pc, bits); pc += 8;                 // mov rax, imm64
+    emit({0x66, 0x48, 0x0F, 0x6E, 0xC0 + 8 * lane});              // movq xmmK, rax
+  };
+
+  emit({0x53, 0x48, 0x83, 0xEC, 0x60});  // push rbx; sub rsp,0x60
+  rip({0x48, 0x8D, 0x3D}, FMT);          // lea rdi, [rip+FMT]
+  const std::uint64_t one_to_eight[8] = {0x3FF0000000000000ULL, 0x4000000000000000ULL, 0x4008000000000000ULL, 0x4010000000000000ULL,
+                                         0x4014000000000000ULL, 0x4018000000000000ULL, 0x401C000000000000ULL, 0x4020000000000000ULL};
+  for (int k = 0; k < 8; ++k) xmm_load(k, one_to_eight[k]);       // xmm0-7 = 1.0 .. 8.0
+  emit({0xBE}); imm32(11);                                         // mov esi, 11
+  emit({0xBA}); imm32(12);                                         // mov edx, 12
+  emit({0xB9}); imm32(13);                                         // mov ecx, 13
+  emit({0x41, 0xB8}); imm32(14);                                   // mov r8d, 14
+  emit({0x41, 0xB9}); imm32(15);                                   // mov r9d, 15
+  // Stack spill in argument order (slot0 = 16, slot1 = 17, slot2 = 18, slot3 = 9.0): push in reverse.
+  emit({0x49, 0xBA}); p64(b, pc, 0x4022000000000000ULL); pc += 8;  // mov r10, 9.0 bits
+  emit({0x41, 0x52});                                              // push r10   (slot3)
+  emit({0x41, 0xBA}); imm32(18);                                   // mov r10d, 18
+  emit({0x41, 0x52});                                              // push r10   (slot2)
+  emit({0x41, 0xBA}); imm32(17);                                   // mov r10d, 17
+  emit({0x41, 0x52});                                              // push r10   (slot1)
+  emit({0x41, 0xBA}); imm32(16);                                   // mov r10d, 16
+  emit({0x41, 0x52});                                              // push r10   (slot0)
+  emit({0xB0, 0x08});                                              // mov al, 8 (vector register count)
+  call(0);                                                         // printf
+  emit({0x48, 0x83, 0xC4, 0x20});                                  // add rsp, 32
+  emit({0x48, 0x83, 0xF8, 0x2A}); check(0x74, 1);                  // "1 11 2 12 3 13 4 14 5 15 6 16 7 17 8 18 9\n" is 42 chars
+  emit({0x31, 0xC0});
+  const std::size_t epi = pc;
+  emit({0x48, 0x83, 0xC4, 0x60, 0x5B, 0xC3});
+  for (std::size_t f : fails) p32(b, f, static_cast<std::uint32_t>(epi - (f + 4)));
+
+  const char* names[1] = {"printf"};
+  std::size_t so = 0x580 + 1;
+  for (int i = 0; i < 1; ++i) {
+    const std::string nm = pnr::loader::nid::compute_nid(names[i], "") + "#A#A";
+    const std::size_t sy = 0x500 + 24 * (i + 1);
+    p32(b, sy, static_cast<std::uint32_t>(so - 0x580)); b[sy + 4] = 0x12; p16(b, sy + 6, 0);
+    std::memcpy(&b[so], nm.c_str(), nm.size() + 1); so += nm.size() + 1;
+  }
+  const std::size_t strsz = so - 0x580;
+  const std::size_t r = 0x600;
+  p64(b, r, 0x480); p64(b, r + 8, (static_cast<std::uint64_t>(1) << 32) | 6); p64(b, r + 16, 0);
+  std::size_t dy = 0x700;
+  auto dyn = [&](std::int64_t tag, std::uint64_t v) { p64(b, dy, static_cast<std::uint64_t>(tag)); p64(b, dy + 8, v); dy += 16; };
+  dyn(6, 0x500); dyn(5, 0x580); dyn(10, strsz); dyn(11, 24); dyn(7, 0x600); dyn(8, 24); dyn(9, 24); dyn(0, 0);
+  return b;
+}
+
 std::vector<std::uint8_t> build_synthetic_lifecycle_elf(const LifecycleSpec& spec) {
   std::vector<std::uint8_t> b(0x4c0, 0);
   const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
