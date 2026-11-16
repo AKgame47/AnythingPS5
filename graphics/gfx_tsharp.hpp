@@ -40,6 +40,7 @@ struct TSharp {
   std::uint32_t base_level = 0, last_level = 0;
   std::uint32_t tiling_index = 0;  // PS5 SW_MODE: 0 = linear; tiled values in gfx_swizzle.hpp
   std::uint32_t type = 0;          // 9 = Color2D; bit3 set = valid image
+  std::uint32_t depth = 1;         // pixels (field + 1); real depth for Color3D (slice S30)
   std::uint32_t pitch = 0;         // pixels per row (field + 1)
   std::uint32_t base_array = 0, last_array = 0;
   bool pow2pad = false;
@@ -78,6 +79,7 @@ inline bool decode_tsharp(const std::uint32_t w[8], TSharp* t) {
   t->tiling_index = std::uint32_t((q1 >> 52) & 0x1F);
   t->pow2pad = ((q1 >> 57) & 1) != 0;
   t->type = std::uint32_t((q1 >> 60) & 0xF);
+  t->depth = std::uint32_t(q2 & 0x1FFFu) + 1;
   t->pitch = std::uint32_t((q2 >> 13) & 0x3FFFu) + 1;
   t->base_array = std::uint32_t((q2 >> 32) & 0x1FFFu);
   t->last_array = std::uint32_t((q2 >> 45) & 0x1FFFu);
@@ -88,8 +90,8 @@ inline bool decode_tsharp(const std::uint32_t w[8], TSharp* t) {
 // for the bounds check on base + mip chain bytes.
 inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, std::string* why) {
   auto no = [&](const char* m) { *why = m; return false; };
-  if (t.type != 9 && t.type != 13 && t.type != 11)
-    return no("T# image type is not Color2D/Color2DArray/Cube (1D/3D/MSAA images are not implemented)");
+  if (t.type != 9 && t.type != 13 && t.type != 11 && t.type != 10)
+    return no("T# image type is not Color2D/Color3D/Color2DArray/Cube (1D/MSAA images are not implemented)");
   const bool bc1 = t.data_format == 35, bc2 = t.data_format == 36, bc3 = t.data_format == 37;
   const bool bc4 = t.data_format == 38, bc5 = t.data_format == 39, bc7 = t.data_format == 41;
   const bool bc6 = t.data_format == 40;
@@ -120,13 +122,24 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
     if (t.last_array != 5) return no("T# cubemap must have exactly 6 faces (cube arrays are not implemented)");
     if (t.width != t.height) return no("T# cubemap images must be square");
     if (t.tiling_index != kSwLinear) return no("T# tiled cubemaps are not implemented (linear tiling only)");
+  } else if (t.type == 10) {
+    // Slice S30: linear 3D (volume) textures, plain formats only. Level-major
+    // guest layout like S27: each mip level holds its z-planes contiguously
+    // (level 0 plane rows at the T# pitch, deeper levels tight), and the
+    // depth shrinks with the level like the width and height do.
+    if (t.base_array != 0 || t.last_array != 0)
+      return no("T# 3D images have no array slices (3D arrays are not implemented)");
+    if (t.tiling_index != kSwLinear) return no("T# tiled 3D textures are not implemented (linear 3D only)");
+    if (t.depth > 256) return no("T# 3D depth exceeds 256");
+    if (bc) return no("T# 3D compressed formats are not implemented");
   } else if (t.last_array != 0 || t.base_array != 0)
     return no("T# texture arrays need the Color2DArray image type (type 13)");
   if (t.pow2pad) return no("T# pow2pad images are not supported");
   if (t.width < 1 || t.width > 4096 || t.height < 1 || t.height > 4096)
     return no("T# extent is outside 1..4096");
   if (t.tiling_index == kSwLinear && t.pitch < t.width) return no("T# pitch is smaller than the width");
-  if (t.last_level >= 9 || (t.width >> t.last_level) == 0 || (t.height >> t.last_level) == 0)
+  if (t.last_level >= 9 || (t.width >> t.last_level) == 0 || (t.height >> t.last_level) == 0 ||
+      (t.type == 10 && (t.depth >> t.last_level) == 0))
     return no("T# last_level exceeds the number of levels the extent supports");
   if (bc && t.tiling_index == kSwLinear && t.pitch != t.width)
     return no("T# compressed linear textures must be tightly pitched (pitch must equal the width)");
@@ -144,11 +157,13 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
   if (t.tiling_index == kSwLinear) {
     bytes = bc ? std::uint64_t(t.pitch / 4) * (t.height / 4) * bb
                : std::uint64_t(t.pitch) * t.height * bb;
+    if (t.type == 10) bytes *= t.depth;  // S30: level 0 holds depth z-planes
     for (std::uint32_t l = 1; l <= t.last_level; ++l) {
       const std::uint32_t lw = t.width >> l ? t.width >> l : 1;
       const std::uint32_t lh = t.height >> l ? t.height >> l : 1;
-      bytes += bc ? std::uint64_t((lw + 3) / 4) * ((lh + 3) / 4) * bb
-                  : std::uint64_t(lw) * lh * bb;
+      const std::uint32_t ld = t.depth >> l ? t.depth >> l : 1;
+      bytes += (bc ? std::uint64_t((lw + 3) / 4) * ((lh + 3) / 4) * bb
+                   : std::uint64_t(lw) * lh * bb) * (t.type == 10 ? ld : 1);
     }
   } else {
     TiledMip layout[kMaxTiledMips];
@@ -162,6 +177,7 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
   // Slice S27: an array surface holds last_array + 1 slices per mip level,
   // level-major; the bounds cover every slice of every level.
   // Slice S28: a cubemap the same with 6 faces.
+  // Slice S30: 3D depth is already folded into the per-level bytes above.
   if (t.type == 13 || t.type == 11) bytes *= std::uint64_t(t.last_array) + 1;
   if (t.base + bytes > guest_bytes) return no("T# pixels lie outside the guest address space");
   return true;
