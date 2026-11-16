@@ -1160,5 +1160,8 @@ failures, before more texture features land on the shim.
   /proc/self/fd, then check F_GETFD/EBADF after explicit close and destruction. dup2
   reuses an explicitly closed number to prove repeated guest close and destruction
   do not touch the replacement. A separate unrelated host descriptor also survives.
+- Copy and move construction/assignment are explicitly deleted; four compile-time
+  type-trait assertions preserve unique ownership (the mutex already implicitly
+  prevented copies/moves before this change).
 - Scope: normal descriptor ownership and table teardown, not concurrent destruction,
   allocation-failure injection, guest-pointer validation or Sony ABI verification.
