@@ -22,7 +22,7 @@ void p64(std::vector<std::uint8_t>& b, std::size_t o, std::uint64_t v) { for (in
 // int[4] {5,3,8,1} at 0x248, RELA 0x260 (8 entries), dynsym 0x320 (7), dynstr 0x3c8,
 // dynamic at 0x440 (8 entries). Failures exit 61 (guard/registration) or 62 (qsort result).
 std::vector<std::uint8_t> build_synthetic_cxx_elf() {
-  std::vector<std::uint8_t> b(0x4c0, 0);
+  std::vector<std::uint8_t> b(0x560, 0);
   const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
   std::memcpy(b.data(), ident, 8);
   p16(b, 0x10, 3);       // ET_DYN
@@ -41,19 +41,15 @@ std::vector<std::uint8_t> build_synthetic_cxx_elf() {
   auto ins = [&](std::initializer_list<int> bs) { for (int x : bs) b[at++] = static_cast<std::uint8_t>(x); };
   auto d32 = [&](std::int64_t disp) { p32(b, at, static_cast<std::uint32_t>(disp)); at += 4; };
   auto callgot = [&](std::uint64_t got) { ins({0xff, 0x15}); d32(static_cast<std::int64_t>(got) - static_cast<std::int64_t>(at + 4)); };
-  // comparator (descending): mov eax,[rsi]; sub eax,[rdi]; ret  (returns *b - *a)
-  ins({0x8b, 0x06, 0x2b, 0x07, 0xc3});
-  // dtor_t at 0xb8: prints the low byte of its argument ('Q' when arg==0x51)
+  // dtor_t at 0xb8: records the low byte of its argument at 0x259, then prints it ('Q' when
+  // arg==0x51). dtor_c (at 0x500) later checks that record, proving thread dtors ran first.
   at = 0xb8;
-  ins({0x50});
+  ins({0x50});                    // push rax (call alignment)
+  ins({0x40, 0x88, 0x3d}); d32(0x259 - (at + 4));  // mov [rip->0x259], dil (REX for dil)
   callgot(G_PUTCHAR);
-  ins({0x59, 0xc3});
-  // dtor_c at 0xd8: prints 'c' when arg==0x42 else 'C'
-  at = 0xd8;
-  // dtor_c: prints the low byte of its argument ('B' when arg==0x42)
-  ins({0x50});
-  callgot(G_PUTCHAR);
-  ins({0x59, 0xc3});
+  ins({0x59, 0xc3});              // pop rcx; ret
+  // NOTE: the comparator lives at 0x4c0 and dtor_c at 0x500, past PT_DYNAMIC; both are still
+  // inside PT_LOAD (filesz/memsz cover the whole file). The 0xd8..0x100 region is padding.
   // entry, assembled with labels so every RIP-relative displacement is computed, never typed.
   {
     std::vector<std::uint8_t> code;
@@ -86,7 +82,7 @@ std::vector<std::uint8_t> build_synthetic_cxx_elf() {
     movrdi(0x208);
     for (int x : {0xbe, 0x04, 0x00, 0x00, 0x00}) e8(x);         // mov esi,4
     for (int x : {0xba, 0x04, 0x00, 0x00, 0x00}) e8(x);         // mov edx,4
-    learcx(0xb0);                                               // comparator
+    learcx(0x4c0);                                              // comparator
     cg(G_QSORT);
     movrsi(0x208);
     for (int x : {0x83, 0x3e, 0x08}) e8(x);                     // cmp [rsi],8
@@ -105,7 +101,7 @@ std::vector<std::uint8_t> build_synthetic_cxx_elf() {
     cg(G_TLS_ATEXIT);
     e8(0x85); e8(0xc0);
     jcc(fail_a);
-    leardi(0xd8);                                               // dtor_c
+    leardi(0x500);                                              // dtor_c
     for (int x : {0xbe, 0x42, 0x00, 0x00, 0x00}) e8(x);         // mov esi,0x42
     e8(0x31); e8(0xd2);
     cg(G_CXA_ATEXIT);
@@ -125,6 +121,52 @@ std::vector<std::uint8_t> build_synthetic_cxx_elf() {
     if (0x100 + code.size() > 0x200) { std::fprintf(stderr, "cxx synth overflow\n"); std::abort(); }
     std::memcpy(&b[0x100], code.data(), code.size());
   }
+  // comparator at 0x4c0 (descending; returns *b - *a). On the FIRST invocation only it bumps
+  // the counter byte at 0x258 (just past the int[4], before the rela area) and makes a NESTED host call (putchar 'n') from inside the qsort
+  // callback - proving guest->host->guest->host FS transitions restore correctly.
+  at = 0x4c0;
+  {
+    ins({0x50, 0x53});            // push rax; push rbx
+    ins({0x41, 0x54});            // push r12
+    ins({0x48, 0x89, 0xfb});      // mov rbx, rdi
+    ins({0x4c, 0x8b, 0xe6});      // mov r12, rsi
+    ins({0x80, 0x3d}); d32(0x258 - (at + 4 + 1)); ins({0x00});  // cmp byte [rip->0x258], 0
+    ins({0x75, 0x12});            // jne skip (7+5+6 bytes ahead)
+    ins({0x80, 0x05}); d32(0x258 - (at + 4 + 1)); ins({0x01});  // add byte [rip->0x258], 1
+    ins({0xbf, 0x6e, 0x00, 0x00, 0x00});                        // mov edi, 'n'
+    callgot(G_PUTCHAR);           // nested host call from inside the guest comparator
+    // skip:
+    ins({0x41, 0x8b, 0x04, 0x24});// mov eax, [r12]
+    ins({0x2b, 0x03});            // sub eax, [rbx]
+    ins({0x41, 0x5c, 0x5b, 0x59, 0xc3});  // pop r12; pop rbx; pop rcx; ret
+  }
+  // dtor_c at 0x500: the LAST destructor to run (plain atexit, after the thread dtor). It
+  // VERIFIES the whole run instead of trusting stdout order: the comparator's nested call
+  // happened exactly once (byte 0x258 == 1), the thread dtor ran first with arg 0x51 (byte
+  // 0x20e == 0x51), and its own argument is 0x42 - any failure is UD2 (SIGILL: the run is
+  // reported signaled, not finished). On success it BRANCHES on its argument and makes TWO
+  // host calls: 'b' (arg was 0x42) or 'B' (it was not), then the raw argument byte.
+  at = 0x500;
+  {
+    ins({0x53});                  // push rbx (callee-saved: the ABI requires us to preserve it,
+                                  //  and call_with_fs holds the arch_prctl syscall number there)
+    ins({0x48, 0x89, 0xfb});      // mov rbx, rdi  (keep the argument across host calls)
+    ins({0x80, 0x3d}); d32(0x258 - (at + 4 + 1)); ins({0x01});  // cmp byte [rip->0x258], 1
+    ins({0x74, 0x02}); ins({0x0f, 0x0b});   // je +2 (pass) ; ud2
+    ins({0x80, 0x3d}); d32(0x259 - (at + 4 + 1)); ins({0x51});  // cmp byte [rip->0x259], 0x51
+    ins({0x74, 0x02}); ins({0x0f, 0x0b});   // je +2 (pass) ; ud2
+    ins({0x48, 0x83, 0xfb, 0x42});// cmp rbx, 0x42
+    ins({0x74, 0x02}); ins({0x0f, 0x0b});   // je +2 ; ud2 (wrong argument is a hard failure)
+    ins({0x75, 0x07});            // jne +7 (over the equal-case mov + jmp; never taken here)
+    ins({0xbf, 0x62, 0x00, 0x00, 0x00});                        // mov edi, 'b'
+    ins({0xeb, 0x05});            // jmp +5
+    ins({0xbf, 0x42, 0x00, 0x00, 0x00});                        // mov edi, 'B'
+    callgot(G_PUTCHAR);           // first host call
+    ins({0x48, 0x89, 0xdf});      // mov rdi, rbx
+    callgot(G_PUTCHAR);           // second host call: raw argument byte
+    ins({0x5b, 0xc3});            // pop rbx; ret
+  }
+  if (at > b.size()) { std::fprintf(stderr, "cxx synth overflow\n"); std::abort(); }
   // data
   p64(b, 0x200, 0x240);                               // ptr_guard -> guard byte
   p64(b, 0x208, 0x248);                               // ptr_arr -> int[4]
