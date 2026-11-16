@@ -16,6 +16,22 @@
 
 namespace pnr::prx {
 
+namespace detail {
+// Owns a freshly opened host fd until the descriptor table accepts it.
+class PendingFileDescriptor {
+ public:
+  explicit PendingFileDescriptor(int fd) noexcept : fd_(fd) {}
+  ~PendingFileDescriptor();
+  PendingFileDescriptor(const PendingFileDescriptor&) = delete;
+  PendingFileDescriptor& operator=(const PendingFileDescriptor&) = delete;
+  PendingFileDescriptor(PendingFileDescriptor&&) = delete;
+  PendingFileDescriptor& operator=(PendingFileDescriptor&&) = delete;
+  int release() noexcept { const int fd = fd_; fd_ = -1; return fd; }
+ private:
+  int fd_;
+};
+}  // namespace detail
+
 // PS-style open flags (subset; anything else is EINVAL).
 constexpr std::int64_t SCE_KERNEL_O_RDONLY = 0x0000;
 constexpr std::int64_t SCE_KERNEL_O_WRONLY = 0x0001;
