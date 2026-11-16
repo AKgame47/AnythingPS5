@@ -1124,3 +1124,16 @@ failures, before more texture features land on the shim.
   after rejected reprotects. Rounded prefix/suffix/final unmap, non-page-sized allocation,
   whole-map reprotect, misalignment and size overflow are covered. This is host-shim
   safety coverage, not verification of Sony signatures or arbitrary guest compatibility.
+
+
+## Slice S44 notes (optional memory-query outputs)
+- The NID-bound sceKernelQueryMemoryProtection wrapper now honors omitted (null)
+  start/end/protection outputs, matching the existing direct helper's contract.
+  Previously a successful query unconditionally wrote through every output pointer.
+- Bound-path regressions exercise all eight output-presence combinations against a
+  mapped interior address. Requested values must match the tracked range/protection;
+  omitted values remain untouched. Foreign, null and removed addresses return EINVAL
+  without changing supplied outputs, including removed-address queries with no outputs.
+- Scope: null-output handling in this repository's host shim. Arbitrary non-null
+  invalid guest pointers, guest signal delivery and Sony ABI authenticity are not
+  established by these tests. No claim of broader binary compatibility is made.
