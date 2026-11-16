@@ -75,6 +75,18 @@ std::vector<std::uint8_t> build_synthetic_depmain_elf(const DepMainSpec& spec);
 constexpr int kDepMainExitReturn = 55;
 constexpr const char* kDepOrder = "ghIABE21yxFvw";
 
+// Slice S34: a C++-style module exercising the C++ ABI surface from machine code.
+// Entry prints 'E'; __cxa_guard_acquire on a guard byte must return 1 then 0 ('G'); qsort
+// sorts {5,3,8,1} descending through a guest comparator ('Q'); it registers
+// __cxa_thread_atexit_impl(dtor_t, 0x51) and __cxa_atexit(dtor_c, 0x42) and returns 55.
+// Each destructor prints the LOW BYTE of its argument: the exit sequence MUST print
+// 'Q' before 'B' (thread destructors run before atexit handlers, glibc order) with the
+// exact bytes proving both handlers received their registered arguments (0x51, 0x42).
+// Failures exit 61 (guard/registration) or 62 (qsort result).
+std::vector<std::uint8_t> build_synthetic_cxx_elf();
+constexpr int kCxxExitReturn = 55;
+constexpr const char* kCxxOrder = "EGQQB";
+
 extern const char* const kSynthMessage;
 constexpr int kSynthExitCode = 30;
 
