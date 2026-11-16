@@ -75,6 +75,7 @@ static_assert(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL == kVK_IMAGE_LAYOUT_TRANSFER_
 static_assert(VK_IMAGE_LAYOUT_UNDEFINED == kVK_IMAGE_LAYOUT_UNDEFINED, "VK_IMAGE_LAYOUT_UNDEFINED drifted from the Khronos Vulkan value");
 static_assert(VK_IMAGE_TILING_OPTIMAL == kVK_IMAGE_TILING_OPTIMAL, "VK_IMAGE_TILING_OPTIMAL drifted from the Khronos Vulkan value");
 static_assert(VK_IMAGE_TYPE_2D == kVK_IMAGE_TYPE_2D, "VK_IMAGE_TYPE_2D drifted from the Khronos Vulkan value");
+static_assert(VK_IMAGE_TYPE_3D == kVK_IMAGE_TYPE_3D, "VK_IMAGE_TYPE_3D drifted from the Khronos Vulkan value");
 static_assert(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT == kVK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, "VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT drifted from the Khronos Vulkan value");
 static_assert(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT == kVK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, "VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT drifted from the Khronos Vulkan value");
 static_assert(VK_IMAGE_USAGE_SAMPLED_BIT == kVK_IMAGE_USAGE_SAMPLED_BIT, "VK_IMAGE_USAGE_SAMPLED_BIT drifted from the Khronos Vulkan value");
@@ -82,6 +83,7 @@ static_assert(VK_IMAGE_USAGE_TRANSFER_DST_BIT == kVK_IMAGE_USAGE_TRANSFER_DST_BI
 static_assert(VK_IMAGE_USAGE_TRANSFER_SRC_BIT == kVK_IMAGE_USAGE_TRANSFER_SRC_BIT, "VK_IMAGE_USAGE_TRANSFER_SRC_BIT drifted from the Khronos Vulkan value");
 static_assert(VK_IMAGE_VIEW_TYPE_2D == kVK_IMAGE_VIEW_TYPE_2D, "VK_IMAGE_VIEW_TYPE_2D drifted from the Khronos Vulkan value");
 static_assert(VK_IMAGE_VIEW_TYPE_2D_ARRAY == kVK_IMAGE_VIEW_TYPE_2D_ARRAY, "VK_IMAGE_VIEW_TYPE_2D_ARRAY drifted from the Khronos Vulkan value");
+static_assert(VK_IMAGE_VIEW_TYPE_3D == kVK_IMAGE_VIEW_TYPE_3D, "VK_IMAGE_VIEW_TYPE_3D drifted from the Khronos Vulkan value");
 static_assert(VK_IMAGE_VIEW_TYPE_CUBE == kVK_IMAGE_VIEW_TYPE_CUBE, "VK_IMAGE_VIEW_TYPE_CUBE drifted from the Khronos Vulkan value");
 static_assert(VK_INDEX_TYPE_UINT32 == kVK_INDEX_TYPE_UINT32, "VK_INDEX_TYPE_UINT32 drifted from the Khronos Vulkan value");
 static_assert(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT == kVK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, "VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT drifted from the Khronos Vulkan value");
@@ -155,6 +157,6 @@ static_assert(VK_VERTEX_INPUT_RATE_VERTEX == kVK_VERTEX_INPUT_RATE_VERTEX, "VK_V
 
 void pnr_vulkan_enum_check_tests(int& pass, int& fail) {
   auto check = [&](bool ok, const std::string& l) { if (ok) ++pass; else ++fail; std::printf("%s %s\n", ok ? "PASS" : "FAIL", l.c_str()); };
-  check(kConstantCount == 133, "vulkan enum audit: 133 shim constants verified against Khronos vulkan_core.h (VK_HEADER_VERSION 204)");
+  check(kConstantCount == 135, "vulkan enum audit: 135 shim constants verified against Khronos vulkan_core.h (VK_HEADER_VERSION 204)");
   check(VK_COLOR_COMPONENT_RGBA == 0xF, "vulkan enum audit: VK_COLOR_COMPONENT_RGBA is the shim convenience R|G|B|A, not a Khronos constant");
 }
