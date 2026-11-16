@@ -6,6 +6,7 @@
 #include <fstream>
 #include <limits>
 #include <cerrno>
+#include <type_traits>
 #include <fcntl.h>
 #include <string>
 #if defined(_WIN32)
@@ -50,6 +51,11 @@ void pnr_pad_tests(int& pass,int& fail);
 void pnr_rdna_alu_tests(int& pass,int& fail);
 void pnr_rdna_post_xform_tests(int& pass,int& fail);
 void pnr_vulkan_enum_check_tests(int& pass,int& fail);
+
+static_assert(!std::is_copy_constructible_v<pnr::prx::PsFileTable>);
+static_assert(!std::is_copy_assignable_v<pnr::prx::PsFileTable>);
+static_assert(!std::is_move_constructible_v<pnr::prx::PsFileTable>);
+static_assert(!std::is_move_assignable_v<pnr::prx::PsFileTable>);
 
 static int g_pass = 0, g_fail = 0;
 
