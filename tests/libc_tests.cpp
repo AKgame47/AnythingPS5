@@ -20,7 +20,9 @@ void pnr_libc_tests(int& pass, int& fail) {
   auto call = [&](const char* name, std::vector<std::int64_t> a) -> std::int64_t {
     const PrxSymbol* s = reg.find_name(name);
     if (!s || !s->implemented) { std::printf("missing %s\n", name); return -999999; }
-    return s->invoke(a);
+    pnr::prx::GuestCallArgs g{};
+    for (std::size_t k = 0; k < a.size() && k < 6; ++k) g.i[k] = a[k];
+    return s->invoke(g);
   };
   auto P = [](const void* p) { return reinterpret_cast<std::int64_t>(p); };
 
@@ -32,7 +34,30 @@ void pnr_libc_tests(int& pass, int& fail) {
   check(format_c("%s|%8s|%-4s|%c|%%", {P("hi"), P("abc"), P("z"), 'Q'}) == "hi|     abc|z   |Q|%", "fmt: s with width, c, %%");
   check(format_c("%s", {0}) == "(null)", "fmt: a null string prints (null)");
   check(format_c("%p", {0x1000}) == "0x1000", "fmt: %p");
-  check(format_c("%f and %e", {1}) == "%f and %e", "fmt: floating point conversions stay literal (not supported)");
+  check(format_c("%f and %e", {1}) == "%f and %e", "fmt: without an xmm pool, floating point conversions stay literal");
+
+  // Slice S35: floating point conversions consume the xmm pool (SysV varargs rule),
+  // independently of the gp pool.
+  { auto fpa = [](std::initializer_list<std::int64_t> gi, std::initializer_list<double> gx) {
+      GuestCallArgs g{}; std::size_t k = 0;
+      for (std::int64_t v : gi) { if (k < 6) g.i[k++] = v; }
+      k = 0; for (double v : gx) { if (k < 8) g.x[k++] = v; }
+      return g;
+    };
+    check(format_c_guest("%f", fpa({}, {3.5})) == "3.500000", "fmt: %f default precision");
+    check(format_c_guest("%.3f", fpa({}, {3.14159})) == "3.142", "fmt: %.3f rounds via host libc");
+    check(format_c_guest("%e", fpa({}, {0.125})) == "1.250000e-01", "fmt: %e");
+    check(format_c_guest("%g|%G", fpa({}, {2.0, 0.00001234})) == "2|1.234E-05", "fmt: %g and %G");
+    check(format_c_guest("%10.2f|%-8.1f|", fpa({}, {3.5, 2.5})) == "      3.50|2.5     |", "fmt: %f with width, precision and left flag");
+    check(format_c_guest("%08.2f", fpa({}, {-3.5})) == "-0003.50", "fmt: %f zero padding keeps the sign first");
+    check(format_c_guest("%f", fpa({}, {0.0})) == "0.000000", "fmt: %f of zero");
+    check(format_c_guest("%f", fpa({}, {-0.0})) == "-0.000000", "fmt: %f of negative zero");
+    check(format_c_guest("%f %f", fpa({}, {1.0})) == "1.000000 0.000000", "fmt: the xmm pool has 8 slots; unset slots read as 0.0 in tests (real thunks pass the live registers)");
+    check(format_c_guest("%Lf", fpa({}, {1.0})) == "%Lf", "fmt: long double is refused (literal)");
+    check(format_c_guest("%d %f %s %e", fpa({7, P("ok")}, {0.5, 8.0})) == "7 0.500000 ok 8.000000e+00",
+          "fmt: gp and xmm pools advance independently");
+    check(format_c_guest("%a", fpa({}, {1.0})) == "0x1p+0", "fmt: %a hex float");
+  }
   check(format_c("%d %d", {1}) == "1 %d", "fmt: a missing argument stays literal");
   check(format_c("100%", {}) == "100%", "fmt: trailing percent");
 
@@ -81,7 +106,7 @@ void pnr_libc_tests(int& pass, int& fail) {
   bool all = true;
   for (const char* n : names) {
     const std::string nid = pnr::loader::nid::compute_nid(n, "libSceLibcInternal");
-    std::function<std::int64_t(const std::vector<std::int64_t>&)> fn; std::string err;
+    std::function<std::int64_t(const pnr::prx::GuestCallArgs&)> fn; std::string err;
     all = all && reg.bind(nid, &fn, &err) == SCE_OK;
   }
   check(all, "bind: every C3 libc symbol binds by NID");
