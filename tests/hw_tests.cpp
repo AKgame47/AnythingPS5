@@ -17,9 +17,11 @@ void pnr_hw_tests(int& pass, int& fail) {
   auto check = [&](bool ok, const std::string& l) { if (ok) ++pass; else ++fail; std::printf("%s %s\n", ok ? "PASS" : "FAIL", l.c_str()); };
   PrxRegistry reg;
   auto call = [&](const char* lib, const char* name, std::vector<std::int64_t> a) -> std::int64_t {
-    std::function<std::int64_t(const std::vector<std::int64_t>&)> fn; std::string err;
+    std::function<std::int64_t(const pnr::prx::GuestCallArgs&)> fn; std::string err;
     if (reg.bind(pnr::loader::nid::compute_nid(name, lib), &fn, &err) != SCE_OK) return -9999;
-    return fn(a);
+    pnr::prx::GuestCallArgs g{};
+    for (std::size_t k = 0; k < a.size() && k < 6; ++k) g.i[k] = a[k];
+    return fn(g);
   };
   auto P = [](const void* p) { return reinterpret_cast<std::int64_t>(p); };
   audio_reset(); pad_reset();
