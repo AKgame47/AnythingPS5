@@ -40,7 +40,8 @@ struct TSharp {
   std::uint32_t base_level = 0, last_level = 0;
   std::uint32_t tiling_index = 0;  // PS5 SW_MODE: 0 = linear; tiled values in gfx_swizzle.hpp
   std::uint32_t type = 0;          // 9 = Color2D; bit3 set = valid image
-  std::uint32_t depth = 1;         // pixels (field + 1); real depth for Color3D (slice S30)
+  std::uint32_t depth = 1;         // pixels (field + 1); real depth for Color3D (slice S30);
+                                   // allocation layer count for arrays, cube count for cubes (S31)
   std::uint32_t pitch = 0;         // pixels per row (field + 1)
   std::uint32_t base_array = 0, last_array = 0;
   bool pow2pad = false;
@@ -110,14 +111,22 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
   if (t.base_level != 0)
     return no("T# base_level is not 0 (mip chains starting above level 0 are not implemented)");
   if (t.type == 13) {
-    // Slice S27: linear 2D arrays. Level-major guest layout (each mip level
-    // holds all slices contiguously), base slice 0, at most 256 slices.
+    // Slice S27 + S31: linear 2D arrays. The DEPTH field is the allocation's
+    // layer count (shadPS4 resource.h NumLayers; Mesa's GCN-era descriptor
+    // builder sets DEPTH = layers-1 for arrays the same way); base_array and
+    // last_array select a view window clamped to that allocation. PNR
+    // implements the window [0, min(last_array, depth-1)] from a base of 0.
+    // Level-major guest layout: each mip level holds ALL allocation layers
+    // contiguously, the view reads the window from each level.
     if (t.base_array != 0) return no("T# array base_array is not 0 (non-zero base slices are not implemented)");
     if (t.last_array > 255) return no("T# array has more than 256 slices");
     if (t.tiling_index != kSwLinear) return no("T# tiled texture arrays are not implemented (linear arrays only)");
   } else if (t.type == 11) {
-    // Slice S28: a single cubemap = exactly 6 faces, square, linear tiling,
-    // base face 0. Faces are laid out like array slices (+X -X +Y -Y +Z -Z).
+    // Slice S28 + S31: a single cubemap = exactly 6 faces, square, linear
+    // tiling, base face 0. The DEPTH field counts full cubes (depth 1 = one
+    // cube, shadPS4 resource.h NumLayers); cube arrays are refused. Faces
+    // are laid out like array slices (+X -X +Y -Y +Z -Z).
+    if (t.depth != 1) return no("T# cubemap arrays are not implemented (depth must count exactly one cube)");
     if (t.base_array != 0) return no("T# cubemap base_array is not 0 (non-zero base faces are not implemented)");
     if (t.last_array != 5) return no("T# cubemap must have exactly 6 faces (cube arrays are not implemented)");
     if (t.width != t.height) return no("T# cubemap images must be square");
@@ -174,11 +183,12 @@ inline bool validate_tsharp_sample(const TSharp& t, std::uint64_t guest_bytes, s
     bytes += t.tiling_index == kSwS4KBX || t.tiling_index == kSwD4KBX
                  ? (t.base & 0xFFFu) : swizzle_mode_xor(t.tiling_index) ? (t.base & 0xFFFFu) : 0;
   }
-  // Slice S27: an array surface holds last_array + 1 slices per mip level,
-  // level-major; the bounds cover every slice of every level.
-  // Slice S28: a cubemap the same with 6 faces.
+  // Slice S31: the bounds cover the full ALLOCATION, not the sampled view:
+  // an array allocates depth layers per mip level (the view window can be
+  // smaller), a cube allocates depth * 6 faces (one cube today).
   // Slice S30: 3D depth is already folded into the per-level bytes above.
-  if (t.type == 13 || t.type == 11) bytes *= std::uint64_t(t.last_array) + 1;
+  if (t.type == 13) bytes *= std::uint64_t(t.depth);
+  if (t.type == 11) bytes *= std::uint64_t(t.depth) * 6;
   if (t.base + bytes > guest_bytes) return no("T# pixels lie outside the guest address space");
   return true;
 }
