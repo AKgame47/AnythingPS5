@@ -58,6 +58,21 @@ void pnr_libc_tests(int& pass, int& fail) {
           "fmt: gp and xmm pools advance independently");
     check(format_c_guest("%a", fpa({}, {1.0})) == "0x1p+0", "fmt: %a hex float");
   }
+  // Slice S36: when a pool is exhausted, conversions consume the stack-spill window s[] in
+  // argument order, shared across both classes.
+  { GuestCallArgs g{};
+    for (int k = 0; k < 6; ++k) g.i[k] = 10 + k;
+    for (int k = 0; k < 8; ++k) g.x[k] = 1.0 + k;
+    double d9 = 9.0; std::memcpy(&g.s[3], &d9, 8);
+    g.s[0] = 16; g.s[1] = 17; g.s[2] = 18;
+    check(format_c_guest("%d %d %d %d %d %d %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f", g, 0) ==
+          "10 11 12 13 14 15 1 2 3 4 5 6 7 8", "fmt: register pools fully consumed before the spill window");
+    check(format_c_guest("%.0f %d %.0f %d %.0f %d %.0f %d %.0f %d %.0f %d %.0f %d %.0f %d %.0f", g, 1) ==
+          "1 11 2 12 3 13 4 14 5 15 6 16 7 17 8 18 9", "fmt: interleaved GP/FP overflow consumes s[] in argument order");
+    check(format_c_guest("%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", g, 0) ==
+          "10 11 12 13 14 15 16 17 18 0 0 0 0 0 %d",
+          "fmt: 8 spill slots are captured (unset slots read as 0 here); the 15th conversion stays literal (documented limit)");
+  }
   check(format_c("%d %d", {1}) == "1 %d", "fmt: a missing argument stays literal");
   check(format_c("100%", {}) == "100%", "fmt: trailing percent");
 
@@ -136,6 +151,18 @@ void pnr_libc_tests(int& pass, int& fail) {
     auto fst = pnr::loader::run_module(dir + "/fp.elf", reg, &frr, &frep);
     check(fst.ok && frep.bound.size() == 4 && frr.finished && !frr.signaled && frr.exit_code == 0,
           "fp module: printf x8, fmod, fmaxf (float32 lanes) and ldexp (mixed pools) all work from machine code via NID");
+  }
+  // S36: stack-spilled arguments. The module calls printf with both register pools exhausted
+  // and the overflow interleaved across classes: 8 doubles fill xmm0-7, fmt + 5 ints fill the
+  // gp registers, and i6, i7, i8 then the 9th double spill to the stack in argument order. The
+  // expected output only appears if the host consumes the spill window in that order.
+  { auto b = pnr::tools::build_synthetic_stkovf_elf(); std::ofstream f(dir + "/ov.elf", std::ios::binary); f.write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size())); }
+  {
+    pnr::loader::ModuleLoadReport orep; pnr::loader::ModuleRunResult orr;
+    std::fflush(stdout);
+    auto ost = pnr::loader::run_module(dir + "/ov.elf", reg, &orr, &orep);
+    check(ost.ok && orep.bound.size() == 1 && orr.finished && !orr.signaled && orr.exit_code == 0,
+          "stkovf module: printf with interleaved GP/FP stack overflow (9 doubles, 8 ints) works from machine code");
   }
   if (std::system(("rm -rf " + dir).c_str()) != 0) {}
 }
