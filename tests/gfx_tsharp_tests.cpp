@@ -248,4 +248,39 @@ void pnr_gfx_tsharp_tests(int& pass, int& fail) {
   decode_tsharp(w, &t);
   check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("base_array") != std::string::npos,
         "tsharp: a non-zero cubemap base face is refused (S28)");
+
+  // Slice S30: 3D (volume) textures (Color3D, type 10).
+  auto make_3d = [&](std::uint32_t tiling, std::uint32_t ndepth,
+                     std::uint32_t wdt, std::uint32_t hgt, std::uint32_t last_level = 0) {
+    make_tsharp(w, 0x100000, wdt, hgt, wdt, tiling);
+    w[3] = (w[3] & 0x0FFFFFFFu) | (10u << 28);  // type = Color3D
+    w[3] = (w[3] & ~(0xFu << 16)) | ((last_level & 0xF) << 16);
+    w[4] = (w[4] & ~0x1FFFu) | ((ndepth - 1) & 0x1FFFu);  // depth field
+    decode_tsharp(w, &t);
+  };
+  make_3d(0, 16, 64, 64);
+  check(t.type == 10 && t.depth == 16 && t.width == 64,
+        "tsharp: Color3D decodes type and depth (S30)");
+  check(validate_tsharp_sample(t, 0x100000 + 64ull * 64 * 16 * 4, &why),
+        "tsharp: linear 64x64x16 volume validates (S30)");
+  check(!validate_tsharp_sample(t, 0x100000 + 64ull * 64 * 16 * 4 - 1, &why) && why.find("outside") != std::string::npos,
+        "tsharp: 3D bounds cover every z-plane (S30)");
+  make_3d(0, 16, 64, 64, 1);  // last_level 1: 64x64x16 + 32x32x8 level-major
+  check(validate_tsharp_sample(t, 0x100000 + 64ull * 64 * 16 * 4 + 32ull * 32 * 8 * 4, &why),
+        "tsharp: mipmapped volume needs both levels (S30)");
+  check(!validate_tsharp_sample(t, 0x100000 + 64ull * 64 * 16 * 4, &why) && why.find("outside") != std::string::npos,
+        "tsharp: level 0 alone does not satisfy a mipmapped volume (S30)");
+  make_3d(9, 16, 64, 64);  // SW_64KB_S
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("3D") != std::string::npos,
+        "tsharp: tiled 3D textures are refused (S30)");
+  make_3d(0, 16, 64, 64);
+  w[5] = (w[5] & ~0x1FFFu) | 1u;  // base_array = 1
+  decode_tsharp(w, &t);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("array") != std::string::npos,
+        "tsharp: a 3D texture with array slices is refused (S30)");
+  make_3d(0, 16, 64, 64);
+  w[1] = (w[1] & ~(0x3Fu << 20)) | (35u << 20);  // BC1 data format
+  decode_tsharp(w, &t);
+  check(!validate_tsharp_sample(t, 0x2000000, &why) && why.find("compressed") != std::string::npos,
+        "tsharp: BC-compressed 3D textures are refused (S30)");
 }
