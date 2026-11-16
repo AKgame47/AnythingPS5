@@ -186,7 +186,7 @@ target_link_libraries(pnr_validation_sweep PRIVATE pnr_shader pnr_graphics pnr_s
 add_test(NAME pnr_vulkan_validation COMMAND pnr_validation_sweep)
 set_tests_properties(pnr_vulkan_validation PROPERTIES FAIL_REGULAR_EXPRESSION "Validation Error")
 add_test(NAME pnr_kernel_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_kernel.elf --kernel && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_kernel.elf | grep -q \"MODULE FINISHED: exit 0\"")
-add_test(NAME pnr_libc_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_libc.elf --libc && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_libc.elf | grep -q \"C3 libc ok 42\"")
+add_test(NAME pnr_libc_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_libc.elf --libc && out=$($<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_libc.elf) && echo \"$out\" | grep -q \"C3 libc ok 42\" && echo \"$out\" | grep -q \"3.142 2\"")
 add_test(NAME pnr_gnm_decode COMMAND sh -c "$<TARGET_FILE:pnr> gnm-synth ${CMAKE_BINARY_DIR}/synth_pm4.bin && $<TARGET_FILE:pnr> gnm-decode ${CMAKE_BINARY_DIR}/synth_pm4.bin | grep -q \"2 draws\"")
 add_test(NAME pnr_module_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_ok.elf && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_ok.elf")
 set_tests_properties(pnr_module_run PROPERTIES PASS_REGULAR_EXPRESSION "MODULE FINISHED: exit 30")
