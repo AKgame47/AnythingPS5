@@ -119,5 +119,23 @@ void pnr_libc_tests(int& pass, int& fail) {
   std::fflush(stdout);
   auto st = pnr::loader::run_module(dir + "/l.elf", reg, &rr, &rep);
   check(st.ok && rep.bound.size() == 7 && rr.finished && !rr.signaled && rr.exit_code == 0, "module: snprintf, strcmp, strtol, calloc, memmove, strlen and printf all work from machine code via NID");
+
+  // S35 review follow-up: fixed-signature FP calls from machine code. The module checks, in
+  // guest code with exact bit expectations: printf with 8 doubles filling xmm0-7; fmod's double
+  // return in xmm0; fmaxf float32 decoding with garbage in the upper 32 bits of both lanes;
+  // ldexp's mixed FP+GP argument pools; all returning 0 only when every check passes.
+  {
+    for (const char* n : {"fmod", "fmaxf", "ldexp"}) {
+      const std::string nid = pnr::loader::nid::compute_nid(n, "libSceLibcInternal");
+      std::function<std::int64_t(const pnr::prx::GuestCallArgs&)> fn; std::string err;
+      check(reg.bind(nid, &fn, &err) == SCE_OK, std::string("bind: ") + n + " binds by NID");
+    }
+    { auto b = pnr::tools::build_synthetic_fp_elf(); std::ofstream f(dir + "/fp.elf", std::ios::binary); f.write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size())); }
+    pnr::loader::ModuleLoadReport frep; pnr::loader::ModuleRunResult frr;
+    std::fflush(stdout);
+    auto fst = pnr::loader::run_module(dir + "/fp.elf", reg, &frr, &frep);
+    check(fst.ok && frep.bound.size() == 4 && frr.finished && !frr.signaled && frr.exit_code == 0,
+          "fp module: printf x8, fmod, fmaxf (float32 lanes) and ldexp (mixed pools) all work from machine code via NID");
+  }
   if (std::system(("rm -rf " + dir).c_str()) != 0) {}
 }
