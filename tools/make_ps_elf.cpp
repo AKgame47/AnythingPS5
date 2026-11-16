@@ -7,7 +7,7 @@
 #include "tools/synth_elf.hpp"
 
 int main(int argc, char** argv) {
-  if (argc < 2) { std::fprintf(stderr, "usage: pnr_make_ps_elf OUT.elf [--missing-import|--kernel|--kernel-no-tls|--libc|--fp|--stkovf|--file|--filew|--filepos|--lifecycle|--lifecycle-exit|--dep|--depmain|--cxx]\n"); return 64; }
+  if (argc < 2) { std::fprintf(stderr, "usage: pnr_make_ps_elf OUT.elf [--missing-import|--kernel|--kernel-no-tls|--libc|--fp|--stkovf|--file|--filew|--filepos|--abi7|--lifecycle|--lifecycle-exit|--dep|--depmain|--cxx]\n"); return 64; }
   pnr::tools::SynthSpec spec;
   for (int i = 2; i < argc; ++i) if (!std::strcmp(argv[i], "--missing-import")) spec.include_missing_import = true;
   std::vector<std::uint8_t> b;
@@ -29,6 +29,8 @@ int main(int argc, char** argv) {
   for (int i = 2; i < argc; ++i) if (!std::strcmp(argv[i], "--filew")) filew = true;
   bool filepos = false;
   for (int i = 2; i < argc; ++i) if (!std::strcmp(argv[i], "--filepos")) filepos = true;
+  bool abi7 = false;
+  for (int i = 2; i < argc; ++i) if (!std::strcmp(argv[i], "--abi7")) abi7 = true;
   pnr::tools::LifecycleSpec ls;
   bool lifecycle = false;
   for (int i = 2; i < argc; ++i) {
@@ -44,6 +46,7 @@ int main(int argc, char** argv) {
   if (cxx) b = pnr::tools::build_synthetic_cxx_elf(); else
   if (dep) b = pnr::tools::build_synthetic_dep_elf({}); else
   if (depmain) b = pnr::tools::build_synthetic_depmain_elf({}); else
+  if (abi7) b = pnr::tools::build_synthetic_abi7_elf(); else
   if (filepos) b = pnr::tools::build_synthetic_filepos_elf(); else
   if (filew) b = pnr::tools::build_synthetic_filew_elf(); else
   if (file) b = pnr::tools::build_synthetic_file_elf(); else
