@@ -1209,3 +1209,13 @@ failures, before more texture features land on the shim.
   https://man7.org/linux/man-pages/man3/pthread_mutex_destroy.3p.html
 - Scope: these finite regressions, not exhaustive concurrent-destruction stress, allocator/init
   failure injection, invalid unlock ownership, arbitrary guest pointers or Sony ABI verification.
+
+
+## Slice S50 notes (semaphore signal overflow)
+- Signal checks the requested increment against remaining capacity before addition. A positive
+  increment as large as INT64_MAX can no longer overflow the signed stored count during refusal.
+- Six regression checks cover creation, extreme-positive refusal, exactly preserved permits,
+  exact-capacity success, unchanged zero/negative rejection and teardown. With the previous
+  addition-first implementation the extreme signal and two subsequent state checks fail.
+- Scope is host runtime semaphore arithmetic and these finite boundary checks, not a new Sony
+  API signature, arbitrary guest-pointer validation or exhaustive concurrent signal testing.
