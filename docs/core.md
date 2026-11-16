@@ -1067,3 +1067,20 @@ failures, before more texture features land on the shim.
 - Bounds of the claim: this proves capture of one 7th scalar 8-byte stack argument for a
   known signature, per the SysV slot layout the thunk already copies. It says nothing about
   any real Sony 7-arg API, whose signatures remain unverified and unbound.
+
+## Slice S41 notes (guest anonymous mmap/munmap)
+- The --mmap synthetic module exercises the existing 6-argument "mmap" binding
+  (loader::sony_mmap) from guest machine code: mmap(0, 4096, CPU_READ|CPU_WRITE,
+  MAP_PRIVATE|MAP_ANON, -1, 0), a nonzero + page-aligned check on the result, a qword
+  pattern written to the page and compared back, then munmap(page, 4096) == 0.
+  Prints "mmap ok" and exits 0; 4 distinct nonzero stage codes on deviation.
+- One host addition the fixture exposed: sony_mmap pages are untracked, and sceKernelMunmap
+  honestly refuses foreign pages (it serves the sceKernelMapMemory registry). A new plain
+  "munmap" binding (raw POSIX unmap, no Sony translation needed) pairs with the existing
+  plain "mmap" binding; the two allocation families stay separate. Unit-level: binds by NID,
+  unmaps a live host page, refuses a misaligned address with EINVAL (Linux munmap of an
+  unmapped-but-aligned range is not an error, so no "dead page" failure is claimed).
+- Bounds of the claim: anonymous private mappings with CPU read/write protection work from
+  guest code, including Sony constant translation for exactly the bits exercised
+  (CPU_READ|CPU_WRITE, MAP_PRIVATE|MAP_ANON). FIXED mappings, shared mappings, file-backed
+  mappings, GPU bits and mprotect remain covered only at translation-unit level.
