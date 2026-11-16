@@ -7,7 +7,7 @@
 #include "tools/synth_elf.hpp"
 
 int main(int argc, char** argv) {
-  if (argc < 2) { std::fprintf(stderr, "usage: pnr_make_ps_elf OUT.elf [--missing-import|--kernel|--kernel-no-tls|--libc|--lifecycle|--lifecycle-exit]\n"); return 64; }
+  if (argc < 2) { std::fprintf(stderr, "usage: pnr_make_ps_elf OUT.elf [--missing-import|--kernel|--kernel-no-tls|--libc|--lifecycle|--lifecycle-exit|--dep|--depmain]\n"); return 64; }
   pnr::tools::SynthSpec spec;
   for (int i = 2; i < argc; ++i) if (!std::strcmp(argv[i], "--missing-import")) spec.include_missing_import = true;
   std::vector<std::uint8_t> b;
@@ -25,6 +25,13 @@ int main(int argc, char** argv) {
     if (!std::strcmp(argv[i], "--lifecycle")) lifecycle = true;
     if (!std::strcmp(argv[i], "--lifecycle-exit")) { lifecycle = true; ls.use_exit = true; }
   }
+  bool dep = false, depmain = false;
+  for (int i = 2; i < argc; ++i) {
+    if (!std::strcmp(argv[i], "--dep")) dep = true;
+    if (!std::strcmp(argv[i], "--depmain")) depmain = true;
+  }
+  if (dep) b = pnr::tools::build_synthetic_dep_elf({}); else
+  if (depmain) b = pnr::tools::build_synthetic_depmain_elf({}); else
   if (libc) b = pnr::tools::build_synthetic_libc_elf(); else
   if (lifecycle) b = pnr::tools::build_synthetic_lifecycle_elf(ls); else
   b = kernel ? pnr::tools::build_synthetic_kernel_elf(ks) : pnr::tools::build_synthetic_ps_elf(spec);
