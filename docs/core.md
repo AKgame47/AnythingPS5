@@ -1137,3 +1137,16 @@ failures, before more texture features land on the shim.
 - Scope: null-output handling in this repository's host shim. Arbitrary non-null
   invalid guest pointers, guest signal delivery and Sony ABI authenticity are not
   established by these tests. No claim of broader binary compatibility is made.
+
+
+## Slice S45 notes (guest optional memory-query outputs)
+- Extended the existing --mprotect guest fixture: query with all outputs omitted,
+  query with only protection supplied (initialized to an invalid sentinel), and a
+  query after unmap that must return EINVAL (-2) without changing its supplied sentinel.
+  These execute via guest instructions and the import thunk, not direct host calls.
+- Original stage codes 1-14 remain stable; new failures use codes 15-19. Existing
+  pnr_mprotect_run requires both "mprotect ok" and module exit 0. A builder guard
+  refuses code/data overlap if later fixture growth reaches the message region.
+- Scope remains this finite synthetic fixture and repository shim semantics. It does
+  not verify Sony signatures, arbitrary non-null guest output pointers, write-fault
+  enforcement or general game compatibility. S44's all-eight-mask host tests remain.
