@@ -37,6 +37,8 @@ struct SceKernelStat {
 class PsFileTable {
  public:
   explicit PsFileTable(compat::FileSystemService fs);
+  // Callers must stop using the table before destruction.
+  ~PsFileTable();
 
   // Returns fd >= 3 on success, or a negative SCE_KERNEL_ERROR_*.
   std::int64_t open(const std::string& path, std::int64_t flags);
