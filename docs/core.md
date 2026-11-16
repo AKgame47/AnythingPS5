@@ -1179,3 +1179,14 @@ failures, before more texture features land on the shim.
   prohibit copying/moving the pending owner. Existing file/table tests cover successful
   insertion and later teardown. Actual allocator or mutex failures are not injected;
   exception coverage is the guard's explicit unwind probe, not the entire open path.
+
+
+## Slice S48 notes (nested qsort comparator ownership)
+- The per-thread qsort comparator now has scoped save/restore. An inner qsort with a
+  different comparator no longer leaves that comparator installed for the outer host sort.
+- A second synthetic C++ guest fixture starts an ascending sort from the first invocation
+  of its outer descending comparator. Guest instructions check every value in both four-int
+  arrays. With the old implementation this regression fails; with scoped restoration it
+  finishes with exit 55. The original callback/lifecycle fixture still runs unchanged.
+- This proves one finite nested-sort fixture through the guest import/callback FS transitions,
+  not every comparator, recursion depth, concurrent sort, guest exception or longjmp case.
