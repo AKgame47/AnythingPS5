@@ -77,6 +77,7 @@ struct Dyn {
   std::uint64_t dyn_off = 0, dyn_size = 0;
   bool has_dyn = false;
   std::uint64_t symtab = 0, strtab = 0, strsz = 0, rela = 0, relasz = 0, jmprel = 0, pltrelsz = 0;
+  std::uint64_t init = 0, fini = 0, init_array = 0, init_arraysz = 0, fini_array = 0, fini_arraysz = 0;
   std::vector<std::string> needed_offsets_unused;
   std::vector<std::uint64_t> needed;  // DT_NEEDED string offsets
   bool has_tls = false;
@@ -134,6 +135,12 @@ pnr::Status parse_dyn(const Bytes& b, Dyn* d) {
       case 10: d->strsz = val; break;
       case 23: d->jmprel = val; break;
       case 2: d->pltrelsz = val; break;
+      case 12: d->init = val; break;
+      case 13: d->fini = val; break;
+      case 25: d->init_array = val; break;
+      case 27: d->init_arraysz = val; break;
+      case 26: d->fini_array = val; break;
+      case 28: d->fini_arraysz = val; break;
       case 11: if (val != 24) return fail(30, "unsupported DT_SYMENT"); break;
       case 9: if (val != 24) return fail(31, "unsupported DT_RELAENT"); break;
       default: break;
@@ -288,6 +295,26 @@ pnr::Status load_module(const std::string& path, const pnr::prx::PrxRegistry& re
     return fail(51, msg);
   }
 
+  // Slice S32: lifecycle functions. Sizes must be whole pointers and every address must land
+  // inside the image. Array entries are read AFTER relocation, so RELATIVE entries already hold
+  // absolute addresses here; null entries are skipped (gABI permits them).
+  if (d.init_arraysz % 8 || d.fini_arraysz % 8) return fail(54, "init/fini array size is not a multiple of 8");
+  if (d.init_arraysz && !in_img(d.init_array, d.init_arraysz)) return fail(55, "DT_INIT_ARRAY outside the image");
+  if (d.fini_arraysz && !in_img(d.fini_array, d.fini_arraysz)) return fail(56, "DT_FINI_ARRAY outside the image");
+  if ((d.init && !in_img(d.init, 1)) || (d.fini && !in_img(d.fini, 1))) return fail(57, "DT_INIT/DT_FINI outside the image");
+  if (d.init) img->init_fn = B + d.init;
+  if (d.fini) img->fini_fn = B + d.fini;
+  for (std::uint64_t i = 0; i < d.init_arraysz / 8; ++i) {
+    std::uint64_t v = 0;
+    std::memcpy(&v, at(d.init_array) + 8 * i, 8);
+    if (v) img->init_array.push_back(v);
+  }
+  for (std::uint64_t i = 0; i < d.fini_arraysz / 8; ++i) {
+    std::uint64_t v = 0;
+    std::memcpy(&v, at(d.fini_array) + 8 * i, 8);
+    if (v) img->fini_array.push_back(v);
+  }
+
   // Page protections: the union of every segment touching a page.
   std::vector<int> prot(span / page, 0);
   for (const auto& s : d.loads) {
@@ -316,10 +343,17 @@ pnr::Status run_module(const std::string& path, const pnr::prx::PrxRegistry& reg
   if (pid < 0) return pnr::Status::Fail(60, "module", "fork failed");
   if (pid == 0) {
     // PlayStation-style entry: entry(args_block, exit_handler). The result is the process status.
+    // S32: DT_INIT then DT_INIT_ARRAY run before entry; atexit (LIFO), DT_FINI_ARRAY (reverse)
+    // and DT_FINI run after entry returns or when the guest calls exit().
     auto args = pnr::loader::build_entry_args({path});
+    pnr::loader::GuestLifecycle lc;
+    if (img->init_fn) lc.init.push_back(img->init_fn);
+    for (const std::uint64_t v : img->init_array) lc.init.push_back(v);
+    for (auto it = img->fini_array.rbegin(); it != img->fini_array.rend(); ++it) lc.fini.push_back(*it);
+    if (img->fini_fn) lc.fini.push_back(img->fini_fn);
     using EntryFn = std::int64_t (*)(void*, void*);
     const std::int64_t rc = pnr::loader::run_guest_main(img->tls, reinterpret_cast<EntryFn>(img->entry()), args.data(),
-                                                        reinterpret_cast<void*>(&pnr_guest_exit));
+                                                        reinterpret_cast<void*>(&pnr_guest_exit), lc);
     std::fflush(stdout);
     ::_exit(static_cast<int>(rc) & 0xff);
   }
