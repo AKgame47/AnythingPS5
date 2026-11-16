@@ -959,6 +959,124 @@ std::vector<std::uint8_t> build_synthetic_mmap_elf() {
   return b;
 }
 
+// Slice S42: memory protection transitions through the tracked libkernel memory
+// calls, all from guest machine code. The guest maps a page RW via
+// sceKernelMapMemory, writes and reads a qword pattern, queries the protection
+// (sceKernelQueryMemoryProtection reports start/end/prot), drops the page to
+// read-only with sceKernelMTypeprotect, queries again (prot must now be READ)
+// and confirms the data survived, restores RW and rewrites, then unmaps with
+// sceKernelMunmap. Prints "mprotect ok" and exits 0 on success; a distinct
+// nonzero stage code (1-14) on any deviation. This proves the host mprotect
+// round-trip and mapping-table bookkeeping as observed through the query call;
+// it does not prove fault semantics (no guest SIGSEGV handler exists yet).
+std::vector<std::uint8_t> build_synthetic_mprotect_elf() {
+  std::vector<std::uint8_t> b(0x780, 0);
+  const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
+  std::memcpy(b.data(), ident, 8);
+  p16(b, 0x10, 3); p16(b, 0x12, 62); p32(b, 0x14, 1);
+  p64(b, 0x18, 0x100); p64(b, 0x20, 0x40);
+  p16(b, 0x34, 64); p16(b, 0x36, 56); p16(b, 0x38, 2); p16(b, 0x3A, 64);
+  const std::size_t total = b.size();
+  p32(b, 0x40, 1); p32(b, 0x44, 7); p64(b, 0x48, 0); p64(b, 0x50, 0); p64(b, 0x58, 0); p64(b, 0x60, total); p64(b, 0x68, total); p64(b, 0x70, 0x1000);
+  p32(b, 0x78, 2); p32(b, 0x7C, 6); p64(b, 0x80, 0x700); p64(b, 0x88, 0x700); p64(b, 0x90, 0x700); p64(b, 0x98, 0x80); p64(b, 0xA0, 0x80); p64(b, 0xA8, 8);
+  auto str = [&](std::size_t at, const char* s) { std::memcpy(&b[at], s, std::strlen(s) + 1); };
+  const std::size_t OK = 0x400;
+  str(OK, "mprotect ok");
+  // 5 imports: symtab 6 entries -> strtab at 0x590 ((0x590-0x500)/24 == 6 symbols).
+  // NID strings are 16 bytes each; strtab ends 0x5E1, rela sits clear at 0x600.
+  enum { G_MAP, G_MTYPE, G_QUERY, G_MUNMAP, G_PRINTF, G_N };
+  std::size_t pc = 0x100;
+  std::vector<std::size_t> fails;
+  auto emit = [&](std::initializer_list<int> bytes) { for (int v : bytes) b[pc++] = static_cast<std::uint8_t>(v); };
+  auto imm32 = [&](std::uint32_t v) { p32(b, pc, v); pc += 4; };
+  auto call = [&](int g) { emit({0xFF, 0x15}); p32(b, pc, static_cast<std::uint32_t>(0x480 + 8 * g - (pc + 4))); pc += 4; };
+  auto rip = [&](std::initializer_list<int> op, std::size_t target) { emit(op); p32(b, pc, static_cast<std::uint32_t>(target - (pc + 4))); pc += 4; };
+  auto check = [&](int ok_jcc, int n) { emit({ok_jcc, 10, 0xB8}); imm32(n); emit({0xE9}); fails.push_back(pc); pc += 4; };
+  const unsigned long long PAT1 = 0xA5A5DEADBEEF5A5AULL, PAT2 = 0x5A5A1234ABCDA5A5ULL;
+
+  emit({0x53, 0x48, 0x83, 0xEC, 0x60});  // push rbx; sub rsp,0x60
+  // sceKernelMapMemory(4096, SCE_KERNEL_PROT_READ|WRITE)
+  emit({0xBF}); imm32(4096);                         // mov edi, 4096
+  emit({0xBE}); imm32(3);                            // mov esi, 3
+  call(G_MAP);
+  emit({0x48, 0x85, 0xC0}); check(0x75, 1);          // test rax,rax; jnz ok
+  emit({0x48, 0xA9}); imm32(0xFFF); check(0x74, 2);  // test rax,0xFFF; jz ok
+  emit({0x48, 0x89, 0xC3});                          // mov rbx, rax (page)
+  // write PAT1 into the page, read it back
+  emit({0x49, 0xBA}); p64(b, pc, PAT1); pc += 8;     // mov r10, PAT1
+  emit({0x4C, 0x89, 0x13});                          // mov [rbx], r10
+  emit({0x4C, 0x39, 0x13}); check(0x74, 3);          // cmp [rbx], r10; je ok
+  // sceKernelQueryMemoryProtection(page, &start, &end, &prot)
+  emit({0x48, 0x89, 0xDF});                          // mov rdi, rbx
+  emit({0x48, 0x8D, 0x74, 0x24, 0x10});              // lea rsi, [rsp+0x10]
+  emit({0x48, 0x8D, 0x54, 0x24, 0x18});              // lea rdx, [rsp+0x18]
+  emit({0x48, 0x8D, 0x4C, 0x24, 0x20});              // lea rcx, [rsp+0x20]
+  call(G_QUERY);
+  emit({0x48, 0x85, 0xC0}); check(0x74, 4);          // test rax,rax; jz ok
+  emit({0x48, 0x8B, 0x44, 0x24, 0x10});              // mov rax, [rsp+0x10]
+  emit({0x48, 0x39, 0xD8}); check(0x74, 5);          // cmp rax, rbx; je ok (start==page)
+  emit({0x48, 0x8B, 0x44, 0x24, 0x18});              // mov rax, [rsp+0x18]
+  emit({0x48, 0x8D, 0x93}); imm32(0x1000);           // lea rdx, [rbx+0x1000]
+  emit({0x48, 0x39, 0xD0}); check(0x74, 6);          // cmp rax, rdx; je ok (end==page+4096)
+  emit({0x48, 0x83, 0x7C, 0x24, 0x20, 0x03}); check(0x74, 7);  // cmp qword [rsp+0x20], 3; je ok (RW)
+  // sceKernelMTypeprotect(page, 4096, SCE_KERNEL_PROT_READ)
+  emit({0x48, 0x89, 0xDF});                          // mov rdi, rbx
+  emit({0xBE}); imm32(4096);                         // mov esi, 4096
+  emit({0xBA}); imm32(1);                            // mov edx, 1
+  call(G_MTYPE);
+  emit({0x48, 0x85, 0xC0}); check(0x74, 8);          // test rax,rax; jz ok
+  // query again: prot must now be READ
+  emit({0x48, 0x89, 0xDF});                          // mov rdi, rbx
+  emit({0x48, 0x8D, 0x74, 0x24, 0x10});              // lea rsi, [rsp+0x10]
+  emit({0x48, 0x8D, 0x54, 0x24, 0x18});              // lea rdx, [rsp+0x18]
+  emit({0x48, 0x8D, 0x4C, 0x24, 0x20});              // lea rcx, [rsp+0x20]
+  call(G_QUERY);
+  emit({0x48, 0x85, 0xC0}); check(0x74, 9);          // test rax,rax; jz ok
+  emit({0x48, 0x83, 0x7C, 0x24, 0x20, 0x01}); check(0x74, 10); // cmp qword [rsp+0x20], 1; je ok (RO)
+  // data survived the protection change
+  emit({0x49, 0xBA}); p64(b, pc, PAT1); pc += 8;     // mov r10, PAT1
+  emit({0x4C, 0x39, 0x13}); check(0x74, 11);         // cmp [rbx], r10; je ok
+  // restore RW and rewrite
+  emit({0x48, 0x89, 0xDF});                          // mov rdi, rbx
+  emit({0xBE}); imm32(4096);                         // mov esi, 4096
+  emit({0xBA}); imm32(3);                            // mov edx, 3
+  call(G_MTYPE);
+  emit({0x48, 0x85, 0xC0}); check(0x74, 12);         // test rax,rax; jz ok
+  emit({0x49, 0xBA}); p64(b, pc, PAT2); pc += 8;     // mov r10, PAT2
+  emit({0x4C, 0x89, 0x13});                          // mov [rbx], r10
+  emit({0x4C, 0x39, 0x13}); check(0x74, 13);         // cmp [rbx], r10; je ok
+  // sceKernelMunmap(page, 4096) == 0
+  emit({0x48, 0x89, 0xDF});                          // mov rdi, rbx
+  emit({0xBE}); imm32(4096);                         // mov esi, 4096
+  call(G_MUNMAP);
+  emit({0x48, 0x85, 0xC0}); check(0x74, 14);         // test rax,rax; jz ok
+  // printf("mprotect ok\n")
+  rip({0x48, 0x8D, 0x3D}, OK); emit({0x31, 0xC0}); call(G_PRINTF);
+  emit({0x31, 0xC0});
+  const std::size_t epi = pc;
+  emit({0x48, 0x83, 0xC4, 0x60, 0x5B, 0xC3});
+  for (std::size_t f : fails) p32(b, f, static_cast<std::uint32_t>(epi - (f + 4)));
+
+  const char* names[G_N] = {"sceKernelMapMemory", "sceKernelMTypeprotect",
+                            "sceKernelQueryMemoryProtection", "sceKernelMunmap", "printf"};
+  std::size_t so = 0x590 + 1;
+  for (int i = 0; i < G_N; ++i) {
+    const std::string nm = pnr::loader::nid::compute_nid(names[i], "") + "#A#A";
+    const std::size_t sy = 0x500 + 24 * (i + 1);
+    p32(b, sy, static_cast<std::uint32_t>(so - 0x590)); b[sy + 4] = 0x12; p16(b, sy + 6, 0);
+    std::memcpy(&b[so], nm.c_str(), nm.size() + 1); so += nm.size() + 1;
+  }
+  const std::size_t strsz = so - 0x590;
+  for (int i = 0; i < G_N; ++i) {
+    const std::size_t r = 0x600 + 24 * i;
+    p64(b, r, 0x480 + 8 * i); p64(b, r + 8, (static_cast<std::uint64_t>(i + 1) << 32) | 6); p64(b, r + 16, 0);
+  }
+  std::size_t dy = 0x700;
+  auto dyn = [&](std::int64_t tag, std::uint64_t v) { p64(b, dy, static_cast<std::uint64_t>(tag)); p64(b, dy + 8, v); dy += 16; };
+  dyn(6, 0x500); dyn(5, 0x590); dyn(10, strsz); dyn(11, 24); dyn(7, 0x600); dyn(8, 24 * G_N); dyn(9, 24); dyn(0, 0);
+  return b;
+}
+
 std::vector<std::uint8_t> build_synthetic_lifecycle_elf(const LifecycleSpec& spec) {
   std::vector<std::uint8_t> b(0x4c0, 0);
   const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
