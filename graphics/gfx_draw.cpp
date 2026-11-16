@@ -12,6 +12,7 @@
 #include "graphics/demo/tex_shaders.hpp"
 #include "graphics/demo/texarr_shaders.hpp"
 #include "graphics/demo/texcube_shaders.hpp"
+#include "graphics/demo/tex3d_shaders.hpp"
 #include "graphics/gfx_tsharp.hpp"
 #include "graphics/gfx_bc.hpp"
 #include "graphics/gfx_swizzle.hpp"
@@ -336,13 +337,15 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   bool pps2 = false;
   bool want_array = false;  // PPS2 blob v1: Color2DArray T# (slice S27)
   bool want_cube = false;   // PPS2 blob v2: Cube T# (slice S28)
+  bool want_3d = false;     // PPS2 blob v3: Color3D T# (slice S30)
   TexInput tex;
   std::vector<std::uint8_t> texels;
   {
     std::uint32_t p2[2];
-    if (!pps1 && mem.read(b.ps.address, p2, sizeof p2) && p2[0] == kPnrPs2Magic && p2[1] <= 2) {
-      want_array = p2[1] == 1;  // v0 = 2D, v1 = 2D array, v2 = cubemap; the T# type must agree below
+    if (!pps1 && mem.read(b.ps.address, p2, sizeof p2) && p2[0] == kPnrPs2Magic && p2[1] <= 3) {
+      want_array = p2[1] == 1;  // v0 = 2D, v1 = 2D array, v2 = cubemap, v3 = 3D; the T# type must agree below
       want_cube = p2[1] == 2;
+      want_3d = p2[1] == 3;
       std::uint64_t t_va = 0, s_va = 0;
       if (!read_u64(b.ps, 0, &t_va) || !read_u64(b.ps, 2, &s_va))
         return fail(r, "PPS2 blob needs pixel user data 0..3 (T# and S# descriptor addresses)");
@@ -352,9 +355,11 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
       if (!decode_tsharp(tw, &ts)) return fail(r, "T# descriptor is not a valid image (the type valid bit is clear)");
       std::string why;
       if (!validate_tsharp_sample(ts, 1ull << 48, &why)) return fail(r, "T#: " + why);
-      if (want_array != (ts.type == 13) || want_cube != (ts.type == 11))
-        return fail(r, "PPS2 blob version does not match the T# image type (v1 = Color2DArray, v2 = Cube)");
-      const std::uint32_t nslices = ts.type == 13 || ts.type == 11 ? ts.last_array + 1 : 1;
+      if (want_array != (ts.type == 13) || want_cube != (ts.type == 11) || want_3d != (ts.type == 10))
+        return fail(r, "PPS2 blob version does not match the T# image type (v1 = Color2DArray, v2 = Cube, v3 = Color3D)");
+      // For a 3D image the "slices" are the level-0 z-planes; per-level plane
+      // counts shrink with the mip level (see `planes` inside the loops).
+      const std::uint32_t nslices = ts.type == 13 || ts.type == 11 ? ts.last_array + 1 : ts.type == 10 ? ts.depth : 1;
       if (ts.width > 256 || ts.height > 256)
         return fail(r, "T# extent is over 256x256 (this slice's rasterizer staging cap)");
       if (!mem.read(s_va, sw, sizeof sw)) return fail(r, "S# descriptor is not mapped: " + mem.last_error());
@@ -382,7 +387,8 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
       for (std::uint32_t l = 0; l < levels; ++l) {
         const std::uint32_t lw = ts.width >> l ? ts.width >> l : 1;
         const std::uint32_t lh = ts.height >> l ? ts.height >> l : 1;
-        chain_bytes += std::uint64_t(lw) * lh * 4 * nslices;
+        const std::uint32_t planes = want_3d ? (ts.depth >> l ? ts.depth >> l : 1) : nslices;
+        chain_bytes += std::uint64_t(lw) * lh * 4 * planes;
       }
       texels.resize(chain_bytes);
       // Tiled (thin swizzle) surfaces: normalize the base for pipe/bank XOR
@@ -448,9 +454,10 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
           off += std::uint64_t(lw) * lh * 4;
           continue;
         }
+        const std::uint32_t planes = want_3d ? (ts.depth >> l ? ts.depth >> l : 1) : nslices;
         if (!bc) {
           raw.resize(rows * row_bytes);
-          for (std::uint32_t s = 0; s < nslices; ++s) {
+          for (std::uint32_t s = 0; s < planes; ++s) {
             const std::uint64_t slice_base = src + std::uint64_t(s) * src_row * rows;
             for (std::uint32_t row = 0; row < rows; ++row)
               if (!mem.read(slice_base + std::uint64_t(row) * src_row, raw.data() + std::size_t(row) * row_bytes, row_bytes))
@@ -461,7 +468,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
           }
         } else {
           raw.resize(rows * row_bytes);
-          for (std::uint32_t s = 0; s < nslices; ++s) {
+          for (std::uint32_t s = 0; s < planes; ++s) {
             const std::uint64_t slice_base = src + std::uint64_t(s) * src_row * rows;
             for (std::uint32_t row = 0; row < rows; ++row)
               if (!mem.read(slice_base + std::uint64_t(row) * src_row, raw.data() + std::size_t(row) * row_bytes, row_bytes))
@@ -470,11 +477,12 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
                             texels.data() + off + std::size_t(s) * std::uint64_t(lw) * lh * 4, ts.num_format == 5);
           }
         }
-        src += src_row * rows * nslices;
-        off += std::uint64_t(lw) * lh * 4 * nslices;
+        src += src_row * rows * planes;
+        off += std::uint64_t(lw) * lh * 4 * planes;
       }
       tex.rgba = texels.data(); tex.w = ts.width; tex.h = ts.height;
-      tex.layers = nslices;
+      tex.layers = want_3d ? 1 : nslices;
+      tex.depth = want_3d ? ts.depth : 1;
       tex.cube = want_cube;
       tex.srgb = format_uses_srgb_image(ts.data_format, ts.num_format);  // S23: host-side sRGB
       tex.mag_filter = ss.mag_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
@@ -536,7 +544,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   std::uint64_t mat_va = 0;
   if (!read_u64(*vs, 0, &mat_va)) return fail(r, "vertex user data 0..1 (matrix address) not set");
   std::vector<std::uint32_t> mat(16);
-  const std::uint32_t stride = pvs4 ? 9 : (pps2 ? (want_array || want_cube ? 9 : 8) : 6);  // PVS4: normals (S11); PPS2: uv (S17), uv+layer (S27), direction (S28)
+  const std::uint32_t stride = pvs4 ? 9 : (pps2 ? (want_array || want_cube || want_3d ? 9 : 8) : 6);  // PVS4: normals (S11); PPS2: uv (S17), uv+layer (S27), direction (S28), uvw (S30)
   std::vector<float> vb;
   if (!mem.read(mat_va, mat.data(), 64)) return fail(r, "matrix address is not mapped: " + mem.last_error());
   if (pvs5) {
@@ -671,6 +679,7 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
     if (pps2) { verts.push_back(vb[i * stride + 6]); verts.push_back(vb[i * stride + 7]);
       if (want_array) verts.push_back(vb[i * stride + 8]);  // slice index (S27)
       if (want_cube) verts.push_back(vb[i * stride + 8]);   // direction z (S28): the record is xyz rgb dir3
+      if (want_3d) verts.push_back(vb[i * stride + 8]);     // w coordinate (S30): the record is xyz rgb uvw
     }
     idx.push_back(i);
   }
@@ -689,7 +698,12 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
   (void)frame_changed;  // the renderer restarts the frame on size change; binding change is below
   if (frame.surface.color_image != 0 && frame_changed) vk.destroy_frame(frame.surface);
   Status st;
-  if (pps2 && want_cube) {
+  if (pps2 && want_3d) {
+    std::vector<std::uint32_t> tvsp(std::begin(cliptex3_vert), std::end(cliptex3_vert)), tfsp(std::begin(tex3d_frag), std::end(tex3d_frag));
+    st = vk.render_textured_array_clip_mesh_rgba(w, h, tvsp, tfsp, verts, idx, use_depth, tex, clear, &r.rgba,
+                                                 &frame.surface, depth_write, blend.enable ? &blend : nullptr,
+                                                 cull_mode, front_face, depth_compare);
+  } else if (pps2 && want_cube) {
     std::vector<std::uint32_t> tvsp(std::begin(cliptex3_vert), std::end(cliptex3_vert)), tfsp(std::begin(texcube_frag), std::end(texcube_frag));
     st = vk.render_textured_array_clip_mesh_rgba(w, h, tvsp, tfsp, verts, idx, use_depth, tex, clear, &r.rgba,
                                                  &frame.surface, depth_write, blend.enable ? &blend : nullptr,
@@ -716,7 +730,8 @@ DrawResult execute_draw(VulkanBackend& vk, GpuAddressSpace& mem, const pm4::Draw
                  : pvs2 ? "PVS2 blob: clip and perspective divide are translated RDNA, w = 1 fed to the rasterizer"
                         : "vertex shader is a PNR PVS1 test blob";
   r.notes += pps1 ? "; pixel shader is a translated PPS1 blob (constant colour, no varyings)"
-                  : pps2 ? (want_cube ? "; pixel stage is a PPS2 v2 blob: cubemap built from the guest T# (6 faces, level-major), sampler state from the guest S#, direction from the vertex record, sampled by the host rasterizer's fragment stage (sampling is not translated RDNA yet)"
+                  : pps2 ? (want_3d ? "; pixel stage is a PPS2 v3 blob: 3D texture built from the guest T# (z-planes level-major, depth shrinks per level), sampler state from the guest S#, uvw from the vertex record, sampled by the host rasterizer's fragment stage (sampling is not translated RDNA yet)"
+                         : want_cube ? "; pixel stage is a PPS2 v2 blob: cubemap built from the guest T# (6 faces, level-major), sampler state from the guest S#, direction from the vertex record, sampled by the host rasterizer's fragment stage (sampling is not translated RDNA yet)"
                            : want_array ? "; pixel stage is a PPS2 v1 blob: 2D texture array built from the guest T# (level-major slices), sampler state from the guest S#, slice index from the vertex record, sampled by the host rasterizer's fragment stage (sampling is not translated RDNA yet)"
                                        : "; pixel stage is a PPS2 blob: texture built from the guest T# (linear 8_8_8_8 unorm), sampler state from the guest S#, sampled by the host rasterizer's fragment stage (sampling is not translated RDNA yet)")
                          : "; pixel shader not translated: fixed pass-through colour used";
