@@ -864,6 +864,22 @@ int main() {
     std::filesystem::remove_all(fsroot);
   }
 
+  // --- S40: synthetic 7-scalar-arg import (ABI scaffolding, not a Sony API) ---
+  {
+    pnr::prx::PrxRegistry reg;
+    reg.install_synthetic_test_calls();
+    std::function<std::int64_t(const pnr::prx::GuestCallArgs&)> fn;
+    std::string err;
+    CHECK(reg.bind(pnr::loader::nid::compute_nid("pnrTestSevenScalarArgs",
+                                                 "libpnrtest"),
+                   &fn, &err) == pnr::prx::SCE_OK,
+          "abi7: synthetic import binds");
+    pnr::prx::GuestCallArgs a{};
+    a.i[0] = 1; a.i[1] = 2; a.i[2] = 3; a.i[3] = 4; a.i[4] = 5; a.i[5] = 6;
+    a.s[0] = 700; a.s[1] = 9999;  // s[1..] must not leak into the 7-arg sum
+    CHECK(fn(a) == 721, "abi7: 6 register args + stack slot0 sum verbatim");
+  }
+
   // --- SHOWCASE: PS-style demo binary dispatched through the PS-ABI shim ---
   {
 #ifdef PNR_PS_DEMO_PATH
