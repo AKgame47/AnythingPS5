@@ -40,6 +40,11 @@ std::vector<std::uint8_t> build_synthetic_fp_elf();
 // only when the host consumes the spill window correctly; prints "1 11 2 12 ... 8 18 9".
 std::vector<std::uint8_t> build_synthetic_stkovf_elf();
 
+// Slice S37: a module reading an asset through the jailed file calls: opens "/app0/asset.txt",
+// reads 12 bytes, byte-compares "pnr-asset-42", prints "asset ok", exits 0 on success (1..5
+// otherwise). Needs a jail with asset.txt seeded; module-run uses PNR_JAIL_ROOT.
+std::vector<std::uint8_t> build_synthetic_file_elf();
+
 // Slice S32: a module with DT_INIT, DT_INIT_ARRAY (2), DT_FINI_ARRAY (2), DT_FINI and two
 // atexit handlers registered from its entry point. Every lifecycle function prints one letter
 // through the bound putchar; the exact stdout order "IABE21yxF" proves the call order:
