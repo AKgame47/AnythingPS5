@@ -1,6 +1,7 @@
 // Core slice C2 tests: TLS/TCB layout, Sony constant translation, entry args, and a synthetic
 // module that exercises the libkernel ABI from machine code in a forked child.
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -37,6 +38,53 @@ void pnr_kernel_tests(int& pass, int& fail) {
   check(std::memcmp(&blk[l.fs_offset - 32], init, 8) == 0 && blk[l.fs_offset - 24] == 0 && blk[l.fs_offset - 1] == 0, "tls: .tdata copied, .tbss and padding zeroed");
   check(tls_layout(TlsTemplate{nullptr, 0, 0, 0}).size == kPad + 0 + kTcbSize, "tls: empty template still yields a valid TCB");
   check(tls_layout(TlsTemplate{nullptr, 0, 10, 1000000}).fs_offset == kPad + 4096 * 0 + 4096 || tls_layout(TlsTemplate{nullptr, 0, 10, 1000000}).fs_offset > kPad, "tls: absurd alignment is clamped");
+
+  // S49: isolate malformed handle probes, so the old raw-pointer implementation fails
+  // this test rather than crashing the entire runner. Handle storage pointers are valid.
+  {
+    const pid_t child = ::fork();
+    if (child == 0) {
+      ::alarm(5);
+      std::int64_t forged = 1;
+      for (int op : {1, 2, 3}) if (guest_mutex_op(op, &forged) != -2) ::_exit(1);
+      std::int64_t mutex = 0, cond = 0;
+      if (guest_mutex_op(0, &mutex) || guest_cond_init(&cond)) ::_exit(2);
+      if (guest_cond_wait(cond, &forged, 0) != -2) ::_exit(3);
+      const auto stale = mutex;
+      if (guest_mutex_op(3, &mutex) || mutex != 0) ::_exit(4);
+      for (int op : {1, 2, 3}) {
+        auto h = stale;
+        if (guest_mutex_op(op, &h) != -2 || h != stale) ::_exit(5);
+      }
+      auto h = stale;
+      if (guest_cond_wait(cond, &h, 0) != -2) ::_exit(6);
+      if (guest_cond_destroy(&cond)) ::_exit(7);
+      ::_exit(0);
+    }
+    int status = 0;
+    const bool waited = child > 0 && ::waitpid(child, &status, 0) == child;
+    check(waited && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "mutex: forged and stale values rejected by lock/unlock/destroy/condition-wait");
+  }
+
+  {
+    std::int64_t h = 0;
+    check(guest_mutex_op(0, &h) == 0 && h != 0, "mutex: registry initialization publishes a handle");
+    const auto original = h;
+    check(guest_mutex_op(1, &h) == 0, "mutex: registry handle locks");
+    check(guest_mutex_op(3, &h) == -3 && h == original,
+          "mutex: held destruction is refused without discarding the handle");
+    check(guest_mutex_op(2, &h) == 0, "mutex: refused destruction leaves mutex usable for unlock");
+    check(guest_mutex_op(3, &h) == 0 && h == 0, "mutex: unlocked registry mutex destroys and clears handle");
+    std::int64_t replacement = 0;
+    check(guest_mutex_op(0, &replacement) == 0 && replacement != original,
+          "mutex: a later initialization does not recycle a stale ID");
+    auto stale = original;
+    check(guest_mutex_op(1, &stale) == -2 && guest_mutex_op(1, &replacement) == 0,
+          "mutex: stale ID cannot lock a later mutex");
+    check(guest_mutex_op(2, &replacement) == 0 && guest_mutex_op(3, &replacement) == 0,
+          "mutex: later mutex remains usable after stale-ID refusal");
+  }
 
   // Sony constants.
   int hp = 0, hf = 0; std::string why;
@@ -76,6 +124,9 @@ void pnr_kernel_tests(int& pass, int& fail) {
       while (ready.load() < 100) { if (guest_cond_wait(ch, &mh, -1) != 0) break; }
       ++woke; guest_mutex_op(2, &mh); });
     while (true) { guest_mutex_op(1, &mh); int r = ready.load(); guest_mutex_op(2, &mh); if (r >= 4) break; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+    auto destroy_probe = mh;  // separate storage: workers continue reading mh
+    check(guest_mutex_op(3, &destroy_probe) == -3 && destroy_probe == mh,
+          "mutex: condition waiters retain their mutex against destruction");
     guest_mutex_op(1, &mh); ready = 100; guest_mutex_op(2, &mh);
     check(guest_cond_wake(ch, true) == 0, "sync: broadcast succeeds");
     for (auto& x : th) x.join();
