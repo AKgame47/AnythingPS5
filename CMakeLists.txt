@@ -203,6 +203,10 @@ add_test(NAME pnr_abi7_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE
 # Slice S41: guest anonymous mmap/munmap through the existing 6-arg "mmap" binding
 # (Sony constants translated host-side); pattern write/read checked in guest code.
 add_test(NAME pnr_mmap_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_mmap.elf --mmap && out=$($<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_mmap.elf) && echo \"$out\" | grep -q \"mmap ok\" && echo \"$out\" | grep -q \"MODULE FINISHED: exit 0\"")
+# Slice S42: guest mprotect/MTypeprotect through the tracked libkernel memory calls
+# (map RW -> query -> protect RO -> query -> restore RW -> unmap); verified via the
+# query call and guest data read-back, not via fault semantics.
+add_test(NAME pnr_mprotect_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_mprotect.elf --mprotect && out=$($<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_mprotect.elf) && echo \"$out\" | grep -q \"mprotect ok\" && echo \"$out\" | grep -q \"MODULE FINISHED: exit 0\"")
 add_test(NAME pnr_gnm_decode COMMAND sh -c "$<TARGET_FILE:pnr> gnm-synth ${CMAKE_BINARY_DIR}/synth_pm4.bin && $<TARGET_FILE:pnr> gnm-decode ${CMAKE_BINARY_DIR}/synth_pm4.bin | grep -q \"2 draws\"")
 add_test(NAME pnr_module_run COMMAND sh -c "$<TARGET_FILE:pnr_make_ps_elf> ${CMAKE_BINARY_DIR}/synth_ok.elf && $<TARGET_FILE:pnr> module-run ${CMAKE_BINARY_DIR}/synth_ok.elf")
 set_tests_properties(pnr_module_run PROPERTIES PASS_REGULAR_EXPRESSION "MODULE FINISHED: exit 30")
