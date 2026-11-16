@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <chrono>
 #include <condition_variable>
@@ -105,6 +106,35 @@ void* thread_main(void* p) {
 
 std::mutex g_thr_mu;
 std::vector<Thr*>& thr_list() { static std::vector<Thr*> v; return v; }
+
+// ---- Module lifecycle (slice S32): atexit table + the loaded module's fini list.
+// Lives in the forked child: written before guest code starts, read during the exit sequence.
+std::mutex g_exit_mu;
+std::vector<std::uint64_t> g_atexit;  // LIFO order at run time
+GuestLifecycle g_lc;
+constexpr std::size_t kMaxAtexit = 32;
+
+// The guest FS base registered for the thread whose HOST FS base is `host_fs`, or 0.
+std::uint64_t current_guest_fs(std::uint64_t host_fs) {
+  for (auto& p : g_fs)
+    if (p.host == host_fs) {
+      const std::uint64_t g = p.guest.load(std::memory_order_relaxed);
+      if (g) return g;
+    }
+  return 0;
+}
+
+// atexit handlers LIFO, then the module fini list in (already reversed) order. Every call runs
+// with the guest FS base via call_with_fs.
+void run_exit_sequence(std::uint64_t guest_fs, std::uint64_t host_fs) {
+  std::vector<std::uint64_t> handlers;
+  GuestLifecycle lc;
+  { std::lock_guard<std::mutex> l(g_exit_mu); handlers.swap(g_atexit); lc = g_lc; }
+  using Fn2 = std::int64_t (*)(void*, void*);
+  for (auto it = handlers.rbegin(); it != handlers.rend(); ++it)
+    call_with_fs(reinterpret_cast<Fn2>(*it), nullptr, nullptr, guest_fs, host_fs);
+  for (const std::uint64_t f : lc.fini) call_with_fs(reinterpret_cast<Fn2>(f), nullptr, nullptr, guest_fs, host_fs);
+}
 }  // namespace
 
 // ---------------- TLS
@@ -204,14 +234,56 @@ std::vector<std::uint8_t> build_entry_args(const std::vector<std::string>& argv)
 
 // ---------------- process-level
 std::int64_t run_guest_main(const TlsTemplate& t, std::int64_t (*fn)(void*, void*), void* a, void* b) {
+  return run_guest_main(t, fn, a, b, GuestLifecycle{});
+}
+
+std::int64_t run_guest_main(const TlsTemplate& t, std::int64_t (*fn)(void*, void*), void* a, void* b, const GuestLifecycle& lc) {
   g_tls = t;
   g_have_tls = true;
+  { std::lock_guard<std::mutex> l(g_exit_mu); g_lc = lc; g_atexit.clear(); }
   Tls tl;
   if (!tls_alloc(t, &tl)) return -1;
   const std::uint64_t host_fs = raw_get_fs();
   if (!fs_register(tl.fs, host_fs)) return -1;
+  using Fn2 = std::int64_t (*)(void*, void*);
+  for (const std::uint64_t f : lc.init) call_with_fs(reinterpret_cast<Fn2>(f), a, b, tl.fs, host_fs);
   const std::int64_t r = call_with_fs(fn, a, b, tl.fs, host_fs);
+  run_exit_sequence(tl.fs, host_fs);
   fs_unregister(tl.fs);
+  return r;
+}
+
+std::int64_t guest_atexit_register(std::uint64_t fn) {
+  if (!fn || !guest_active()) return -2;
+  std::lock_guard<std::mutex> l(g_exit_mu);
+  if (g_atexit.size() >= kMaxAtexit) return -1;
+  g_atexit.push_back(fn);
+  return 0;
+}
+
+[[noreturn]] void guest_exit_with(int code) {
+  std::fflush(stdout);
+  std::fflush(stderr);
+  if (guest_active()) {
+    const std::uint64_t host_fs = raw_get_fs();
+    const std::uint64_t g = current_guest_fs(host_fs);
+    if (g) run_exit_sequence(g, host_fs);
+  }
+  // Handlers above may have printed: flush again before the unbuffered _exit.
+  std::fflush(stdout);
+  std::fflush(stderr);
+  ::_exit(code);
+}
+
+__attribute__((optimize("no-stack-protector"))) std::int64_t call_guest_function(std::uint64_t addr, std::int64_t a, std::int64_t b) {
+  if (!addr) return -2;
+  const std::uint64_t host_fs = raw_get_fs();
+  const std::uint64_t g = current_guest_fs(host_fs);
+  if (!g) return -2;
+  using Fn2 = std::int64_t (*)(std::int64_t, std::int64_t);
+  raw_set_fs(g);
+  const std::int64_t r = reinterpret_cast<Fn2>(addr)(a, b);
+  raw_set_fs(host_fs);
   return r;
 }
 
