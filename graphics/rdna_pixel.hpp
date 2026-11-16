@@ -74,6 +74,11 @@ inline std::vector<uint32_t> make_pnr_ps2_array_blob() { return {kPnrPs2Magic, 1
 // cubemap direction (9 floats per vertex: xyz rgb dir3).
 inline std::vector<uint32_t> make_pnr_ps2_cube_blob() { return {kPnrPs2Magic, 2}; }
 
+// PPS2 v3 (slice S30): the pixel stage samples a Color3D T#. Same layout as
+// v0; the 9-float vertex record carries the 3D sampling coordinate (uvw,
+// each in [0,1]) where v1 carries the slice index.
+inline std::vector<uint32_t> make_pnr_ps2_3d_blob() { return {kPnrPs2Magic, 3}; }
+
 // Runs the four component kernels; uniforms8 = s0..s7 as float bit patterns.
 inline Status rdna_pixel_colour(VulkanBackend& vk, const std::vector<uint32_t>& uniforms8,
                                 float out_rgba[4]) {
