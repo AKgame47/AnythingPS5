@@ -8,8 +8,8 @@
 //  - plain (already unprotected) ELF only. A SELF container is detected and refused;
 //    PNR never decrypts or removes protection.
 //  - relocations: RELATIVE, 64, GLOB_DAT, JUMP_SLOT. Anything else is refused.
-//  - up to 64 bound imports per process, each called with up to 6 integer arguments.
-//    No floating point arguments, no varargs beyond the 6 registers.
+//  - up to 64 bound imports per process, each called with up to 6 gp + 8 xmm register
+//    arguments (slice S35); arguments spilled to the stack past the registers are not captured.
 //  - C2 added: PT_TLS setup (variant II TCB), entry(args, exit_handler), guest FS switching
 //    around host calls.
 //  - S32 added: DT_INIT/DT_INIT_ARRAY run before entry; atexit handlers (LIFO), DT_FINI_ARRAY
