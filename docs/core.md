@@ -1104,3 +1104,23 @@ failures, before more texture features land on the shim.
   the runtime has no guest signal handling yet. GPU protection bits, partial-range
   reprotect bookkeeping (only whole-mapping prot updates are tracked) and virtual-range
   reservation (sceKernelReserveVirtualRange is declared-only) remain out of scope.
+
+
+## Slice S43 notes (tracked mapping range safety)
+- Fixed refusal after side effect in the existing tracked memory shims:
+  sceKernelMunmap now validates the complete rounded range and supported shape before
+  calling host munmap. A middle split or interior overrun returns EINVAL without
+  removing pages. Whole, prefix and suffix unmaps remain supported.
+- The mapping registry now records host-page-rounded allocation extents, and unmap
+  bookkeeping uses that same rounding. Zero lengths, unaligned addresses and rounding
+  overflow are rejected before host mutation. Address membership uses integer
+  differences instead of relational comparisons on unrelated C++ pointers.
+- sceKernelMTypeprotect now supports only a whole remaining mapping, after host-page
+  rounding. Partial reprotects and overruns return EINVAL before mprotect, rather than
+  applying changes that the single-protection registry cannot represent accurately.
+  This deliberately narrows previously misleading partial-range success.
+- Regressions check that refused middle unmaps leave all three pages mapped via mincore,
+  that refusals preserve registry range/protection, and that all pages remain writable
+  after rejected reprotects. Rounded prefix/suffix/final unmap, non-page-sized allocation,
+  whole-map reprotect, misalignment and size overflow are covered. This is host-shim
+  safety coverage, not verification of Sony signatures or arbitrary guest compatibility.
