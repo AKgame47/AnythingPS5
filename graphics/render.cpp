@@ -575,8 +575,9 @@ Status VulkanBackend::render_core(
   // Slice S19: mip chain extents/byte count (level l tightly pitched at
   // max(1,w>>l) x max(1,h>>l)); valid only while tex != nullptr.
   // Slice S27: each level holds tex->layers tightly packed array slices.
-  uint32_t levels = 1, lw[9], lh[9];
+  uint32_t levels = 1, lw[9], lh[9], ld[9];
   uint32_t layers = 1;
+  uint32_t tex_depth = 1;
   size_t tex_bytes = 0;
   if (tex) {
     if (!tex->rgba || tex->w == 0 || tex->h == 0 || tex->w > 256 || tex->h > 256)
@@ -587,10 +588,17 @@ Status VulkanBackend::render_core(
     if (layers > 256) return Status::Fail(100, "vulkan", "texture array slices exceed 256");
     if (tex->cube && (layers != 6 || tex->w != tex->h))
       return Status::Fail(100, "vulkan", "a cubemap texture needs exactly 6 faces and a square extent");
+    // Slice S30: a 3D texture carries tex->depth z-planes per level instead of
+    // array slices; it cannot combine with arrays or cubemaps.
+    tex_depth = tex->depth ? tex->depth : 1;
+    if (tex_depth > 256) return Status::Fail(100, "vulkan", "texture 3D depth exceeds 256");
+    if (tex_depth > 1 && (layers > 1 || tex->cube))
+      return Status::Fail(100, "vulkan", "a 3D texture cannot be an array or a cubemap");
     for (uint32_t l = 0; l < levels; ++l) {
       lw[l] = (tex->w >> l) ? (tex->w >> l) : 1;
       lh[l] = (tex->h >> l) ? (tex->h >> l) : 1;
-      tex_bytes += (size_t)lw[l] * lh[l] * 4 * layers;
+      ld[l] = (tex_depth >> l) ? (tex_depth >> l) : 1;
+      tex_bytes += (size_t)lw[l] * lh[l] * ld[l] * 4 * layers;
     }
     // Slice S23: sRGB guest textures stage as SRGB images so the host sampler
     // does the sRGB -> linear conversion in hardware.
@@ -606,8 +614,8 @@ Status VulkanBackend::render_core(
     if (Status s = host_buffer(tex->rgba, tex_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, "texture staging", &tstage); !s.ok) return s;
     VkImageCreateInfo tci{};
     tci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    tci.imageType = VK_IMAGE_TYPE_2D; tci.format = tex_vk_format;
-    tci.extent = {tex->w, tex->h, 1}; tci.mipLevels = levels; tci.arrayLayers = layers;
+    tci.imageType = tex_depth > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D; tci.format = tex_vk_format;
+    tci.extent = {tex->w, tex->h, tex_depth}; tci.mipLevels = levels; tci.arrayLayers = layers;
     if (tex->cube) tci.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     tci.samples = VK_SAMPLE_COUNT_1_BIT; tci.tiling = VK_IMAGE_TILING_OPTIMAL;
     tci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -632,7 +640,7 @@ Status VulkanBackend::render_core(
     VkImageViewCreateInfo tvci{};
     tvci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     tvci.image = timg;
-    tvci.viewType = tex->cube ? VK_IMAGE_VIEW_TYPE_CUBE : layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    tvci.viewType = tex->cube ? VK_IMAGE_VIEW_TYPE_CUBE : tex_depth > 1 ? VK_IMAGE_VIEW_TYPE_3D : layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     tvci.format = tex_vk_format;
     tvci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, layers};
     VkImageView tview = 0;
@@ -936,8 +944,8 @@ Status VulkanBackend::render_core(
       c = VkBufferImageCopy{};
       c.bufferOffset = (uint64_t)level_off;
       c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, layers};
-      c.imageExtent = {lw[l], lh[l], 1};
-      level_off += (size_t)lw[l] * lh[l] * 4 * layers;
+      c.imageExtent = {lw[l], lh[l], ld[l]};
+      level_off += (size_t)lw[l] * lh[l] * ld[l] * 4 * layers;
     }
     fn<void (*)(VkCommandBuffer, VkBuffer, VkImage, int32_t, uint32_t, const VkBufferImageCopy*)>(
         vkCmdCopyBufferToImage)(ucmd, tstage, timg, (int32_t)VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, nreg, tr);
