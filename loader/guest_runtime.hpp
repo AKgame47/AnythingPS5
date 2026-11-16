@@ -76,8 +76,15 @@ std::int64_t run_guest_main(const TlsTemplate& t, std::int64_t (*fn)(void*, void
 std::int64_t run_guest_main(const TlsTemplate& t, std::int64_t (*fn)(void*, void*), void* a, void* b,
                             const GuestLifecycle& lc);
 // libc atexit binding: registers a guest function pointer for the exit sequence. 0 on success,
-// -1 when the table is full (32 entries, a PNR limit), -2 when no guest module is running.
+// -1 when the table is full (64 entries, a PNR limit), -2 when no guest module is running.
 std::int64_t guest_atexit_register(std::uint64_t fn);
+// Slice S34: __cxa_atexit / __cxa_thread_atexit_impl bindings. Same returns as above. The C++
+// versions pass `arg` to the handler at run time; the thread variant registers on the calling
+// thread's list (run LIFO when that thread exits; the main thread's list runs first in the
+// process exit sequence, matching glibc's __call_tls_dtors-before-atexit order). The dso
+// argument is accepted by the ABI but ignored: PNR does not unload modules individually.
+std::int64_t guest_cxa_atexit_register(std::uint64_t fn, std::uint64_t arg);
+std::int64_t guest_cxa_thread_atexit_register(std::uint64_t fn, std::uint64_t arg);
 // Runs the exit sequence (atexit handlers LIFO, then the module fini list) with the guest FS base,
 // then _exit(code). With no active guest module this is a plain _exit(code).
 [[noreturn]] void guest_exit_with(int code);
