@@ -389,6 +389,18 @@ void PrxRegistry::install_file_calls(PsFileTable* t) {
   });
 }
 
+void PrxRegistry::install_synthetic_test_calls() {
+  // Test-only scaffolding for the ABI regression suite. "libpnrtest" is not a
+  // Sony library and these names are not Sony APIs; they exist so guest code
+  // can prove host-side capture properties without inventing a Sony signature.
+  // pnrTestSevenScalarArgs(a,b,c,d,e,f, g@stack) returns a+b+c+d+e+f+g, which
+  // only comes out right when the 7th (stack) argument is captured verbatim.
+  symbols_.push_back(impl("libpnrtest", "pnrTestSevenScalarArgs",
+      [](const GuestCallArgs& a) -> std::int64_t {
+        return a.i[0] + a.i[1] + a.i[2] + a.i[3] + a.i[4] + a.i[5] + a.s[0];
+      }));
+}
+
 const PrxSymbol* PrxRegistry::find(const std::string& nid) const {
   for (const auto& s : symbols_)
     if (s.nid == nid) return &s;
