@@ -1029,3 +1029,22 @@ failures, before more texture features land on the shim.
 - Bounds of the claim: the write path (open with O_CREAT/write/close plus /app0 translation)
   is now proven from guest machine code for scalar byte counts the guest passes by value.
   lseek/fstat remain table-level and NID-bind covered only.
+
+## Slice S39 notes (guest lseek/fstat through the jailed file calls)
+- The --filepos synthetic module opens "/app0/asset.txt" (seeded "pnr-asset-42"), runs
+  sceKernelLseek with SEEK_SET (position 4), SEEK_CUR (position 9) and SEEK_END with a
+  negative offset (position 10), checking each returned position in guest machine code;
+  reads at the sought offsets and dword-compares "asse" and "-42"; then sceKernelFstat into
+  guest memory and checks the size qword (12) and the is_directory byte (0). Prints
+  "pos ok" and exits 0; 11 distinct nonzero stage codes on deviation.
+- fstat's stat pointer is a guest pointer that names the module's own mapped image, the
+  same pass-through the read/write buffers already used; the fixture writes the stat into
+  its .bss-like region and compares it in guest code.
+- Table-level additions: lseek SET/CUR/END returned positions, bad whence EINVAL, fstat on
+  an unknown fd EINVAL.
+- Layout note for synth modules: the loader derives the symbol count as
+  (strtab-symtab)/24, so the strtab must sit at least 24*(imports+1) bytes past the symtab
+  base; this 6-import module places it at 0x5A8.
+- Bounds of the claim: lseek (all three whences, negative offsets) and fstat (size +
+  is_directory) are proven from guest machine code for regular files inside the jail.
+  Directories, sockets and other fd kinds remain uncovered at module level.
