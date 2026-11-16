@@ -113,6 +113,8 @@ constexpr const char* kDepOrder = "ghIABE21yxFvw";
 // exact bytes proving both handlers received their registered arguments (0x51, 0x42).
 // Failures exit 61 (guard/registration) or 62 (qsort result).
 std::vector<std::uint8_t> build_synthetic_cxx_elf();
+// S48: outer descending comparator starts one ascending inner sort; both arrays checked.
+std::vector<std::uint8_t> build_synthetic_nested_qsort_elf();
 constexpr int kCxxExitReturn = 55;
 constexpr const char* kCxxOrder = "EGQQB";
 
