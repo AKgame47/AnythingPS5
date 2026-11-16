@@ -205,6 +205,13 @@ PrxRegistry::PrxRegistry() {
     if ((6 > 6)) return -1;
     return loader::sony_mmap(a.i[0], a.i[1], a.i[2], a.i[3], a.i[4], a.i[5]);
   }));
+  // Untracked counterpart of the "mmap" binding above: raw POSIX unmap for pages that
+  // sony_mmap handed out. sceKernelMunmap (below) serves the tracked sceKernelMapMemory
+  // registry instead and honestly refuses foreign pages; the two families stay separate.
+  symbols_.push_back(impl("libkernel", "munmap", [](V a) -> std::int64_t {
+    if ((2 > 6)) return -1;
+    return ::munmap(reinterpret_cast<void*>(a.i[0]), static_cast<std::size_t>(a.i[1]));
+  }));
   symbols_.push_back(impl("libkernel", "sceKernelClockGettime", [](V a) -> std::int64_t {
     return (2 > 6) ? SCE_KERNEL_ERROR_EINVAL : loader::sony_clock_gettime(a.i[0], a.i[1]);
   }));
