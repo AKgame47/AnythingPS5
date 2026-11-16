@@ -469,6 +469,9 @@ int cmd_module_run(const std::string& path) {
   pnr::compat::FileSystemService jail(jr != nullptr && jr[0] != '\0' ? jr : "./pnr_data/jail");
   pnr::prx::PsFileTable files(jail);
   reg.install_file_calls(&files);
+  // Test-only synthetic imports (libpnrtest), installed only when PNR_TEST_IMPORTS is
+  // set so production module runs never expose them. Used by the ABI regression fixtures.
+  if (std::getenv("PNR_TEST_IMPORTS") != nullptr) reg.install_synthetic_test_calls();
   pnr::loader::ModuleLoadReport rep;
   pnr::loader::ModuleRunResult rr;
   const auto st = pnr::loader::run_module(path, reg, &rr, &rep);
