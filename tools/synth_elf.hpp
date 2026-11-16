@@ -49,6 +49,14 @@ std::vector<std::uint8_t> build_synthetic_filepos_elf();
 std::vector<std::uint8_t> build_synthetic_abi7_elf();
 std::vector<std::uint8_t> build_synthetic_mmap_elf();
 
+// Slice S42: memory protection transitions through the tracked libkernel calls, from guest
+// machine code: sceKernelMapMemory RW, write/read a qword, sceKernelQueryMemoryProtection
+// (start/end/prot), sceKernelMTypeprotect to READ, query again (prot == READ), data intact,
+// restore RW, rewrite, sceKernelMunmap. Prints "mprotect ok", exits 0; stage codes 1-14.
+// Proves the host mprotect round-trip plus mapping-table bookkeeping via the query call;
+// fault semantics (write to an RO page) are NOT covered: no guest SIGSEGV handler yet.
+std::vector<std::uint8_t> build_synthetic_mprotect_elf();
+
 // Slice S32: a module with DT_INIT, DT_INIT_ARRAY (2), DT_FINI_ARRAY (2), DT_FINI and two
 // atexit handlers registered from its entry point. Every lifecycle function prints one letter
 // through the bound putchar; the exact stdout order "IABE21yxF" proves the call order:
