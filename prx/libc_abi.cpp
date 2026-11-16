@@ -11,6 +11,7 @@
 #include <mutex>
 #include <set>
 
+#include "loader/guest_runtime.hpp"
 #include "loader/nid.hpp"
 
 namespace pnr::prx {
@@ -146,9 +147,14 @@ void add_libc_abi_symbols(std::vector<PrxSymbol>& out) {
   add(L, "isspace", [need](Args a) -> std::int64_t { return need(a, 1) && std::isspace(static_cast<int>(a[0]) & 0xff) ? 1 : 0; });
   add(L, "srand", [need](Args a) -> std::int64_t { if (need(a, 1)) g_rand = static_cast<std::uint32_t>(a[0]); return 0; });
   add(L, "rand", [](Args) -> std::int64_t { g_rand = g_rand * 1103515245u + 12345u; return (g_rand >> 16) & 0x7fff; });
+  // Slice S32: atexit registers a GUEST function pointer; the exit sequence (these handlers
+  // LIFO, then the module's DT_FINI_ARRAY reversed and DT_FINI) runs with the guest FS base,
+  // both when the guest calls exit() and when its entry point returns.
+  add(L, "atexit", [need](Args a) -> std::int64_t {
+    return need(a, 1) && a[0] ? pnr::loader::guest_atexit_register(static_cast<std::uint64_t>(a[0])) : kSceEinval;
+  });
   add(L, "exit", [need](Args a) -> std::int64_t {
-    std::fflush(stdout); std::fflush(stderr);
-    ::_exit(need(a, 1) ? static_cast<int>(a[0]) & 0xff : 0);
+    pnr::loader::guest_exit_with(need(a, 1) ? static_cast<int>(a[0]) & 0xff : 0);
     return 0;
   });
 
