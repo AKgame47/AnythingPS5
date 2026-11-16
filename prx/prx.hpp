@@ -8,6 +8,7 @@
 // actually work; everything else resolves to a clear "not implemented".
 #pragma once
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -31,6 +32,22 @@ struct GuestCallArgs {
   double x[8] = {};
 };
 
+// Lane decoding. x[] holds the raw 64-bit xmm lane contents bit-exactly. A DOUBLE argument is
+// the whole lane; a FLOAT argument is the lane's low 32 bits (the upper 32 are unspecified by
+// the ABI and must not be read). FP RETURN values travel in xmm0: a binding returns the value's
+// bits as its int64 result and the FP-return thunk moves them back into xmm0 for the guest.
+inline double arg_double(const GuestCallArgs& a, int k) { return a.x[k]; }
+inline float arg_float(const GuestCallArgs& a, int k) {
+  std::uint64_t bits;
+  std::memcpy(&bits, &a.x[k], 8);
+  const std::uint32_t lo = static_cast<std::uint32_t>(bits);
+  float f;
+  std::memcpy(&f, &lo, 4);
+  return f;
+}
+inline std::int64_t fp_ret_bits(double d) { std::int64_t r; std::memcpy(&r, &d, 8); return r; }
+inline std::int64_t fp_ret_bits(float f) { std::uint32_t b; std::memcpy(&b, &f, 4); return b; }
+
 // One exported symbol of a PS-style system library.
 struct PrxSymbol {
   std::string library;   // e.g. "libkernel"
@@ -38,6 +55,7 @@ struct PrxSymbol {
   std::string nid;       // computed via loader::nid::compute_nid
   bool implemented;      // false => declared in taxonomy, no host impl yet
   std::function<std::int64_t(const GuestCallArgs&)> invoke;
+  bool returns_fp = false;  // true => guest expects the result in xmm0 (float/double return)
 };
 
 // The registry a loader consults to bind imports by NID.
