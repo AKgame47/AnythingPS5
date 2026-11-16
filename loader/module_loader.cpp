@@ -29,7 +29,7 @@ extern "C" __attribute__((noreturn, optimize("no-stack-protector"))) void pnr_gu
 namespace {
 
 using Bytes = std::vector<std::uint8_t>;
-using Fn = std::function<std::int64_t(const std::vector<std::int64_t>&)>;
+using Fn = std::function<std::int64_t(const pnr::prx::GuestCallArgs&)>;
 
 constexpr int kMaxSlots = 64;
 struct SlotTable {
@@ -39,15 +39,21 @@ struct SlotTable {
 };
 SlotTable& slots() { static SlotTable t; return t; }
 
+// Slice S35: the thunk signature declares the 8 xmm argument registers as double parameters, so
+// the System V ABI delivers floating point guest arguments (xmm0-7) alongside the 6 gp registers
+// and the compiler preserves both pools into GuestCallArgs. Guests passing fewer FP arguments
+// leave the remaining slots with arbitrary values; consumers read only what their contract needs.
 template <int I>
-__attribute__((optimize("no-stack-protector"))) std::int64_t thunk(std::int64_t a, std::int64_t b, std::int64_t c, std::int64_t d, std::int64_t e, std::int64_t f) {
+__attribute__((optimize("no-stack-protector"))) std::int64_t thunk(std::int64_t a, std::int64_t b, std::int64_t c, std::int64_t d, std::int64_t e, std::int64_t f,
+                                                                   double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7) {
   // Guest code runs with its own FS base (TLS/TCB). Host code needs the host FS, so switch for the call.
   const std::uint64_t g = pnr::loader::guest_to_host();
-  const std::int64_t r = slots().fn[I](std::vector<std::int64_t>{a, b, c, d, e, f});
+  const std::int64_t r = slots().fn[I](pnr::prx::GuestCallArgs{{a, b, c, d, e, f}, {x0, x1, x2, x3, x4, x5, x6, x7}});
   pnr::loader::host_to_guest(g);
   return r;
 }
-using ThunkPtr = std::int64_t (*)(std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t);
+using ThunkPtr = std::int64_t (*)(std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t,
+                                  double, double, double, double, double, double, double, double);
 template <int... I>
 std::array<ThunkPtr, kMaxSlots> make_thunks(std::integer_sequence<int, I...>) { return {{&thunk<I>...}}; }
 const std::array<ThunkPtr, kMaxSlots>& thunks() {
