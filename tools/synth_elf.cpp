@@ -882,6 +882,83 @@ std::vector<std::uint8_t> build_synthetic_abi7_elf() {
   return b;
 }
 
+// Slice S41: a module that mmaps through the existing 6-argument "mmap" binding
+// (loader::sony_mmap, Sony constants translated host-side). Guest code calls
+// mmap(0, 4096, PROT_CPU_READ|CPU_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0), checks the pointer
+// is nonzero and page-aligned, writes a qword pattern into the page and reads it back in
+// guest machine code, then munmap(ptr, 4096). Prints "mmap ok" and exits 0 on
+// success; any deviation jumps to the shared epilogue with a nonzero code.
+std::vector<std::uint8_t> build_synthetic_mmap_elf() {
+  std::vector<std::uint8_t> b(0x780, 0);
+  const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
+  std::memcpy(b.data(), ident, 8);
+  p16(b, 0x10, 3); p16(b, 0x12, 62); p32(b, 0x14, 1);
+  p64(b, 0x18, 0x100); p64(b, 0x20, 0x40);
+  p16(b, 0x34, 64); p16(b, 0x36, 56); p16(b, 0x38, 2); p16(b, 0x3A, 64);
+  const std::size_t total = b.size();
+  p32(b, 0x40, 1); p32(b, 0x44, 7); p64(b, 0x48, 0); p64(b, 0x50, 0); p64(b, 0x58, 0); p64(b, 0x60, total); p64(b, 0x68, total); p64(b, 0x70, 0x1000);
+  p32(b, 0x78, 2); p32(b, 0x7C, 6); p64(b, 0x80, 0x700); p64(b, 0x88, 0x700); p64(b, 0x90, 0x700); p64(b, 0x98, 0x80); p64(b, 0xA0, 0x80); p64(b, 0xA8, 8);
+  auto str = [&](std::size_t at, const char* s) { std::memcpy(&b[at], s, std::strlen(s) + 1); };
+  const std::size_t OK = 0x400;
+  str(OK, "mmap ok");
+  // 3 imports: symtab 4 entries -> strtab at 0x560 ((0x560-0x500)/24 == 4 symbols).
+  // NID strings are 16 bytes each; strtab ends 0x591, rela sits clear at 0x5A0.
+  enum { G_MMAP, G_MUNMAP, G_PRINTF, G_N };
+  std::size_t pc = 0x100;
+  std::vector<std::size_t> fails;
+  auto emit = [&](std::initializer_list<int> bytes) { for (int v : bytes) b[pc++] = static_cast<std::uint8_t>(v); };
+  auto imm32 = [&](std::uint32_t v) { p32(b, pc, v); pc += 4; };
+  auto call = [&](int g) { emit({0xFF, 0x15}); p32(b, pc, static_cast<std::uint32_t>(0x480 + 8 * g - (pc + 4))); pc += 4; };
+  auto rip = [&](std::initializer_list<int> op, std::size_t target) { emit(op); p32(b, pc, static_cast<std::uint32_t>(target - (pc + 4))); pc += 4; };
+  auto check = [&](int ok_jcc, int n) { emit({ok_jcc, 10, 0xB8}); imm32(n); emit({0xE9}); fails.push_back(pc); pc += 4; };
+
+  emit({0x53, 0x48, 0x83, 0xEC, 0x60});  // push rbx; sub rsp,0x60
+  // mmap(0, 4096, SONY_PROT_CPU_READ|SONY_PROT_CPU_WRITE, SONY_MAP_PRIVATE|SONY_MAP_ANON, -1, 0)
+  emit({0x31, 0xFF});                                // xor edi, edi (addr = 0)
+  emit({0xBE}); imm32(4096);                         // mov esi, 4096 (len)
+  emit({0xBA}); imm32(3);                            // mov edx, 3 (prot)
+  emit({0xB9}); imm32(0x1002);                       // mov ecx, 0x1002 (flags)
+  emit({0x49, 0xC7, 0xC0}); imm32(0xFFFFFFFFu);      // mov r8, -1 (fd, sign-extended)
+  emit({0x45, 0x31, 0xC9});                          // xor r9d, r9d (offset = 0)
+  call(G_MMAP);
+  emit({0x48, 0x85, 0xC0}); check(0x75, 1);          // test rax,rax; jnz ok
+  emit({0x48, 0xA9}); imm32(0xFFF); check(0x74, 2);  // test rax,0xFFF; jz ok (page-aligned)
+  emit({0x48, 0x89, 0xC3});                          // mov rbx, rax (page)
+  // write a qword pattern into the page, read it back
+  emit({0x49, 0xBA}); p64(b, pc, 0xA5A5DEADBEEF5A5AULL); pc += 8;  // mov r10, pattern
+  emit({0x4C, 0x89, 0x13});                          // mov [rbx], r10
+  emit({0x4C, 0x39, 0x13}); check(0x74, 3);          // cmp [rbx], r10; je ok
+  // munmap(page, 4096) == 0 (untracked POSIX unmap, pairs with the "mmap" binding)
+  emit({0x48, 0x89, 0xDF});                          // mov rdi, rbx
+  emit({0xBE}); imm32(4096);                         // mov esi, 4096
+  call(G_MUNMAP);
+  emit({0x48, 0x85, 0xC0}); check(0x74, 4);          // test rax,rax; jz ok
+  // printf("mmap ok\n")
+  rip({0x48, 0x8D, 0x3D}, OK); emit({0x31, 0xC0}); call(G_PRINTF);
+  emit({0x31, 0xC0});
+  const std::size_t epi = pc;
+  emit({0x48, 0x83, 0xC4, 0x60, 0x5B, 0xC3});
+  for (std::size_t f : fails) p32(b, f, static_cast<std::uint32_t>(epi - (f + 4)));
+
+  const char* names[G_N] = {"mmap", "munmap", "printf"};
+  std::size_t so = 0x560 + 1;
+  for (int i = 0; i < G_N; ++i) {
+    const std::string nm = pnr::loader::nid::compute_nid(names[i], "") + "#A#A";
+    const std::size_t sy = 0x500 + 24 * (i + 1);
+    p32(b, sy, static_cast<std::uint32_t>(so - 0x560)); b[sy + 4] = 0x12; p16(b, sy + 6, 0);
+    std::memcpy(&b[so], nm.c_str(), nm.size() + 1); so += nm.size() + 1;
+  }
+  const std::size_t strsz = so - 0x560;
+  for (int i = 0; i < G_N; ++i) {
+    const std::size_t r = 0x5A0 + 24 * i;
+    p64(b, r, 0x480 + 8 * i); p64(b, r + 8, (static_cast<std::uint64_t>(i + 1) << 32) | 6); p64(b, r + 16, 0);
+  }
+  std::size_t dy = 0x700;
+  auto dyn = [&](std::int64_t tag, std::uint64_t v) { p64(b, dy, static_cast<std::uint64_t>(tag)); p64(b, dy + 8, v); dy += 16; };
+  dyn(6, 0x500); dyn(5, 0x560); dyn(10, strsz); dyn(11, 24); dyn(7, 0x5A0); dyn(8, 24 * G_N); dyn(9, 24); dyn(0, 0);
+  return b;
+}
+
 std::vector<std::uint8_t> build_synthetic_lifecycle_elf(const LifecycleSpec& spec) {
   std::vector<std::uint8_t> b(0x4c0, 0);
   const std::uint8_t ident[] = {0x7f, 'E', 'L', 'F', 2, 1, 1, 0};
