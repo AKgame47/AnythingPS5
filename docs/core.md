@@ -1013,3 +1013,19 @@ failures, before more texture features land on the shim.
 - Bounds of the claim: the read path (open/read/close plus /app0 translation) is proven from
   guest machine code. The write path (write/lseek/fstat) remains covered by the existing
   table-level and NID-bind tests only, not by a new module-level fixture.
+
+## Slice S38 notes (guest asset writes through the jailed file calls)
+- The --filew synthetic module opens "/app0/out.bin" with O_WRONLY|O_CREAT through
+  sceKernelOpen, writes "pnr-write-42" (12 bytes) through sceKernelWrite, closes, reopens
+  read-only, reads the bytes back and dword-compares them in guest machine code, then prints
+  "write ok" through the bound printf and exits 0. Any deviation exits with a distinct
+  nonzero stage code.
+- The pnr_filew_run ctest runs that module with a fresh PNR_JAIL_ROOT and additionally
+  asserts the host-visible file inside the jail contains exactly "pnr-write-42" afterwards,
+  so the write is proven on both sides of the boundary.
+- Table-level additions: write/close/reopen/read-back round trip, write on a read-only fd
+  fails, write on an unknown fd is EINVAL, and O_CREAT through the /app0 prefix lands at the
+  jail root.
+- Bounds of the claim: the write path (open with O_CREAT/write/close plus /app0 translation)
+  is now proven from guest machine code for scalar byte counts the guest passes by value.
+  lseek/fstat remain table-level and NID-bind covered only.
