@@ -715,6 +715,14 @@ int main() {
                                           pnr::prx::SCE_KERNEL_PROT_READ) ==
               pnr::prx::SCE_OK,
           "mm: protect RO");
+    CHECK(pnr::prx::sceKernelMTypeprotect(p, 4096, 99) ==
+              pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+          "mm: protect bad prot EINVAL");
+    CHECK(pnr::prx::sceKernelMTypeprotect(p, 4096,
+                                          pnr::prx::SCE_KERNEL_PROT_READ |
+                                              pnr::prx::SCE_KERNEL_PROT_WRITE) ==
+              pnr::prx::SCE_OK,
+          "mm: protect back RW");
     CHECK(pnr::prx::sceKernelMunmap(p, 4096) == pnr::prx::SCE_OK,
           "mm: unmap");
     // honest failures
@@ -727,6 +735,10 @@ int main() {
     CHECK(pnr::prx::sceKernelMunmap(&dummy, 16) ==
               pnr::prx::SCE_KERNEL_ERROR_EINVAL,
           "mm: unmap foreign EINVAL");
+    CHECK(pnr::prx::sceKernelMTypeprotect(&dummy, 16,
+                                          pnr::prx::SCE_KERNEL_PROT_READ) ==
+              pnr::prx::SCE_KERNEL_ERROR_EINVAL,
+          "mm: protect foreign EINVAL");
     CHECK(pnr::prx::sceKernelQueryMemoryProtection(&dummy, nullptr, nullptr,
                                                    nullptr) ==
               pnr::prx::SCE_KERNEL_ERROR_EINVAL,
@@ -742,6 +754,14 @@ int main() {
     const std::int64_t mapped = fn({{4096, pnr::prx::SCE_KERNEL_PROT_READ |
                                             pnr::prx::SCE_KERNEL_PROT_WRITE}});
     CHECK(mapped != 0, "mm: bound map works");
+    CHECK(reg.bind(pnr::loader::nid::compute_nid("sceKernelMTypeprotect",
+                                                 "libkernel"),
+                   &fn, &err) == pnr::prx::SCE_OK,
+          "mm: mtypeprotect binds");
+    CHECK(reg.bind(pnr::loader::nid::compute_nid("sceKernelQueryMemoryProtection",
+                                                 "libkernel"),
+                   &fn, &err) == pnr::prx::SCE_OK,
+          "mm: queryMemoryProtection binds");
     CHECK(reg.bind(pnr::loader::nid::compute_nid("sceKernelMunmap", "libkernel"),
                    &fn, &err) == pnr::prx::SCE_OK,
           "mm: munmap binds");
