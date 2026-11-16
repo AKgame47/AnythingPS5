@@ -52,7 +52,9 @@ std::vector<std::uint8_t> build_synthetic_mmap_elf();
 // Slice S42: memory protection transitions through the tracked libkernel calls, from guest
 // machine code: sceKernelMapMemory RW, write/read a qword, sceKernelQueryMemoryProtection
 // (start/end/prot), sceKernelMTypeprotect to READ, query again (prot == READ), data intact,
-// restore RW, rewrite, sceKernelMunmap. Prints "mprotect ok", exits 0; stage codes 1-14.
+// restore RW, rewrite, sceKernelMunmap. Prints "mprotect ok", exits 0; stage codes 1-19.
+// S45 also checks all-omitted/protection-only query outputs and post-unmap EINVAL
+// with an unchanged output sentinel, through guest calls.
 // Proves the host mprotect round-trip plus mapping-table bookkeeping via the query call;
 // fault semantics (write to an RO page) are NOT covered: no guest SIGSEGV handler yet.
 std::vector<std::uint8_t> build_synthetic_mprotect_elf();
