@@ -344,8 +344,9 @@ std::vector<std::uint8_t> build_synthetic_libc_elf() {
   p32(b, 0x40, 1); p32(b, 0x44, 7); p64(b, 0x48, 0); p64(b, 0x50, 0); p64(b, 0x58, 0); p64(b, 0x60, total); p64(b, 0x68, total); p64(b, 0x70, 0x1000);
   p32(b, 0x78, 2); p32(b, 0x7C, 6); p64(b, 0x80, 0x6c0); p64(b, 0x88, 0x6c0); p64(b, 0x90, 0x6c0); p64(b, 0x98, 0x80); p64(b, 0xA0, 0x80); p64(b, 0xA8, 8);
   auto str = [&](std::size_t at, const char* s) { std::memcpy(&b[at], s, std::strlen(s) + 1); };
-  const std::size_t FMT = 0x400, AB = 0x410, EXP = 0x420, HEX = 0x430, HELLO = 0x440, PF = 0x450, OK = 0x470;
+  const std::size_t FMT = 0x400, AB = 0x410, EXP = 0x420, HEX = 0x430, HELLO = 0x440, PF = 0x450, OK = 0x470, FPF = 0x474;
   str(FMT, "%d:%s:%x"); str(AB, "ab"); str(EXP, "-5:ab:ff"); str(HEX, "0x1f"); str(HELLO, "hello"); str(PF, "C3 libc %s %d\n"); str(OK, "ok");
+  str(FPF, "%.3f %g\n");  // slice S35: fits the free gap before the GOT at 0x480
   enum { G_SNPRINTF, G_STRCMP, G_STRTOL, G_CALLOC, G_MEMMOVE, G_STRLEN, G_PRINTF, G_N };
   std::size_t pc = 0x100;
   std::vector<std::size_t> fails;
@@ -378,6 +379,15 @@ std::vector<std::uint8_t> build_synthetic_libc_elf() {
   emit({0x48, 0x83, 0xF8, 0x05}); check(0x74, 5);
   // printf("C3 libc %s %d\n", "ok", 42)
   rip({0x48, 0x8D, 0x3D}, PF); rip({0x48, 0x8D, 0x35}, OK); emit({0xBA}); imm32(42); call(G_PRINTF);
+  // Slice S35: printf("%.3f %g\n", 3.14159, 2.0) - floating point arguments travel in xmm0/xmm1.
+  rip({0x48, 0x8D, 0x3D}, FPF);
+  emit({0x48, 0xB8, 0x18, 0x2D, 0x44, 0x54, 0xFB, 0x21, 0x09, 0x40});  // mov rax, 3.14159 bits
+  emit({0x66, 0x48, 0x0F, 0x6E, 0xC0});                                 // movq xmm0, rax
+  emit({0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40});  // mov rax, 2.0 bits
+  emit({0x66, 0x48, 0x0F, 0x6E, 0xC8});                                 // movq xmm1, rax
+  emit({0xB0, 0x02});                                                   // mov al, 2 (vector register count)
+  call(G_PRINTF);
+  emit({0x48, 0x83, 0xF8, 0x08}); check(0x74, 6);                       // "3.142 2\n" is 8 chars
   emit({0x31, 0xC0});
   const std::size_t epi = pc;
   emit({0x48, 0x83, 0xC4, 0x60, 0x5B, 0xC3});
