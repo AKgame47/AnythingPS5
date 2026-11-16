@@ -8,6 +8,10 @@
 
 namespace pnr::prx {
 
+detail::PendingFileDescriptor::~PendingFileDescriptor() {
+  if (fd_ >= 0) ::close(fd_);
+}
+
 PsFileTable::PsFileTable(compat::FileSystemService fs) : fs_(std::move(fs)) {}
 
 PsFileTable::~PsFileTable() {
@@ -51,9 +55,14 @@ std::int64_t PsFileTable::open(const std::string& path, std::int64_t flags) {
   }
   const int hfd = ::open(host.c_str(), hflags, 0644);
   if (hfd < 0) return SCE_KERNEL_ERROR_UNKNOWN;
+  detail::PendingFileDescriptor pending(hfd);
   std::lock_guard<std::mutex> lk(mu_);
-  const std::int64_t fd = next_fd_++;
-  entries_[fd] = Entry{hfd, path};
+  const std::int64_t fd = next_fd_;
+  // Keep ownership scoped through path construction and allocating map insertion.
+  const auto inserted = entries_.emplace(fd, Entry{hfd, path});
+  if (!inserted.second) return SCE_KERNEL_ERROR_UNKNOWN;
+  pending.release();  // table owns hfd only after successful insertion
+  ++next_fd_;
   return fd;
 }
 
