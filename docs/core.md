@@ -1190,3 +1190,22 @@ failures, before more texture features land on the shim.
   finishes with exit 55. The original callback/lifecycle fixture still runs unchanged.
 - This proves one finite nested-sort fixture through the guest import/callback FS transitions,
   not every comparator, recursion depth, concurrent sort, guest exception or longjmp case.
+
+
+## Slice S49 notes (mutex handle ownership)
+- Guest mutex values are now monotonic registry IDs rather than raw host pointers. Lock,
+  unlock, destroy and condition waits resolve the ID before touching a native mutex. Guest
+  pointers to the handle storage must still be valid; this is not general pointer validation.
+- Initialization checks the native result and publishes the output only after insertion.
+  Destruction refuses held or in-flight objects before calling pthread, and preserves the
+  registry entry and output on failure. Native call lookups retain shared ownership; condition
+  waits retain the mutex throughout their unlock/wait/relock interval.
+- Fork-isolated forged/stale-handle probes fail the old implementation and pass with the ID
+  registry. Direct checks cover held-destroy refusal, later unlock/destroy, and no ID reuse.
+  A four-waiter broadcast test also checks destruction refusal through separate handle storage.
+  Existing timed condition tests and the synthetic guest mutex cycle still run.
+- POSIX defines locked/referenced pthread mutex destruction as undefined, so refusal is a PNR
+  rule rather than reliance on a host EBUSY response. Reference:
+  https://man7.org/linux/man-pages/man3/pthread_mutex_destroy.3p.html
+- Scope: these finite regressions, not exhaustive concurrent-destruction stress, allocator/init
+  failure injection, invalid unlock ownership, arbitrary guest pointers or Sony ABI verification.
