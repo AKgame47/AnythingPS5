@@ -1084,3 +1084,23 @@ failures, before more texture features land on the shim.
   guest code, including Sony constant translation for exactly the bits exercised
   (CPU_READ|CPU_WRITE, MAP_PRIVATE|MAP_ANON). FIXED mappings, shared mappings, file-backed
   mappings, GPU bits and mprotect remain covered only at translation-unit level.
+
+## Slice S42 notes (guest mprotect/MTypeprotect)
+- The --mprotect synthetic module exercises the tracked libkernel memory calls from
+  guest machine code: sceKernelMapMemory(4096, READ|WRITE), a qword pattern write/read,
+  sceKernelQueryMemoryProtection (start/end/prot checked against the page and RW),
+  sceKernelMTypeprotect to READ, a second query (prot must read back as READ), a data
+  read-back proving the contents survived the protection change, a restore to READ|WRITE,
+  a second pattern write/read, then sceKernelMunmap(page, 4096) == 0. Prints
+  "mprotect ok" and exits 0; 14 distinct nonzero stage codes on deviation.
+- No new bindings were needed: sceKernelMapMemory / sceKernelMTypeprotect /
+  sceKernelQueryMemoryProtection / sceKernelMunmap already exist over POSIX
+  mmap/mprotect/munmap with a tracked mapping registry. Unit gaps closed: MTypeprotect
+  with an invalid prot and on a foreign address both return EINVAL, and MTypeprotect /
+  QueryMemoryProtection bind by NID.
+- Bounds of the claim: protection transitions on a tracked anonymous page are observable
+  from guest code through the query call, and data survives an RW->RO->RW round-trip.
+  Actual fault semantics (a guest write to a read-only page trapping) are NOT covered:
+  the runtime has no guest signal handling yet. GPU protection bits, partial-range
+  reprotect bookkeeping (only whole-mapping prot updates are tracked) and virtual-range
+  reservation (sceKernelReserveVirtualRange is declared-only) remain out of scope.
