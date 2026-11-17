@@ -1219,3 +1219,19 @@ failures, before more texture features land on the shim.
   addition-first implementation the extreme signal and two subsequent state checks fail.
 - Scope is host runtime semaphore arithmetic and these finite boundary checks, not a new Sony
   API signature, arbitrary guest-pointer validation or exhaustive concurrent signal testing.
+
+
+## Slice S51 notes (condition-variable lifetime)
+- Condition destruction refuses active wait/wake references before entering pthread destroy.
+  The registry entry and handle remain intact on refusal or a native destroy error. After
+  successful destruction, native ownership is disarmed, the entry erased and handle cleared.
+- Native condition and attribute initialization results are checked. Scoped owners clean up
+  successfully initialized objects if a later step fails or map insertion unwinds; output is
+  published only after insertion. Allocator/native-initialization failures are not injected.
+- A fork-isolated regression uses a mutex handshake to establish a blocked waiter, attempts
+  destruction through separate handle storage, then wakes/joins and destroys normally. Old
+  code fails this bounded probe; the new path refuses promptly and preserves later use.
+- Scope is this finite lifetime sequence plus existing timed/broadcast coverage, not exhaustive
+  races, thread cancellation, arbitrary guest storage pointers or Sony ABI verification. All
+  callers must finish before process/runtime teardown. POSIX forbids destruction with blocked
+  waiters: https://man7.org/linux/man-pages/man3/pthread_cond_destroy.3p.html
