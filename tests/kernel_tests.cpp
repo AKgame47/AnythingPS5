@@ -16,6 +16,7 @@
 #include <string>
 
 #include "loader/guest_runtime.hpp"
+#include "compat/services.hpp"
 #include "loader/module_loader.hpp"
 #include "prx/prx.hpp"
 #include "tools/synth_elf.hpp"
@@ -120,6 +121,41 @@ void pnr_kernel_tests(int& pass, int& fail) {
     const bool waited = child > 0 && ::waitpid(child, &status, 0) == child;
     check(waited && WIFEXITED(status) && WEXITSTATUS(status) == 0,
           "cond-life: active waiter prevents destruction, wake/join then destroy succeeds");
+  }
+
+  // S53: isolate ownership-misuse probes so the pre-fix free() abort is a test failure.
+  for (int mode : {0, 1, 2}) {
+    const pid_t child = ::fork();
+    if (child == 0) {
+      ::alarm(4);
+      pnr::compat::MemoryService owner, other;
+      if (mode == 0) {
+        int stack_value = 42;
+        owner.deallocate(&stack_value);
+        if (stack_value != 42) ::_exit(1);
+      } else {
+        auto* p = static_cast<unsigned char*>(owner.allocate(32));
+        if (!p) ::_exit(2);
+        p[0] = 42;
+        if (mode == 1) {
+          owner.deallocate(p);
+          owner.deallocate(p);  // no intervening allocation or address reuse
+        } else {
+          other.deallocate(p);
+          if (p[0] != 42 || owner.bytes_outstanding() != 32) ::_exit(3);
+          owner.deallocate(p);
+        }
+      }
+      if (owner.live_allocations() != 0 || other.live_allocations() != 0) ::_exit(4);
+      owner.deallocate(nullptr);
+      ::_exit(0);
+    }
+    int status = 0;
+    const bool waited = child > 0 && ::waitpid(child, &status, 0) == child;
+    check(waited && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          mode == 0 ? "memory-owner: foreign stack pointer is ignored" :
+          mode == 1 ? "memory-owner: immediate repeated deallocation is ignored" :
+                      "memory-owner: wrong service cannot free another service's allocation");
   }
 
   // Sony constants.
