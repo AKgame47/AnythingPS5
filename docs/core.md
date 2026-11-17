@@ -1235,3 +1235,15 @@ failures, before more texture features land on the shim.
   races, thread cancellation, arbitrary guest storage pointers or Sony ABI verification. All
   callers must finish before process/runtime teardown. POSIX forbids destruction with blocked
   waiters: https://man7.org/linux/man-pages/man3/pthread_cond_destroy.3p.html
+
+
+## Slice S52 notes (semaphore timeout saturation)
+- Finite semaphore timeouts now use a steady-clock deadline saturated at the clock's maximum
+  before converting/adding microseconds. An INT64_MAX timeout no longer overflows the chrono
+  duration conversion and returns as an immediate timeout.
+- Six checks cover an empty semaphore, a huge wait remaining pending, signalling, successful
+  permit consumption, no leftover permit and cleanup. The old implementation fails three
+  checks. The finite test waits 30ms after a start flag, then signals and joins; it does not
+  claim deterministic waiter-entry scheduling or a multi-century clock-duration test.
+- Existing zero/ordinary finite/infinite waits still run. Scope is Linux runtime timeout
+  arithmetic and this finite wakeup fixture, not Sony timeout ABI or exhaustive clock/race tests.
