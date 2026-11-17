@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <new>
+#include <stdexcept>
 
 namespace { int fail_after = -1; }
 void* operator new(std::size_t n) {
@@ -47,5 +48,31 @@ int main() {
                 ok ? "PASS" : "FAIL", index);
     if (!ok) ++failed;
   }
+  std::fflush(stdout);
+  const auto child = ::fork();
+  if (child == 0) {
+    ::alarm(5);
+    pnr::compat::ThreadService service;
+    std::atomic<bool> published{false}, refused{false}, finished{false};
+    service.spawn([&] {
+      while (!published.load()) std::this_thread::yield();
+      try { service.join_all(); }
+      catch (const std::logic_error&) { refused.store(true); }
+      finished.store(true);
+    });
+    service.spawn([] {});
+    published.store(true);
+    while (!finished.load()) std::this_thread::yield();
+    if (!refused.load() || service.live_count() != 2) ::_exit(1);
+    service.join_all();
+    if (service.live_count() != 0) ::_exit(2);
+    ::_exit(0);
+  }
+  int status = 0;
+  const bool waited = child > 0 && ::waitpid(child, &status, 0) == child;
+  const bool ok = waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+  std::printf("%s thread-join: self-join refuses before draining, owner later joins both threads\n",
+              ok ? "PASS" : "FAIL");
+  if (!ok) ++failed;
   return failed ? 1 : 0;
 }
