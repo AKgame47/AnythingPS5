@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <stdexcept>
 #include <system_error>
 #include <vector>
 
@@ -193,8 +194,19 @@ Status FileSystemService::create_dirs(const std::string& virtual_path) const {
 // --- ThreadService ---------------------------------------------------------
 uint64_t ThreadService::spawn(std::function<void()> fn) {
   std::lock_guard<std::mutex> lock(mutex_);
-  const uint64_t id = next_id_++;
-  threads_.emplace(id, std::thread(std::move(fn)));
+  const uint64_t id = next_id_;
+  if (id == 0) throw std::overflow_error("ThreadService ID space exhausted");
+  // Allocate the non-joinable map entry before starting a thread. Otherwise emplace
+  // failure would destroy a joinable temporary std::thread and terminate the process.
+  auto [entry, inserted] = threads_.try_emplace(id);
+  if (!inserted) throw std::logic_error("ThreadService duplicate ID");
+  try {
+    entry->second = std::thread(std::move(fn));
+  } catch (...) {
+    threads_.erase(entry);  // still non-joinable when thread construction throws
+    throw;
+  }
+  ++next_id_;
   return id;
 }
 
