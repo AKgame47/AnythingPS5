@@ -23,6 +23,8 @@ namespace pnr::compat {
 class MemoryService {
 public:
   void* allocate(std::size_t size, std::size_t alignment = 16);
+  // Frees only pointers currently tracked by this service. Null/foreign pointers are ignored.
+  // Raw pointers cannot distinguish stale aliases after an address has been allocated again.
   void deallocate(void* p);
   std::size_t bytes_outstanding() const;
   std::size_t live_allocations() const;
