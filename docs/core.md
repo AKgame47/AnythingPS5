@@ -1285,3 +1285,15 @@ failures, before more texture features land on the shim.
   the new destructor passes all nine isolated runtime checks, including S54 fault injection.
 - Scope is finite normal teardown, not concurrent destruction, stale aliases after address
   reuse, guest pointers or Windows runtime verification. Returned memory expires with its owner.
+
+
+## Slice S56 notes (ThreadService startup handoff)
+- ThreadService allocates its default non-joinable map entry before starting the host thread.
+  Constructor failure removes that entry and rethrows; the next ID advances only on success.
+  Previously a map allocation failure could destroy a joinable temporary and terminate.
+- An isolated Linux CTest injects bad_alloc at each of the first two allocations (map node
+  and thread state). Child probes check exception propagation, no callback, empty tracking,
+  no consumed ID, then a successful spawn/join. Both probes fail the old implementation;
+  fixed probes pass in Release and local ASan+UBSan. The new CTest is required by CI.
+- Scope is those finite allocation failures and successful recovery, not native pthread-create
+  failure injection, throwing callbacks, concurrent teardown, join failure or Windows runtime.
