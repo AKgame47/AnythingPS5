@@ -1259,3 +1259,17 @@ failures, before more texture features land on the shim.
 - This is PNR's host compatibility service, not a Sony API. It does not solve stale raw aliases
   after allocator address reuse, service destruction with live allocations, allocation-map
   insertion failure, arbitrary memory corruption or exhaustive concurrent ownership stress.
+
+
+## Slice S54 notes (MemoryService allocation handoff)
+- A scoped aligned-allocation owner now holds the host block through mutex acquisition and
+  tracking-map insertion. Ownership transfers only after successful insertion. Exceptions
+  propagate without a catch that hides them, while the pending block is freed on unwind.
+- A separate Linux CTest overrides global new for one map-node allocation and wraps host
+  posix_memalign/free to count cleanup of that exact block. Five checks cover bad_alloc
+  propagation, one cleanup, empty tracking, later allocation and later normal deallocation.
+  The old implementation fails the exact-cleanup check; the fixed implementation passes.
+- The fault-injection executable is isolated from the other unit suites and remains required
+  in Release and sanitizer CTest runs. No existing CI exclusion or gate is widened.
+- Scope is this actual map-allocation failure and normal follow-up, not mutex-failure injection,
+  live-allocation teardown, allocator address-reuse aliases or Windows runtime validation.
