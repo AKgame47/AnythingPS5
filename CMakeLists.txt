@@ -186,6 +186,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(pnr_thread_handoff_tests tests/thread_handoff_tests.cpp)
   target_link_libraries(pnr_thread_handoff_tests PRIVATE pnr_compat)
   add_test(NAME pnr_thread_handoff COMMAND pnr_thread_handoff_tests)
+  add_executable(pnr_file_handoff_tests tests/file_handoff_tests.cpp)
+  target_link_libraries(pnr_file_handoff_tests PRIVATE pnr_prx)
+  target_link_options(pnr_file_handoff_tests PRIVATE -Wl,--wrap=open -Wl,--wrap=close)
+  add_test(NAME pnr_file_handoff COMMAND pnr_file_handoff_tests)
 endif()
 
 # Slice S29: validation-layer sweep. Runs each shipped texture/draw path once
