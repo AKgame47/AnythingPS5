@@ -27,6 +27,11 @@ void free_aligned(void* p) noexcept {
 }  // namespace
 
 // --- MemoryService ---------------------------------------------------------
+MemoryService::~MemoryService() {
+  // Destruction requires callers to have stopped; no operation may race this teardown.
+  for (const auto& allocation : live_) free_aligned(allocation.first);
+}
+
 void* MemoryService::allocate(std::size_t size, std::size_t alignment) {
   if (size == 0) return nullptr;
   if (alignment < sizeof(void*)) alignment = sizeof(void*);
