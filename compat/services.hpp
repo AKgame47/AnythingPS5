@@ -79,6 +79,7 @@ class ThreadService {
 public:
   // Failure propagates without consuming an ID or leaving a tracked thread.
   uint64_t spawn(std::function<void()> fn);
+  // Calling from a tracked worker throws logic_error before removing any entries.
   void join_all();
   size_t live_count() const;
 
