@@ -500,7 +500,16 @@ std::int64_t guest_sema_wait(std::int64_t sema, std::int64_t need, std::int64_t 
   ++s->waiters;
   bool ok = true;
   if (timeout_us < 0) s->cv.wait(l, ready);
-  else ok = s->cv.wait_for(l, std::chrono::microseconds(timeout_us), ready);
+  else {
+    // Convert only a representable interval. wait_for's implicit microseconds-to-clock
+    // conversion and now+duration can overflow for a guest-supplied INT64_MAX timeout.
+    using Clock = std::chrono::steady_clock;
+    const auto now = Clock::now();
+    const auto room = std::chrono::duration_cast<std::chrono::microseconds>(Clock::time_point::max() - now);
+    const auto deadline = timeout_us >= room.count() ? Clock::time_point::max()
+        : now + std::chrono::microseconds(timeout_us);
+    ok = s->cv.wait_until(l, deadline, ready);
+  }
   --s->waiters;
   if (s->dead) return -2;
   if (!ok) return -4;
