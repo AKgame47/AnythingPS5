@@ -1273,3 +1273,15 @@ failures, before more texture features land on the shim.
   in Release and sanitizer CTest runs. No existing CI exclusion or gate is widened.
 - Scope is this actual map-allocation failure and normal follow-up, not mutex-failure injection,
   live-allocation teardown, allocator address-reuse aliases or Windows runtime validation.
+
+
+## Slice S55 notes (MemoryService teardown)
+- MemoryService destruction frees allocations still present in its ownership map. Callers
+  must stop before destruction; explicitly deallocated entries have already been erased.
+- Copy/move operations are explicitly deleted and four compile-time assertions preserve
+  unique ownership. The existing mutex already implicitly prohibited copying and moving.
+- The isolated wrapper test adds four teardown checks for a live block at scope exit and an
+  explicitly deallocated block. The old destructor fails the exact live-block cleanup check;
+  the new destructor passes all nine isolated runtime checks, including S54 fault injection.
+- Scope is finite normal teardown, not concurrent destruction, stale aliases after address
+  reuse, guest pointers or Windows runtime verification. Returned memory expires with its owner.
