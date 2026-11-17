@@ -37,7 +37,9 @@ void MemoryService::deallocate(void* p) {
   if (!p) return;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    live_.erase(p);
+    // Claim tracked ownership exactly once before releasing the host allocation.
+    // Foreign pointers and repeats with no intervening address reuse are no-ops.
+    if (live_.erase(p) == 0) return;
   }
 #if defined(__unix__) || defined(__APPLE__)
   ::free(p);
