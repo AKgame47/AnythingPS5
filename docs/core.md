@@ -1247,3 +1247,15 @@ failures, before more texture features land on the shim.
   claim deterministic waiter-entry scheduling or a multi-century clock-duration test.
 - Existing zero/ordinary finite/infinite waits still run. Scope is Linux runtime timeout
   arithmetic and this finite wakeup fixture, not Sony timeout ABI or exhaustive clock/race tests.
+
+
+## Slice S53 notes (MemoryService deallocation ownership)
+- MemoryService now calls host free only after erasing an allocation it actually tracks.
+  Ownership is claimed once under the existing mutex before free; null/foreign pointers and
+  immediate repeated deallocation without intervening address reuse are ignored.
+- Three fork-isolated regressions cover a foreign stack pointer, immediate repeated free, and
+  the wrong service attempting to free an allocation still owned by another. All three fail
+  on old code and pass after the tracked-erase check; existing normal allocation counts run.
+- This is PNR's host compatibility service, not a Sony API. It does not solve stale raw aliases
+  after allocator address reuse, service destruction with live allocations, allocation-map
+  insertion failure, arbitrary memory corruption or exhaustive concurrent ownership stress.
