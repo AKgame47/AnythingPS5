@@ -87,6 +87,41 @@ void pnr_kernel_tests(int& pass, int& fail) {
           "mutex: later mutex remains usable after stale-ID refusal");
   }
 
+  // S51: old native destruction can hang with a blocked waiter. Keep that probe bounded
+  // in a child, and use the guest mutex handshake rather than a guessed sleep interval.
+  {
+    const pid_t child = ::fork();
+    if (child == 0) {
+      ::alarm(4);
+      std::int64_t mh = 0, ch = 0;
+      if (guest_mutex_op(0, &mh) || guest_cond_init(&ch)) ::_exit(1);
+      const auto original = ch;
+      std::atomic<bool> ready{false};
+      bool done = false;
+      std::thread waiter([&] {
+        if (guest_mutex_op(1, &mh)) ::_exit(2);
+        ready.store(true);
+        while (!done) if (guest_cond_wait(ch, &mh, -1)) ::_exit(3);
+        if (guest_mutex_op(2, &mh)) ::_exit(4);
+      });
+      while (!ready.load()) std::this_thread::yield();
+      if (guest_mutex_op(1, &mh)) ::_exit(5);
+      auto probe = ch;  // independent output storage, waiter reads ch
+      if (guest_cond_destroy(&probe) != -3 || probe != original) ::_exit(6);
+      done = true;
+      if (guest_cond_wake(ch, true) || guest_mutex_op(2, &mh)) ::_exit(7);
+      waiter.join();
+      if (guest_cond_destroy(&ch) || ch != 0 || guest_cond_wake(original, true) != -2)
+        ::_exit(8);
+      if (guest_mutex_op(3, &mh)) ::_exit(9);
+      ::_exit(0);
+    }
+    int status = 0;
+    const bool waited = child > 0 && ::waitpid(child, &status, 0) == child;
+    check(waited && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "cond-life: active waiter prevents destruction, wake/join then destroy succeeds");
+  }
+
   // Sony constants.
   int hp = 0, hf = 0; std::string why;
   check(translate_sony_prot(3, &hp, &why) && hp == (PROT_READ | PROT_WRITE), "prot: CPU read+write maps to PROT_READ|PROT_WRITE");
