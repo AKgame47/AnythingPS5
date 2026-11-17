@@ -175,6 +175,16 @@ target_link_libraries(pnr_tests PRIVATE pnr_synth pnr_ui_model pnr_core pnr_load
 
 add_test(NAME pnr_unit_tests COMMAND pnr_tests)
 
+# S54: GNU-compatible ELF linker wrappers isolate allocation-failure injection from all
+# other suites. This remains a required CTest under both Release and sanitizer jobs.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(pnr_memory_handoff_tests tests/memory_handoff_tests.cpp)
+  target_link_libraries(pnr_memory_handoff_tests PRIVATE pnr_compat)
+  target_link_options(pnr_memory_handoff_tests PRIVATE
+    -Wl,--wrap=posix_memalign -Wl,--wrap=free)
+  add_test(NAME pnr_memory_handoff COMMAND pnr_memory_handoff_tests)
+endif()
+
 # Slice S29: validation-layer sweep. Runs each shipped texture/draw path once
 # under an explicitly requested VK_LAYER_KHRONOS_validation; SKIPs (passes)
 # when no Vulkan device or the layer is not installed, so this stays green on
