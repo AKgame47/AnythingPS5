@@ -3,9 +3,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <new>
+#include <type_traits>
+
+static_assert(!std::is_copy_constructible_v<pnr::compat::MemoryService>);
+static_assert(!std::is_copy_assignable_v<pnr::compat::MemoryService>);
+static_assert(!std::is_move_constructible_v<pnr::compat::MemoryService>);
+static_assert(!std::is_move_assignable_v<pnr::compat::MemoryService>);
 
 namespace {
 bool fail_next_new = false;
+bool capture_next_aligned = false;
 void* pending = nullptr;
 unsigned frees = 0;
 }
@@ -22,7 +29,10 @@ extern "C" int __real_posix_memalign(void**, std::size_t, std::size_t);
 extern "C" void __real_free(void*);
 extern "C" int __wrap_posix_memalign(void** out, std::size_t alignment, std::size_t size) {
   const int result = __real_posix_memalign(out, alignment, size);
-  if (result == 0 && fail_next_new) pending = *out;
+  if (result == 0 && (fail_next_new || capture_next_aligned)) {
+    pending = *out;
+    capture_next_aligned = false;
+  }
   return result;
 }
 extern "C" void __wrap_free(void* p) {
@@ -54,5 +64,27 @@ int main() {
   memory.deallocate(p);
   check(memory.live_allocations() == 0 && memory.bytes_outstanding() == 0,
         "handoff: subsequent successful allocation deallocates normally");
+  const unsigned before_scope = frees;
+  {
+    pnr::compat::MemoryService scoped;
+    capture_next_aligned = true;
+    void* live = scoped.allocate(64, 32);
+    check(live && scoped.bytes_outstanding() == 64,
+          "teardown: outstanding allocation tracked before scope exit");
+  }
+  check(frees == before_scope + 1 && pending == nullptr,
+        "teardown: scope exit frees the still-owned allocation exactly once");
+  if (pending) { __real_free(pending); pending = nullptr; }
+  const unsigned before_explicit = frees;
+  {
+    pnr::compat::MemoryService scoped;
+    capture_next_aligned = true;
+    void* live = scoped.allocate(64, 32);
+    scoped.deallocate(live);
+    check(frees == before_explicit + 1 && scoped.live_allocations() == 0,
+          "teardown: explicit deallocation releases before destruction");
+  }
+  check(frees == before_explicit + 1,
+        "teardown: destructor does not free an explicitly released block again");
   return failed ? 1 : 0;
 }
