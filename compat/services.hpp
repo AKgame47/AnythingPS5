@@ -77,6 +77,7 @@ private:
 // Thread Services: spawn + join with ids.
 class ThreadService {
 public:
+  // Failure propagates without consuming an ID or leaving a tracked thread.
   uint64_t spawn(std::function<void()> fn);
   void join_all();
   size_t live_count() const;
