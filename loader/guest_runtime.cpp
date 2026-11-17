@@ -420,7 +420,16 @@ std::int64_t guest_mutex_op(int op, std::int64_t* handle) {
 
 // ---- Kernel sync objects (slice S1)
 namespace {
-struct Cond { pthread_cond_t c; };
+struct Cond {
+  pthread_cond_t c{};
+  bool initialized = false;
+  ~Cond() { if (initialized) ::pthread_cond_destroy(&c); }
+};
+struct CondAttributes {
+  pthread_condattr_t value{};
+  bool initialized = false;
+  ~CondAttributes() { if (initialized) ::pthread_condattr_destroy(&value); }
+};
 struct Sema { std::mutex m; std::condition_variable cv; std::int64_t count; std::int64_t max; bool dead = false; int waiters = 0; };
 std::mutex g_sync_mu;
 std::int64_t g_sync_next = 0x5000;
@@ -433,10 +442,19 @@ std::shared_ptr<Sema> find_sema(std::int64_t h) { std::lock_guard<std::mutex> g(
 std::int64_t guest_cond_init(std::int64_t* handle) {
   if (!handle) return -2;
   auto c = std::make_shared<Cond>();
-  pthread_condattr_t at; ::pthread_condattr_init(&at); ::pthread_condattr_setclock(&at, CLOCK_MONOTONIC);
-  ::pthread_cond_init(&c->c, &at); ::pthread_condattr_destroy(&at);
+  CondAttributes attributes;
+  if (::pthread_condattr_init(&attributes.value) != 0) return -3;
+  attributes.initialized = true;
+  if (::pthread_condattr_setclock(&attributes.value, CLOCK_MONOTONIC) != 0) return -3;
+  if (::pthread_cond_init(&c->c, &attributes.value) != 0) return -3;
+  c->initialized = true;
   std::lock_guard<std::mutex> g(g_sync_mu);
-  *handle = g_sync_next++; g_conds[*handle] = c; return 0;
+  if (g_sync_next == std::numeric_limits<std::int64_t>::max()) return -3;
+  const auto id = g_sync_next;
+  if (!g_conds.emplace(id, c).second) return -3;
+  ++g_sync_next;
+  *handle = id;
+  return 0;
 }
 std::int64_t guest_cond_wait(std::int64_t cond, std::int64_t* mh, std::int64_t timeout_us) {
   auto c = find_cond(cond);
@@ -459,7 +477,14 @@ std::int64_t guest_cond_destroy(std::int64_t* handle) {
   if (!handle) return -2;
   std::lock_guard<std::mutex> g(g_sync_mu);
   auto i = g_conds.find(*handle); if (i == g_conds.end()) return -2;
-  ::pthread_cond_destroy(&i->second->c); g_conds.erase(i); *handle = 0; return 0;
+  // Wait/wake lookups keep a reference until their native call has returned. Refuse
+  // before pthread_cond_destroy: destroying with blocked waiters is undefined by POSIX.
+  if (i->second.use_count() != 1) return -3;
+  if (::pthread_cond_destroy(&i->second->c) != 0) return -3;
+  i->second->initialized = false;
+  g_conds.erase(i);
+  *handle = 0;
+  return 0;
 }
 std::int64_t guest_sema_create(std::int64_t* handle, std::int64_t initial, std::int64_t max) {
   if (!handle || max <= 0 || max > 0x7fffffff || initial < 0 || initial > max) return -2;
