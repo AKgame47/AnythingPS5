@@ -22,6 +22,13 @@ namespace pnr::compat {
 // Memory Services: aligned allocation + usage tracking.
 class MemoryService {
 public:
+  MemoryService() = default;
+  // Stop all callers before destruction. Releases allocations still owned by this service.
+  ~MemoryService();
+  MemoryService(const MemoryService&) = delete;
+  MemoryService& operator=(const MemoryService&) = delete;
+  MemoryService(MemoryService&&) = delete;
+  MemoryService& operator=(MemoryService&&) = delete;
   void* allocate(std::size_t size, std::size_t alignment = 16);
   // Frees only pointers currently tracked by this service. Null/foreign pointers are ignored.
   // Raw pointers cannot distinguish stale aliases after an address has been allocated again.
