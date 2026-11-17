@@ -4,6 +4,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <system_error>
 #include <vector>
 
@@ -14,6 +15,16 @@
 #endif
 
 namespace pnr::compat {
+
+namespace {
+void free_aligned(void* p) noexcept {
+#if defined(__unix__) || defined(__APPLE__)
+  ::free(p);
+#else
+  ::_aligned_free(p);
+#endif
+}
+}  // namespace
 
 // --- MemoryService ---------------------------------------------------------
 void* MemoryService::allocate(std::size_t size, std::size_t alignment) {
@@ -28,9 +39,10 @@ void* MemoryService::allocate(std::size_t size, std::size_t alignment) {
   p = ::_aligned_malloc(size, alignment);  // Windows path (untested here)
 #endif
   if (!p) return nullptr;
+  std::unique_ptr<void, decltype(&free_aligned)> pending(p, &free_aligned);
   std::lock_guard<std::mutex> lock(mutex_);
-  live_[p] = size;
-  return p;
+  if (!live_.emplace(p, size).second) return nullptr;
+  return pending.release();
 }
 
 void MemoryService::deallocate(void* p) {
@@ -41,11 +53,7 @@ void MemoryService::deallocate(void* p) {
     // Foreign pointers and repeats with no intervening address reuse are no-ops.
     if (live_.erase(p) == 0) return;
   }
-#if defined(__unix__) || defined(__APPLE__)
-  ::free(p);
-#else
-  ::_aligned_free(p);
-#endif
+  free_aligned(p);
 }
 
 std::size_t MemoryService::bytes_outstanding() const {
