@@ -1310,3 +1310,14 @@ failures, before more texture features land on the shim.
 - This adds real allocation-failure coverage through open, beyond S47's explicit guard unwind.
   It does not inject mutex errors or verify arbitrary guest pointers, Sony ABI, every allocator
   implementation or Windows. No production runtime behavior changes in this slice.
+
+
+## Slice S58 notes (ThreadService self-join refusal)
+- join_all checks for the calling worker under the registry mutex before draining entries.
+  It throws logic_error without changing the map if the caller is one of its tracked threads.
+  Previously self-join threw only after draining, leaving joinable threads destroyed on unwind.
+- A bounded child regression starts two workers, one calling join_all after publication. It
+  checks refusal, both registry entries retained, then successful joining by the owner. The
+  old implementation terminates this child; the fixed implementation completes normally.
+- Scope is this finite self-join refusal and normal owner recovery. It does not add a destructor,
+  define concurrent drains, or recover from every native join error or throwing worker callback.
