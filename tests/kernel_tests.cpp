@@ -211,6 +211,26 @@ void pnr_kernel_tests(int& pass, int& fail) {
     check(guest_sema_destroy(&h) == 0 && h == 0, "sema-overflow: cleanup clears the handle");
   }
 
+  // S52: a huge finite timeout must remain wakeable, not overflow into an immediate timeout.
+  {
+    std::int64_t h = 0;
+    check(guest_sema_create(&h, 0, 1) == 0, "sema-timeout: empty semaphore created");
+    std::atomic<bool> started{false};
+    std::atomic<std::int64_t> result{12345};
+    std::thread waiter([&] {
+      started.store(true);
+      result.store(guest_sema_wait(h, 1, std::numeric_limits<std::int64_t>::max()));
+    });
+    while (!started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    check(result.load() == 12345, "sema-timeout: INT64_MAX microseconds does not expire immediately");
+    check(guest_sema_signal(h, 1) == 0, "sema-timeout: signal succeeds during extreme wait");
+    waiter.join();
+    check(result.load() == 0, "sema-timeout: extreme wait consumes the signalled permit");
+    check(guest_sema_wait(h, 1, 0) == -4, "sema-timeout: no permit remains after successful wait");
+    check(guest_sema_destroy(&h) == 0, "sema-timeout: semaphore cleaned up");
+  }
+
   // Entry args.
   auto args = build_entry_args({"/game/eboot.elf", "-x"});
   std::uint64_t argc = 0, a0 = 0, a2 = 1, envp = 1;
