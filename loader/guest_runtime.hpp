@@ -113,6 +113,7 @@ std::int64_t guest_cond_init(std::int64_t* handle);
 // Waits on cond with the guest mutex (the existing guest_mutex_op handle). timeout_us < 0 waits forever.
 std::int64_t guest_cond_wait(std::int64_t cond, std::int64_t* mutex_handle, std::int64_t timeout_us);
 std::int64_t guest_cond_wake(std::int64_t cond, bool all);
+// Refuses while a wait/wake call retains the object. Failure leaves the handle intact.
 std::int64_t guest_cond_destroy(std::int64_t* handle);
 std::int64_t guest_sema_create(std::int64_t* handle, std::int64_t initial, std::int64_t max);
 std::int64_t guest_sema_wait(std::int64_t sema, std::int64_t need, std::int64_t timeout_us);  // <0 forever
