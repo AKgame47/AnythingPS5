@@ -1297,3 +1297,16 @@ failures, before more texture features land on the shim.
   fixed probes pass in Release and local ASan+UBSan. The new CTest is required by CI.
 - Scope is those finite allocation failures and successful recovery, not native pthread-create
   failure injection, throwing callbacks, concurrent teardown, join failure or Windows runtime.
+
+
+## Slice S57 notes (actual file-open allocation failures)
+- A separate required Linux CTest now injects bad_alloc only after native open succeeds.
+  The first two post-open allocations exercise the Entry path string and map node; wrapped
+  close counts the exact pending descriptor. Eight checks cover exception propagation,
+  exactly one close, no consumed guest descriptor number, and subsequent open/close.
+- Both failure positions pass with the existing S47 pending owner. A temporary negative
+  control removing only that owner fails both exact-close checks; production code was restored
+  unchanged before the build and validation gates. The test cleans negative-control leaks.
+- This adds real allocation-failure coverage through open, beyond S47's explicit guard unwind.
+  It does not inject mutex errors or verify arbitrary guest pointers, Sony ABI, every allocator
+  implementation or Windows. No production runtime behavior changes in this slice.
