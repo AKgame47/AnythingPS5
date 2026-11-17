@@ -214,6 +214,12 @@ void ThreadService::join_all() {
   std::map<uint64_t, std::thread> drained;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    const auto caller = std::this_thread::get_id();
+    for (const auto& [id, thread] : threads_) {
+      (void)id;
+      if (thread.get_id() == caller)
+        throw std::logic_error("ThreadService cannot join its calling worker");
+    }
     drained.swap(threads_);
   }
   for (auto& [id, t] : drained)
